@@ -124,11 +124,21 @@ AppDialog {
                 text: AppController.processingDevice === "gpu" && root.draftProvider === "omnivoice"
                     ? qsTr("Máy đang dùng GPU. OmniVoice GPU thường xử lý nhanh hơn; bạn vẫn có thể chọn CPU.")
                     : qsTr("Chế độ CPU: đổi bộ xử lý trong Cài đặt → Chung để sử dụng OmniVoice GPU.")
-                visible: AppController.processingDevice !== "gpu" || root.draftProvider === "omnivoice"
+                visible: root.draftProvider.indexOf("omnivoice") === 0
+                    && (AppController.processingDevice !== "gpu" || root.draftProvider === "omnivoice")
                 color: Theme.textMuted
                 font.pixelSize: TypeScale.metadata
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: root.draftProvider === "edge"
+                text: qsTr("Cần Internet. Nội dung phụ đề được gửi tới Microsoft để tạo giọng.")
+                color: Theme.textMuted
+                font.pixelSize: TypeScale.metadata
+                wrapMode: Text.Wrap
             }
 
             VoicePicker {

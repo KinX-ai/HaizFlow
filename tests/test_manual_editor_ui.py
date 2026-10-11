@@ -117,7 +117,8 @@ def test_manual_layout_has_one_toolbar_and_on_demand_comparison():
     assert '{label: qsTr("Watermark"), stageIndex: 7}' in workspace
     assert 'label: qsTr("Che phụ đề")' in workspace
     assert "EditorDockGroup {" in workspace
-    assert 'onExportRequested: {\n                root.selectedStageIndex = 6;' in workspace
+    assert 'if (!manualEditorToolbar.exportEnabled)' in workspace
+    assert 'root.selectedStageIndex = 6;' in workspace
     assert 'root.activatePanel("tasks", "right");' in workspace
     assert '"voice": 4, "source-audio": 5, "music": 5' in workspace
     assert "ManualAssetPanel {" not in workspace
@@ -127,8 +128,8 @@ def test_manual_layout_has_one_toolbar_and_on_demand_comparison():
     assert "resetWorkspaceLayout()" in workspace
     assert "CornerScaleHandle {" not in (QML_DIR / "EditorOverlayLayer.qml").read_text(encoding="utf-8")
     assert "RotationHandle {" not in (QML_DIR / "EditorOverlayLayer.qml").read_text(encoding="utf-8")
-    assert "model: root.visibleTicks" in timeline
-    assert "model: root.visibleSegments" in timeline
+    assert "model: visibleTickModel" in timeline
+    assert "model: visibleSegmentModel" in timeline
     assert "function toggleTrackCollapsed(trackId)" not in timeline
     assert 'qsTr("Dòng thời gian")' not in timeline
     assert 'qsTr("Đoạn đã chọn' not in timeline
@@ -140,7 +141,7 @@ def test_manual_layout_has_one_toolbar_and_on_demand_comparison():
     assert 'iconName: "zoomIn"' in toolbar
     assert "onPreviewZoomInRequested:" in workspace
     assert "onPreviewZoomOutRequested:" in workspace
-    assert "root.zoomAt(event.x" in timeline
+    assert "root.queueWheelZoom(event.x" in timeline
 
 
 def test_voice_and_subtitles_share_one_timeline_lane_without_merging_data():

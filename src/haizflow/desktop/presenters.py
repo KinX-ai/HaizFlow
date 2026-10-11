@@ -196,6 +196,12 @@ def format_memory_size(value: int) -> str:
 
 
 def voice_options_for_language(language_code: str, ui_language: str, provider: str = "omnivoice"):
+    if provider == "edge":
+        from haizflow.core.edge_voices import EDGE_VOICES
+
+        return [{"voice": item[0], "label": item[1] if ui_language == "vi" else item[2],
+                 "category": "natural", "categoryLabel": "Edge TTS"}
+                for item in EDGE_VOICES.get(language_code, ())]
     options = []
     for item in OMNIVOICE_TTS_VOICES:
         voice, label = item[:2]

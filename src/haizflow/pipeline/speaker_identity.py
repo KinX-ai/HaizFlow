@@ -15,10 +15,10 @@ from haizflow.utils.ffmpeg import _binary
 from haizflow.utils.atomic_file import atomic_json
 
 from haizflow.core.bundled_models import MODEL_FILE, MODEL_SIZE, MODEL_SHA256, MODEL_REVISION, MODEL_URL as MODEL_URL
-IDENTITY_VERSION = "wespeaker-stable-target-voices-v4-periodic-pitch"
+IDENTITY_VERSION = "wespeaker-stable-target-voices-v5-expressive-consensus"
 
 
-def _pitch_samples(audio):
+def _pitch_samples(audio, *, preserve_gaps=False):
     """Reliable F0 frames at 16 kHz, using YIN's normalized difference.
 
     Unlike windowed autocorrelation peaks, the first periodic minimum is
@@ -33,9 +33,11 @@ def _pitch_samples(audio):
         return []
     frames = np.lib.stride_tricks.sliding_window_view(audio, 1024)[::800].copy()
     frames -= frames.mean(axis=1, keepdims=True)
-    frames = frames[np.sqrt(np.mean(frames ** 2, axis=1)) >= 20]
-    if not len(frames):
+    voiced = np.sqrt(np.mean(frames ** 2, axis=1)) >= 20
+    if not voiced.any():
         return []
+    if not preserve_gaps:
+        frames = frames[voiced]
     max_lag = 229
     correlation = np.fft.irfft(np.abs(np.fft.rfft(frames, n=2048)) ** 2, n=2048)[:, :max_lag + 1]
     energy = np.concatenate((np.zeros((len(frames), 1)), np.cumsum(frames ** 2, axis=1)), axis=1)
@@ -45,7 +47,11 @@ def _pitch_samples(audio):
     difference /= 1024 - lags
     normalized = difference * lags / np.maximum(np.cumsum(difference, axis=1), 1e-12)
     estimates = []
-    for curve in normalized:
+    for frame_index, curve in enumerate(normalized):
+        if preserve_gaps and not voiced[frame_index]:
+            estimates.append(float("nan"))
+            continue
+        count = len(estimates)
         # Only accept clearly periodic frames; noise/silence is not evidence
         # of either a male or female voice.
         for index in range(39, max_lag - 1):
@@ -55,6 +61,8 @@ def _pitch_samples(audio):
                           if denominator > 1e-12 else 0.0)
                 estimates.append(16000 / (index + 1 + float(np.clip(offset, -.5, .5))))
                 break
+        if preserve_gaps and len(estimates) == count:
+            estimates.append(float("nan"))
     return estimates
 
 
@@ -75,6 +83,40 @@ def _voice_pitch_profile(samples):
     kind = "male" if lower < 175 else "female"
     uncertain = len(values) < 20 or (160 <= lower <= 200) or upper - lower > 85
     return kind, bool(uncertain), round(float(median), 1)
+
+
+def _speaker_voice_profile(turn_samples):
+    """Retain sustained low-register evidence even when shouting dominates.
+
+    Pooling every frame weights long/high phrases too heavily. A habitual
+    register must be sustained within one turn, not assembled from isolated
+    subharmonic errors or from the ends of several unrelated turns. This
+    chooses an acoustic preset family, not a person's gender identity.
+    """
+    import numpy as np
+
+    turns = [np.asarray(samples, dtype=np.float64) for samples in turn_samples]
+    kind, uncertain, pitch = _voice_pitch_profile([value for turn in turns for value in turn])
+    for turn in turns:
+        if len(turn) < 8:
+            continue
+        # Require 400 ms of periodic evidence within at most one second.
+        # Normal speech has unvoiced consonants: allow gaps under 200 ms,
+        # but never bridge a higher-register sample or a long silent gap.
+        for start in range(len(turn) - 7):
+            window = turn[start:start + 20]
+            higher_or_invalid = np.flatnonzero(np.isfinite(window) & ((window < 70) | (window >= 160)))
+            if len(higher_or_invalid):
+                window = window[:higher_or_invalid[0]]
+            positions = np.flatnonzero(np.isfinite(window))
+            if len(positions) < 8:
+                continue
+            values = window[positions]
+            gaps = ~np.isfinite(window[positions[0]:positions[-1] + 1])
+            long_gap = len(gaps) >= 4 and np.lib.stride_tricks.sliding_window_view(gaps, 4).all(axis=1).any()
+            if not long_gap and np.all((values >= 70) & (values < 160)) and np.ptp(values) <= 45:
+                return "male", uncertain or kind != "male", pitch
+    return kind, uncertain, pitch
 
 
 def verify_model(root: Path) -> Path:
@@ -183,6 +225,57 @@ def _assign_identities(vectors, anchors, anchor_labels):
     return labels, scores
 
 
+def _reconcile_expressive_groups(vectors, labels):
+    """Reconcile style-split identities using independent turn exemplars.
+
+    Complete-link anchor clustering can split quiet and shouted speech.
+    Merge only strongly matching aggregate identities with corroborating
+    turns on BOTH sides, and a margin over competing identities. Never use
+    pitch or adjacency as evidence that two turns belong to the same person.
+    Representatives are bounded so long videos cannot produce an N² matrix.
+    """
+    import numpy as np
+
+    identities = sorted(set(labels))
+    if len(identities) < 2:
+        return labels
+    members = [np.flatnonzero(np.asarray(labels) == identity) for identity in identities]
+    centers = np.asarray([vectors[group].mean(axis=0) for group in members])
+    centers /= np.maximum(np.linalg.norm(centers, axis=1, keepdims=True), 1e-8)
+    similarity = centers @ centers.T
+    np.fill_diagonal(similarity, -np.inf)
+    allowed = np.eye(len(identities), dtype=bool)
+    candidates = []
+    for left in range(len(identities)):
+        for right in range(left + 1, len(identities)):
+            score = float(similarity[left, right])
+            if score < .70 or min(len(members[left]), len(members[right])) < 2:
+                continue
+            others = [i for i in range(len(identities)) if i not in (left, right)]
+            competing = max((max(similarity[left, i], similarity[right, i]) for i in others), default=-1)
+            if score - competing < .12:
+                continue
+            examples = [vectors[group[np.linspace(0, len(group) - 1, min(24, len(group)), dtype=int)]]
+                        for group in (members[left], members[right])]
+            matches = examples[0] @ examples[1].T >= .52
+            if np.count_nonzero(matches.any(axis=0)) < 2 or np.count_nonzero(matches.any(axis=1)) < 2:
+                continue
+            allowed[left, right] = allowed[right, left] = True
+            candidates.append((score, left, right))
+    groups = [{i} for i in range(len(identities))]
+    for _score, left, right in sorted(candidates, reverse=True):
+        left_group = next(group for group in groups if left in group)
+        right_group = next(group for group in groups if right in group)
+        if left_group is right_group:
+            continue
+        # Do not chain A≈B≈C into A=C when A/C have no direct evidence.
+        if all(allowed[a, b] for a in left_group for b in right_group):
+            left_group.update(right_group)
+            groups.remove(right_group)
+    remap = {identities[old]: new for new, group in enumerate(sorted(groups, key=min)) for old in group}
+    return [remap[label] for label in labels]
+
+
 def _label_turns(vectors, valid_indices, segments):
     import numpy as np
 
@@ -194,7 +287,15 @@ def _label_turns(vectors, valid_indices, segments):
         anchors = list(range(len(valid_indices)))
     if len(anchors) > 192:
         anchors = [anchors[i] for i in np.linspace(0, len(anchors) - 1, 192, dtype=int)]
-    return _assign_identities(vectors, anchors, _cluster(vectors[anchors]))
+    labels, scores = _assign_identities(vectors, anchors, _cluster(vectors[anchors]))
+    reconciled = _reconcile_expressive_groups(vectors, labels)
+    if reconciled != labels:
+        _assignments, scores = _assign_identities(vectors, anchors, [reconciled[anchor] for anchor in anchors])
+        # Recompute confidence for the merged profiles, but retain established
+        # turn memberships. A changed centroid must not move unrelated short
+        # turns between speakers as a side effect of reconciling two styles.
+        return reconciled, scores
+    return labels, scores
 
 
 def identify(audio_path: str, segments: list[dict], video_id: str, progress=None, *,
@@ -253,7 +354,7 @@ def identify(audio_path: str, segments: list[dict], video_id: str, progress=None
                 valid_indices.append(index)
                 # Pitch is used only to choose a natural target-language preset,
                 # never as the identity classifier.
-                pitches[index] = _pitch_samples(audio)
+                pitches[index] = _pitch_samples(audio, preserve_gaps=True)
                 if progress:
                     progress(index + 1, len(segments))
     if not embeddings:
@@ -291,9 +392,8 @@ def identify(audio_path: str, segments: list[dict], video_id: str, progress=None
     ]
     voices, pitch_profiles, counts = {}, {}, {"male": 0, "female": 0}
     for label in sorted(set(labels)):
-        samples = [pitch for index, identity in label_by_index.items() if identity == label
-                   for pitch in pitches[index]]
-        kind, uncertain, pitch = _voice_pitch_profile(samples)
+        turns = [pitches[index] for index, identity in label_by_index.items() if identity == label]
+        kind, uncertain, pitch = _speaker_voice_profile(turns)
         pitch_profiles[label] = (uncertain, pitch)
         choices = female if kind == "female" else male
         voices[label] = choices[counts[kind] % len(choices)]

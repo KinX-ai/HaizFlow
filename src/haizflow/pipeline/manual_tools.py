@@ -396,6 +396,7 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
             or "omnivoice"
         )
         voice = str(override.get("voice") or voice_selection_identity(getattr(video, "tts_voice", ""), speaker_mode))
+        from haizflow.pipeline.edge_tts_backend import EDGE_CACHE_VERSION
         signatures.append(
             manual_artifacts.signature(
                 preprocess_text_for_tts(str(segment.get("text") or "")),
@@ -410,6 +411,7 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
                 index if speaker_mode == "multiple" else 0,
                 *_generation_token(video, "voice"),
                 _voice_cache_version(video),
+                *((EDGE_CACHE_VERSION,) if provider == "edge" else ()),
             )
         )
     return signatures

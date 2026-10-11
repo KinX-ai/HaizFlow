@@ -16,6 +16,7 @@ from haizflow.pipeline.process_registry import check_cancellation
 from haizflow.config import RUNTIME_DATA_DIR
 from haizflow.services import secure_credentials
 from haizflow.services.video_store import log_to_video
+from haizflow.services.translation_timing import timing_budget
 
 CREDENTIAL_TARGET = "HaizFlow/Gemini/APIKey"
 API_KEYS_URL = "https://aistudio.google.com/api-keys"
@@ -163,17 +164,112 @@ def _chunks(texts: list[str]):
         yield chunk
 
 
+class _ResponseError(ValueError):
+    def __init__(self, reason: str, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.reason = reason
+        self.retryable = retryable
+
+
+def _parse_translations(answer, chunk: list[tuple[int, str]]) -> list[str]:
+    """Accept complete answers only; never repair/truncate subtitle content."""
+    invalid = "Gemini không trả về dữ liệu dịch hợp lệ. Dữ liệu cũ được giữ nguyên."
+    if not isinstance(answer, dict):
+        raise _ResponseError("invalid_envelope", invalid)
+    feedback = answer.get("promptFeedback")
+    if isinstance(feedback, dict) and feedback.get("blockReason") not in {None, "", "BLOCK_REASON_UNSPECIFIED"}:
+        raise _ResponseError("blocked_prompt", "Gemini chặn nội dung yêu cầu. Dữ liệu cũ được giữ nguyên.", retryable=False)
+    candidates = answer.get("candidates")
+    if not isinstance(candidates, list) or not candidates or not isinstance(candidates[0], dict):
+        raise _ResponseError("missing_candidate", invalid)
+    candidate = candidates[0]
+    finish = candidate.get("finishReason")
+    if finish == "MAX_TOKENS":
+        raise _ResponseError("token_limit", "Gemini dừng trước khi dịch đủ câu. Dữ liệu cũ được giữ nguyên.")
+    if finish not in {None, "", "STOP", "FINISH_REASON_UNSPECIFIED", "OTHER", "MALFORMED_RESPONSE"}:
+        raise _ResponseError("blocked_response", "Gemini không hoàn tất bản dịch do giới hạn nội dung. Dữ liệu cũ được giữ nguyên.", retryable=False)
+    content = candidate.get("content")
+    parts = content.get("parts") if isinstance(content, dict) else None
+    if not isinstance(parts, list):
+        raise _ResponseError("missing_parts", invalid)
+    text = "".join(part["text"] for part in parts if isinstance(part, dict)
+                   and not part.get("thought") and isinstance(part.get("text"), str)).strip()
+    # Tolerate a complete code fence, not arbitrary prose or partial JSON.
+    lines = text.splitlines()
+    if len(lines) >= 3 and lines[0].strip().lower() in {"```", "```json"} and lines[-1].strip() == "```":
+        text = "\n".join(lines[1:-1]).strip()
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        raise _ResponseError("invalid_json", invalid) from None
+    translations = parsed.get("translations") if isinstance(parsed, dict) else None
+    if not isinstance(translations, list) or len(translations) != len(chunk):
+        raise _ResponseError("missing_sentences", "Gemini trả về thiếu câu dịch. Dữ liệu cũ được giữ nguyên.")
+    expected = {index for index, _ in chunk}
+    output = {}
+    for item in translations:
+        if (not isinstance(item, dict) or type(item.get("id")) is not int
+                or item["id"] not in expected or item["id"] in output
+                or not isinstance(item.get("text"), str) or not item["text"].strip()):
+            raise _ResponseError("invalid_sentence_mapping", "Gemini trả về sai mã câu hoặc câu dịch rỗng. Dữ liệu cũ được giữ nguyên.")
+        output[item["id"]] = item["text"].strip()
+    return [output[index] for index, _ in chunk]
+
+
+def _response_diagnostic(answer) -> str:
+    """Only allowlisted counters/state; no raw response, subtitle or secret."""
+    if not isinstance(answer, dict):
+        return "finish=unknown"
+    candidates = answer.get("candidates")
+    candidate = candidates[0] if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else {}
+    finish = candidate.get("finishReason")
+    safe_finish = finish if isinstance(finish, str) and finish in {
+        "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT",
+        "SPII", "LANGUAGE", "OTHER", "MALFORMED_RESPONSE", "FINISH_REASON_UNSPECIFIED",
+    } else "unknown"
+    values = [f"finish={safe_finish}"]
+    usage = answer.get("usageMetadata")
+    if isinstance(usage, dict):
+        for field in ("candidatesTokenCount", "thoughtsTokenCount", "totalTokenCount"):
+            value = usage.get(field)
+            if type(value) is int and value >= 0:
+                values.append(f"{field}={value}")
+    return ", ".join(values)
+
+
+def _retry_delay(seconds: float, video_id: str) -> None:
+    # Pause/cancel must also interrupt backoff, not only the next HTTP request.
+    remaining = seconds
+    while remaining > 0:
+        check_cancellation(video_id)
+        interval = min(.1, remaining)
+        time.sleep(interval)
+        remaining -= interval
+
+
 def _request_chunk(
     chunk: list[tuple[int, str]], *, key: str, model: str,
     source_language: str, target_language: str, video_id: str = "",
+    speech_durations: list[float] | None = None,
 ) -> list[str]:
     entries = [{"id": index, "text": text} for index, text in chunk]
+    for entry in entries:
+        index = entry["id"]
+        if speech_durations is not None:
+            entry.update(timing_budget(speech_durations[index], target_language))
+    timing = (
+        " Each entry's speech_seconds is its original speaking duration. Use brief, natural spoken phrasing "
+        "that fits a similar duration; target_spoken_units/spoken_unit are soft length guidance, not output fields. "
+        "Never pad short originals. Prefer concise equivalents without losing facts, negation, names, numbers or tone. "
+        "Accuracy takes priority over the approximate length target."
+        if speech_durations is not None else ""
+    )
     payload = {
         "systemInstruction": {"parts": [{"text": (
             "Translate each subtitle into " + target_language + ". Source language: "
             + source_language + ". Keep the same id and order. Preserve meaning, "
             "speaker tone, names and punctuation. Return only concise translations; "
-            "never merge, omit or invent a subtitle."
+            "never merge, omit or invent a subtitle." + timing
         )}]},
         "contents": [{"role": "user", "parts": [{
             "text": json.dumps(entries, ensure_ascii=False, separators=(",", ":")),
@@ -183,8 +279,8 @@ def _request_chunk(
             "candidateCount": 1,
             # A cap does not prepay tokens. Leave room for language expansion,
             # JSON framing and low-level reasoning so the last cue is not cut.
-            "maxOutputTokens": min(8192, max(1024, sum(len(text) for _, text in chunk) * 4)),
-            "thinkingConfig": {"thinkingLevel": "minimal" if model == "gemini-3.5-flash-lite" else "low"},
+            "maxOutputTokens": min(8192, max(2048, 1024 + len(chunk) * 64, sum(len(text) for _, text in chunk) * 4)),
+            "thinkingConfig": {"thinkingLevel": "minimal" if model in {"gemini-3.1-flash-lite", "gemini-3.5-flash-lite"} else "low", "includeThoughts": False},
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "OBJECT",
@@ -196,10 +292,12 @@ def _request_chunk(
             },
         },
     }
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     url = _ENDPOINT.format(model=model)
     for attempt in range(3):
+        check_cancellation(video_id)
+        answer = None
         try:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             outgoing = request.Request(
                 url, data=body,
                 headers={"Content-Type": "application/json", "x-goog-api-key": key},
@@ -207,17 +305,8 @@ def _request_chunk(
             )
             with request.urlopen(outgoing, timeout=90) as response:
                 answer = json.load(response)
-            parts = answer["candidates"][0]["content"]["parts"]
-            parsed = json.loads("".join(str(part.get("text", "")) for part in parts))
-            translations = parsed["translations"]
-            if not isinstance(translations, list) or len(translations) != len(chunk):
-                raise RuntimeError("Gemini trả về thiếu câu dịch. Dữ liệu cũ được giữ nguyên.")
-            expected = [index for index, _ in chunk]
-            ids = [item.get("id") for item in translations]
-            output = [str(item.get("text") or "").strip() for item in translations]
-            if ids != expected or not all(output):
-                raise RuntimeError("Gemini trả về sai thứ tự hoặc câu dịch rỗng. Dữ liệu cũ được giữ nguyên.")
-            return output
+            check_cancellation(video_id)
+            return _parse_translations(answer, chunk)
         except error.HTTPError as exc:
             if video_id:
                 log_to_video(
@@ -225,7 +314,7 @@ def _request_chunk(
                     component="TRANSLATE", level="WARNING",
                 )
             if exc.code in {408, 429, 500, 502, 503, 504} and attempt < 2:
-                time.sleep(min(8, 2 ** attempt + random.random()))
+                _retry_delay(min(8, 2 ** attempt + random.random()), video_id)
                 continue
             if exc.code in {401, 403}:
                 raise RuntimeError(
@@ -248,11 +337,24 @@ def _request_chunk(
             raise RuntimeError(f"Gemini không xử lý được yêu cầu (HTTP {exc.code}).") from None
         except (error.URLError, TimeoutError):
             if attempt < 2:
-                time.sleep(min(8, 2 ** attempt + random.random()))
+                _retry_delay(min(8, 2 ** attempt + random.random()), video_id)
                 continue
             raise RuntimeError("Không kết nối được Gemini. Kiểm tra mạng rồi thử lại.") from None
-        except (KeyError, IndexError, TypeError, ValueError):
-            raise RuntimeError("Gemini không trả về dữ liệu dịch hợp lệ. Dữ liệu cũ được giữ nguyên.") from None
+        except (TypeError, ValueError) as exc:
+            check_cancellation(video_id)
+            failure = exc if isinstance(exc, _ResponseError) else _ResponseError(
+                "invalid_envelope_json", "Gemini không trả về dữ liệu dịch hợp lệ. Dữ liệu cũ được giữ nguyên.",
+            )
+            retry = failure.retryable and attempt < 2
+            if video_id:
+                log_to_video(video_id, f"Gemini {model}: response={failure.reason}, {_response_diagnostic(answer)}, "
+                             f"attempt={attempt + 1}/3, sentences={len(chunk)}, "
+                             f"token_limit={payload['generationConfig']['maxOutputTokens']}, retry={retry}.",
+                             component="TRANSLATE", level="WARNING")
+            if not retry:
+                raise RuntimeError(str(failure)) from None
+            if failure.reason == "token_limit":
+                payload["generationConfig"]["maxOutputTokens"] = 8192
     raise RuntimeError("Gemini không phản hồi sau các lần thử.")
 
 
@@ -260,7 +362,13 @@ def translate_texts(
     texts: list[str], *, model: str, source_language: str,
     target_language: str, video_id: str, progress_callback=None,
     initial_translations: list[str | None] | None = None, result_callback=None,
+    speech_durations: list[float] | None = None,
 ) -> list[str]:
+    if speech_durations is not None:
+        if len(speech_durations) != len(texts):
+            raise ValueError("Each source sentence must have a speech duration.")
+        for duration in speech_durations:
+            timing_budget(duration, target_language)
     if model not in MODELS:
         raise ValueError("Model Gemini không được hỗ trợ.")
     key = active_key()
@@ -281,6 +389,7 @@ def translate_texts(
         values = _request_chunk(
             chunk, key=key, model=model,
             source_language=source_language, target_language=target_language, video_id=video_id,
+            speech_durations=speech_durations,
         )
         for (index, _), value in zip(chunk, values):
             output[index] = value

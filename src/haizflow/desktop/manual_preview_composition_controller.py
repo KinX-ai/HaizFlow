@@ -10,6 +10,7 @@ from haizflow.services import editor_documents
 
 class ManualPreviewCompositionController(QObject):
     frameChanged = Signal()
+    overlaysChanged = Signal()
     _spriteReady = Signal(str, object)
 
     def __init__(self, document_model, parent=None):
@@ -17,6 +18,8 @@ class ManualPreviewCompositionController(QObject):
         self._model = document_model
         self._time_ms = 0
         self._frame: dict = {"timeMs": 0, "overlays": [], "sourceTimeMs": 0}
+        self._overlay_clips = []
+        self._assets = {}
         self._sprites: dict[str, dict] = {}
         self._sprite_pending: set[str] = set()
         self._sprite_executor = ThreadPoolExecutor(
@@ -40,33 +43,43 @@ class ManualPreviewCompositionController(QObject):
     def timeMs(self) -> int:
         return self._time_ms
 
+    @Property("QVariantList", notify=overlaysChanged)
+    def overlays(self) -> list:
+        return list(self._frame["overlays"])
+
     @Slot(float)
     def setTime(self, seconds: float) -> None:
         next_time = max(0, round(float(seconds or 0) * 1000))
         if next_time == self._time_ms:
             return
         self._time_ms = next_time
-        self.refresh()
+        self._update_frame()
 
     @Slot()
     def refresh(self) -> None:
+        # Index document edits, not every playback tick. Long projects can
+        # contain thousands of captions/voice clips that never render here.
+        document = self._model.document_object
+        visible_tracks = {track.track_id for track in document.tracks if track.visible} if document else set()
+        self._overlay_clips = [
+            clip for clip in document.clips
+            if clip.track_id == "overlays" and clip.track_id in visible_tracks and clip.enabled
+        ] if document else []
+        self._assets = {asset.asset_id: asset for asset in document.assets} if document else {}
+        self._update_frame()
+
+    def _update_frame(self) -> None:
         document = self._model.document_object
         if document is None:
             next_frame = {"timeMs": self._time_ms, "overlays": [], "sourceTimeMs": self._time_ms}
         else:
-            visible_tracks = {track.track_id for track in document.tracks if track.visible}
             overlays = []
-            source_asset = editor_documents.asset_by_id(
-                document, document.sequence.source_asset_id
-            )
+            source_asset = self._assets.get(document.sequence.source_asset_id)
             reference_width = max(1, int(source_asset.width if source_asset else 0) or 1920)
             reference_height = max(1, int(source_asset.height if source_asset else 0) or 1080)
-            for clip in document.clips:
+            for clip in self._overlay_clips:
                 if (
-                    clip.track_id not in visible_tracks
-                    or clip.track_id != "overlays"
-                    or not clip.enabled
-                    or self._time_ms < clip.start_ms
+                    self._time_ms < clip.start_ms
                     or self._time_ms >= clip.start_ms + clip.duration_ms
                 ):
                     continue
@@ -88,7 +101,7 @@ class ManualPreviewCompositionController(QObject):
                 transform["opacity_percent"] = editor_documents.evaluate_keyframes(
                     clip, "opacity", self._time_ms, clip.transform.opacity_percent
                 )
-                asset = editor_documents.asset_by_id(document, clip.asset_id)
+                asset = self._assets.get(clip.asset_id)
                 asset_payload = asset.model_dump() if asset else {}
                 asset_payload["sourceUrl"] = (
                     QUrl.fromLocalFile(asset.path) if asset and asset.path else QUrl()
@@ -135,7 +148,10 @@ class ManualPreviewCompositionController(QObject):
             next_frame = {"timeMs": self._time_ms, "overlays": overlays, "sourceTimeMs": source_time}
         if next_frame == self._frame:
             return
+        overlays_changed = next_frame["overlays"] != self._frame["overlays"]
         self._frame = next_frame
+        if overlays_changed:
+            self.overlaysChanged.emit()
         self.frameChanged.emit()
 
     def _request_sprite(self, key, text, style, width, height) -> None:
@@ -165,7 +181,7 @@ class ManualPreviewCompositionController(QObject):
             return
         if isinstance(payload, dict) and payload.get("path"):
             self._sprites[key] = dict(payload)
-            self.refresh()
+            self._update_frame()
 
     def close(self) -> None:
         self._closed = True

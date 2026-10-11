@@ -1,4 +1,4 @@
-"""Local OmniVoice synthesis shared by automatic and manual workflows."""
+"""Voice synthesis shared by automatic and manual workflows."""
 
 import json
 import os
@@ -9,9 +9,11 @@ from haizflow.services.video_store import get_video, log_to_video
 
 
 def resolve_tts_provider(provider: str, target_language: str) -> str:
-    """Read retired provider values without calling an online TTS service."""
+    """Resolve explicit backends without changing a user's provider choice."""
     normalized = str(provider or "omnivoice").strip().lower()
-    if normalized in {"omnivoice", "omnivoice-gpu", "auto", "vieneu", "edge"}:
+    if normalized == "edge":
+        return "edge"
+    if normalized in {"omnivoice", "omnivoice-gpu", "auto", "vieneu"}:
         return "omnivoice"
     raise ValueError(f"Unsupported TTS provider: {provider}")
 
@@ -86,8 +88,6 @@ def generate_voice_parts(
     status_callback=None,
 ):
     backend = resolve_tts_provider(provider, target_language)
-    voice = normalize_voice(voice)
-    from haizflow.pipeline.omnivoice_tts import synthesize_batch_to_mp3
     device = "gpu" if provider.endswith("-gpu") else "cpu"
 
     with open(segments_json_path, "r", encoding="utf-8") as file:
@@ -107,6 +107,32 @@ def generate_voice_parts(
     total = len(requested_segments)
     document_total = len(segments)
     os.makedirs(voice_parts_dir, exist_ok=True)
+    if backend == "edge":
+        from haizflow.core.edge_voices import edge_voice
+        from haizflow.pipeline.edge_tts_backend import synthesize_many_to_mp3
+
+        edge_voice(voice, target_language)
+        log_to_video(video_id, "[TTS][SESSION_START] provider=edge backend=online concurrency=2 adaptive=true")
+
+        def requests():
+            for index, segment in requested_segments:
+                text = str((segment or {}).get("text") or "").strip() if isinstance(segment, dict) else ""
+                if not text:
+                    raise RuntimeError(f"Translated subtitle segment {index} is missing text.")
+                yield preprocess_text_for_tts(text), os.path.join(voice_parts_dir, f"voice_{index:04d}.mp3")
+
+        def report_completed(completed):
+            if status_callback:
+                status_callback("completed", completed, total)
+            if progress_callback:
+                progress_callback(completed, total)
+
+        synthesize_many_to_mp3(requests(), voice, video_id, language_id=target_language,
+                              process_registry_id=process_registry_id, on_completed=report_completed)
+        log_to_video(video_id, "Edge TTS generated and verified every requested voice segment.")
+        return
+    voice = normalize_voice(voice)
+    from haizflow.pipeline.omnivoice_tts import synthesize_batch_to_mp3
     pending = []
     current_video = get_video(video_id)
     current_files = dict((current_video.files if current_video else {}) or {})
@@ -138,7 +164,7 @@ def generate_voice_parts(
             raise RuntimeError(
                 "Multiple-speaker OmniVoice mode requires the current source speech and timestamped source transcript."
             )
-        from haizflow.pipeline.speaker_identity import _valid_map, prepare_speakers
+        from haizflow.pipeline.speaker_identity import IDENTITY_VERSION, _valid_map, prepare_speakers
 
         speaker_runtime_state = None
 
@@ -161,6 +187,7 @@ def generate_voice_parts(
         if not _valid_map(identified, source_segments):
             raise RuntimeError("Không xác định được giọng từng người nói. Hãy chạy lại nhận diện người nói.")
         source_segments = identified
+        log_to_video(video_id, f"[SPEAKERS][POLICY] version={IDENTITY_VERSION}")
         voice_map = dict((s["speaker_id"], s["speaker_voice"]) for s in source_segments)
         log_to_video(video_id, "[SPEAKERS][VOICE_MAP] " + " ".join(f"{key}={value}" for key, value in voice_map.items()))
         profiles = {s["speaker_id"]: (s.get("speaker_pitch_hz"), bool(s.get("speaker_voice_uncertain")))
@@ -270,8 +297,13 @@ def generate_single_voice(
     provider: str = "omnivoice",
     target_language: str = "vi",
 ):
-    """Create and verify a complete local narration file."""
-    resolve_tts_provider(provider, target_language)
+    """Create and verify a complete narration file with the selected provider."""
+    backend = resolve_tts_provider(provider, target_language)
+    if backend == "edge":
+        from haizflow.pipeline.edge_tts_backend import synthesize_to_mp3
+
+        return synthesize_to_mp3(preprocess_text_for_tts(text), voice, output_path, video_id,
+                                 language_id=target_language)
     device = "gpu" if provider.endswith("-gpu") else "cpu"
     voice = normalize_voice(voice)
     from haizflow.pipeline.omnivoice_tts import synthesize_to_mp3

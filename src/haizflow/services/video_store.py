@@ -416,7 +416,7 @@ def _migrate_video_metadata(raw_data: dict) -> tuple[dict, bool]:
             data["schema_version"] = 12
             # Preserve the historical provider until the final compatibility
             # normalization maps it to the available local engine.
-            data.setdefault("tts_provider", "edge")
+            data.setdefault("tts_provider", "omnivoice")
             version = 12
             continue
         if version == 12:
@@ -480,29 +480,28 @@ def _migrate_video_metadata(raw_data: dict) -> tuple[dict, bool]:
     # could write legacy provider/layout values without bumping the schema;
     # strict production models must remain able to open and repair them.
     data["mode"] = data.get("mode") if data.get("mode") in {"A", "review"} else "A"
-    # Keep old projects readable after retiring the online speech provider.
-    # Published audio files remain untouched; only future synthesis changes.
+    # Preserve explicit online/local choices without changing published audio.
     legacy_voice = str(data.get("tts_voice") or "")
-    if not legacy_voice.startswith("omnivoice:"):
+    if data.get("tts_provider") != "edge" and not legacy_voice.startswith("omnivoice:"):
         data["tts_voice"] = (
             "omnivoice:male"
             if legacy_voice in {"vi-VN-NamMinhNeural", "en-US-GuyNeural", "zh-CN-YunxiNeural"}
             else "omnivoice:female"
         )
-    if data.get("tts_provider") not in {"omnivoice", "omnivoice-gpu"}:
+    if data.get("tts_provider") not in {"omnivoice", "omnivoice-gpu", "edge"}:
         data["tts_provider"] = "omnivoice"
     files = data.get("files")
     if isinstance(files, dict) and isinstance(files.get("manual_voice_overrides"), dict):
         for override in files["manual_voice_overrides"].values():
             if isinstance(override, dict):
                 voice = str(override.get("voice") or "")
-                if not voice.startswith("omnivoice:"):
+                if override.get("provider") != "edge" and not voice.startswith("omnivoice:"):
                     override["voice"] = (
                         "omnivoice:male"
                         if voice in {"vi-VN-NamMinhNeural", "en-US-GuyNeural", "zh-CN-YunxiNeural"}
                         else "omnivoice:female"
                     )
-                if override.get("provider") not in {"omnivoice", "omnivoice-gpu"}:
+                if override.get("provider") not in {"omnivoice", "omnivoice-gpu", "edge"}:
                     override["provider"] = "omnivoice"
     if data.get("speech_recognition_model") not in {"small", "small-cpu", "small-gpu", "large-v3-turbo"}:
         data["speech_recognition_model"] = "small"

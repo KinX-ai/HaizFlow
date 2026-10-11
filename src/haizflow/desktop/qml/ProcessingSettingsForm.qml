@@ -161,6 +161,14 @@ GridLayout {
                 text: qsTr("Giọng đọc")
                 helpText: qsTr("Nhận diện nhiều người nói chọn giọng thư viện ổn định cho từng người; kết quả có thể cần chỉnh lại. Giọng nhân bản dùng mẫu do bạn cung cấp.")
             }
+            Text {
+                Layout.fillWidth: true
+                visible: root.ttsProvider === "edge"
+                text: qsTr("Cần Internet. Nội dung phụ đề được gửi tới Microsoft để tạo giọng.")
+                color: Theme.textMuted
+                font.pixelSize: TypeScale.metadata
+                wrapMode: Text.Wrap
+            }
             VoicePicker {
                 Layout.fillWidth: true
                 enabled: root.editable

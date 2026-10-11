@@ -26,6 +26,7 @@ dependencies = [
   "playwright==1.63.0",
   "pydub==0.25.1",
   "srt==3.5.3",
+  "edge-tts==7.2.8",
 ]
 
 [project.urls]

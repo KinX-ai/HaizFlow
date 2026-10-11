@@ -17,6 +17,7 @@ from haizflow.core.hardware import (
     runtime_profile,
     translation_model_preference,
 )
+from haizflow.services.translation_timing import timing_budget, timing_instruction
 
 
 _INFERENCE_BATCH_SIZE = max(1, min(8, int(os.getenv("HYMT2_INFERENCE_BATCH_SIZE", "4"))))
@@ -269,10 +270,13 @@ def _build_prompt(
     *,
     include_context: bool = True,
     strict_source_only: bool = False,
+    duration_seconds: float | None = None,
 ) -> str:
     source_text = texts[index].strip()
+    timing = timing_instruction(duration_seconds, target_language_name)
     if _is_standalone_label(source_text):
         return (
+            timing +
             f"Translate this standalone subtitle label into {target_language_name}. Translate only the "
             "[Source Text]. Preserve the exact identity of any named item, rank letter, number, unit and "
             "punctuation. Do not infer or substitute a different item. Use standard target-language spelling. "
@@ -310,12 +314,16 @@ def _build_prompt(
         if strict_source_only
         else ""
     )
+    meaning_instruction = (
+        "meaning, names, numbers, and percentages exactly. Prefer a brief natural equivalent over a verbose literal "
+        "translation; do not expand or omit essential information. Use " if timing else
+        "meaning, names, numbers, and percentages exactly; do not paraphrase, expand, or omit information. Use "
+    )
     return (
-        f"{context_block}{strict_instruction}Please accurately translate the [Source Text] into {target_language_name}, "
+        f"{context_block}{timing}{strict_instruction}Please accurately translate the [Source Text] into {target_language_name}, "
         "taking the provided background information into consideration. Translate only the [Source Text], "
         "not the background, and never copy a background sentence even when its wording is similar. Preserve its "
-        "meaning, names, numbers, and percentages exactly; do not paraphrase, expand, or omit information. Use "
-        "standard spelling and natural grammar in the target language. "
+        + meaning_instruction + "standard spelling and natural grammar in the target language. "
         "Only output the translated result without any additional explanation.\n\n"
         f"[Source Text]\n{source_text}"
     )
@@ -763,6 +771,12 @@ def translate(payload: dict) -> list[str]:
     target_language_name = payload["target_language_name"]
     include_context = bool(payload.get("include_context", True))
     strict_source_only = bool(payload.get("strict_source_only", False))
+    durations = payload.get("speech_durations")
+    if durations is not None and (not isinstance(durations, list) or len(durations) != len(texts)):
+        raise ValueError("Each source sentence must have a speech duration.")
+    if durations is not None:
+        for duration in durations:
+            timing_budget(duration, target_language_name)
     requested_indices = payload.get("translate_indices")
     if requested_indices is None:
         requested = set(range(len(texts)))
@@ -817,6 +831,7 @@ def translate(payload: dict) -> list[str]:
                     target_language_name,
                     include_context=include_context,
                     strict_source_only=strict_source_only,
+                    duration_seconds=durations[index] if durations is not None else None,
                 )
                 for index in translated_indices
             ]

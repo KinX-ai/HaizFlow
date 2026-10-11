@@ -24,6 +24,13 @@ Rectangle {
     property real previewProgress: 0
     property bool inputMuted: true
     property bool resultMuted: false
+    property real playbackSpeed: 1.0
+    readonly property var playbackSpeeds: [1.0, 1.5, 2.0, 0.5]
+    onPlaybackSpeedChanged: {
+        inputClockTickMs = Date.now();
+        if (controller && controller.manualPreviewAudio)
+            controller.manualPreviewAudio.setPlaybackRate(playbackSpeed, positionSeconds);
+    }
     property bool comparing: false
     property string activeMonitor: "result"
     property bool synchronizedPlayback: false
@@ -100,10 +107,8 @@ Rectangle {
             || Number(sourceEditDecisions[0].source_start_ms || 0) !== 0
             || Number(sourceEditDecisions[0].sequence_start_ms || 0) !== 0
             || Number(sourceEditDecisions[0].source_end_ms || 0) !== sequenceDurationSeconds * 1000)
-    readonly property bool inputPlaying: editedSourceTimeline ? inputPlaybackRequested
-        : inputPlayer.playbackState === MediaPlayer.PlayingState
+    readonly property bool inputPlaying: inputPlaybackRequested
     readonly property bool resultPlaying: resultPlaybackRequested
-        || (!resultPriming && resultPlayer.playbackState === MediaPlayer.PlayingState)
     readonly property bool sourceGap: sourceEditDecisions.length > 0
         && decisionIndexForSequence(positionSeconds * 1000) < 0
     signal subtitleActivated()
@@ -224,6 +229,9 @@ Rectangle {
     }
 
     function pausePlayback() {
+        scrubController.wasPlaying = false;
+        finishFrameRefresh(true);
+        finishFrameRefresh(false);
         inputPlaybackRequested = false;
         resultPlaybackRequested = false;
         synchronizedPlayback = false;
@@ -236,7 +244,6 @@ Rectangle {
         if (audioPreparationBusy)
             return;
         finishFrameRefresh(false);
-        resultPlayer.playbackRate = 1.0;
         resultPlaybackRequested = true;
         resultPlayer.play();
     }
@@ -247,11 +254,7 @@ Rectangle {
     }
 
     function beginScrub(seconds) {
-        scrubController.begin(seconds * 1000, resultPlaybackRequested
-            || inputPlaybackRequested
-            || (!resultPriming && resultPlayer.playbackState === MediaPlayer.PlayingState)
-            || (!comparing && activeMonitor === "source"
-                && inputPlayer.playbackState === MediaPlayer.PlayingState));
+        scrubController.begin(seconds * 1000, resultPlaybackRequested || inputPlaybackRequested);
     }
     function updateScrub(seconds) { scrubController.updatePosition(seconds * 1000); }
     function endScrub(seconds) { scrubController.end(seconds * 1000); }
@@ -260,6 +263,7 @@ Rectangle {
         root.controller.manualPreviewAudio.synchronize(
             root.positionSeconds,
             (root.comparing || root.activeMonitor === "result")
+                && root.resultPlaybackRequested
                 && resultPlayer.playbackState === MediaPlayer.PlayingState
                 && !root.resultPriming && !root.resultSourceSwitching && !scrubController.scrubbing,
             root.resultMuted || root.suppressResultAudio, root.embeddedSourceAudio);
@@ -271,6 +275,7 @@ Rectangle {
 
     PreviewScrubController {
         id: scrubController
+        objectName: "manualPreviewScrubController"
         onPauseRequested: {
             root.finishFrameRefresh(false);
             root.resultPlaybackRequested = false;
@@ -286,7 +291,8 @@ Rectangle {
             root.lastStablePositionMs = positionMs;
             if (!root.inputSourceSwitching && inputPlayer.seekable)
                 inputPlayer.position = sourcePositionMs;
-            if (!root.comparing && root.activeMonitor === "source" && inputPlayer.seekable)
+            if (!root.comparing && root.activeMonitor === "source"
+                    && (inputPlayer.seekable || (root.editedSourceTimeline && root.sourceGap)))
                 scrubController.observe(positionMs);
             if (!root.resultSourceSwitching && resultPlayer.seekable) {
                 resultPlayer.position = root.resultMsForSequence(positionMs);
@@ -345,19 +351,24 @@ Rectangle {
             inputPlaybackRequested = false;
             inputPlayer.pause();
         }
-        const resultRequested = player === resultPlayer && resultPlaybackRequested;
-        if (player.playbackState === MediaPlayer.PlayingState || resultRequested) {
+        const requested = player === resultPlayer ? resultPlaybackRequested : inputPlaybackRequested;
+        if (requested) {
             if (player === resultPlayer)
                 resultPlaybackRequested = false;
+            else
+                inputPlaybackRequested = false;
             player.pause();
         } else {
             if (player === resultPlayer)
                 resultPlaybackRequested = true;
+            else
+                inputPlaybackRequested = true;
             player.play();
         }
     }
 
     function stopOnly(player) {
+        scrubController.wasPlaying = false;
         synchronizedPlayback = false;
         if (player === inputPlayer) {
             inputPlaybackRequested = false;
@@ -371,12 +382,25 @@ Rectangle {
             seekTo(0);
     }
 
-    function releaseMedia() {
+    function resetPlayback() {
         pausePlayback();
-        inputSourceSwapTimer.stop();
-        resultSourceSwapTimer.stop();
+        scrubController.reset();
         inputPrimeTimer.stop();
         resultPrimeTimer.stop();
+        resultFramePauseTimer.stop();
+        frameRefreshTimer.stop();
+        frameRefreshSafetyTimer.stop();
+    }
+
+    function cyclePlaybackSpeed() {
+        const index = playbackSpeeds.indexOf(playbackSpeed);
+        playbackSpeed = playbackSpeeds[(index + 1) % playbackSpeeds.length];
+    }
+
+    function releaseMedia() {
+        resetPlayback();
+        inputSourceSwapTimer.stop();
+        resultSourceSwapTimer.stop();
         attachedInputSource = "";
         attachedResultSource = "";
     }
@@ -391,7 +415,7 @@ Rectangle {
         if (positionSeconds >= durationSeconds)
             seekTo(0);
         inputClockTickMs = Date.now();
-        inputPlaybackRequested = editedSourceTimeline;
+        inputPlaybackRequested = true;
         if (!sourceGap)
             inputPlayer.play();
     }
@@ -400,6 +424,7 @@ Rectangle {
         if (audioPreparationBusy || inputSourceSwitching || resultSourceSwitching)
             return;
         if (bothPlaying) {
+            inputPlaybackRequested = false;
             inputPlayer.pause();
             resultPlayer.pause();
             resultPlaybackRequested = false;
@@ -413,6 +438,7 @@ Rectangle {
         inputMuted = true;
         resultMuted = false;
         synchronizedPlayback = true;
+        inputPlaybackRequested = true;
         resultPlaybackRequested = true;
         inputPlayer.position = root.sourceMsForSequence(root.sequenceMsForResult(resultPlayer.position));
         inputPlayer.play();
@@ -429,22 +455,12 @@ Rectangle {
     }
 
     function activateSubtitleEditor() {
-        finishFrameRefresh(false);
-        inputPlaybackRequested = false;
-        resultPlaybackRequested = false;
-        synchronizedPlayback = false;
-        inputPlayer.pause();
-        resultPlayer.pause();
+        pausePlayback();
         subtitleActivated();
     }
 
     function activateWatermarkEditor() {
-        finishFrameRefresh(false);
-        inputPlaybackRequested = false;
-        resultPlaybackRequested = false;
-        synchronizedPlayback = false;
-        inputPlayer.pause();
-        resultPlayer.pause();
+        pausePlayback();
         watermarkActivated();
     }
 
@@ -489,7 +505,7 @@ Rectangle {
     }
 
     function primeInputFrame() {
-        if ((!comparing && !fullscreenLayer.opened)
+        if (!visible || (!comparing && !fullscreenLayer.opened)
                 || inputPane.framePresented
                 || inputPlayer.playbackState !== MediaPlayer.StoppedState
                 || inputSourceSwitching
@@ -501,7 +517,7 @@ Rectangle {
     }
 
     function primeResultFrame() {
-        if (resultPlayer.playbackState === MediaPlayer.PlayingState
+        if (!visible || resultPlayer.playbackState === MediaPlayer.PlayingState
                 || resultPlaybackRequested
                 || resultSourceSwitching
                 || String(attachedResultSource).length === 0)
@@ -526,17 +542,11 @@ Rectangle {
         if (!resultPriming)
             frameRefreshSafetyTimer.stop();
     }
-    onResultSourceChanged: {
-        pendingResultPositionMs = scrubController.desiredPositionMs;
-        resultPriming = false;
-        if (!inputPriming)
-            frameRefreshSafetyTimer.stop();
-    }
     onEffectiveResultSourceChanged: {
         resultFramePauseTimer.stop();
         pendingResultPositionMs = scrubController.desiredPositionMs;
-        scrubController.wasPlaying = scrubController.wasPlaying || resultPlaybackRequested
-            || (!resultPriming && resultPlayer.playbackState === MediaPlayer.PlayingState);
+        // Decoder PlayingState can be first-frame priming, not user intent.
+        scrubController.wasPlaying = scrubController.wasPlaying || resultPlaybackRequested;
         scrubController.sourceChanged();
         // A cache swap is a media-clock boundary. Stop every previous clock
         // before attaching the new mux, otherwise Windows Media Foundation
@@ -553,6 +563,7 @@ Rectangle {
             frameRefreshSafetyTimer.stop();
     }
     Component.onCompleted: {
+        root.controller.manualPreviewAudio.setPlaybackRate(root.playbackSpeed, 0);
         // Source change handlers may run before the component is complete.
         // Always enter through the detach/attach boundary for the initial
         // sources as well, so opening a project cannot inherit a stale clock.
@@ -562,6 +573,7 @@ Rectangle {
         resultSourceSwapTimer.restart();
     }
     Component.onDestruction: {
+        scrubController.reset();
         inputPlaybackRequested = false;
         inputSourceSwitching = true;
         resultSourceSwitching = true;
@@ -571,6 +583,14 @@ Rectangle {
         attachedResultSource = "";
         synchronizedPlayback = false;
         resultPlaybackRequested = false;
+    }
+    onVisibleChanged: {
+        if (!visible)
+            resetPlayback();
+        else {
+            inputPrimeTimer.restart();
+            resultPrimeTimer.restart();
+        }
     }
     ColumnLayout {
         anchors.fill: parent
@@ -902,7 +922,7 @@ Rectangle {
                 outlinePercent: root.watermarkOutlinePercent
                 scalePercent: root.watermarkScalePercent
                 timeSeconds: root.positionSeconds
-                playing: resultPlayer.playbackState === MediaPlayer.PlayingState
+                playing: root.resultPlaybackRequested && !root.resultPriming
                 referenceWidthPixels: root.subtitleReferenceWidth
                 referenceHeightPixels: root.subtitleReferenceHeight
                 interactive: fullscreenLayer.visible
@@ -930,7 +950,7 @@ Rectangle {
                 overlays: root.editorOverlays
                 selectedClipIds: root.selectedEditorClipIds
                 timeSeconds: root.positionSeconds
-                playing: resultPlayer.playbackState === MediaPlayer.PlayingState
+                playing: root.resultPlaybackRequested && !root.resultPriming
                 interactive: fullscreenLayer.visible && root.fullscreenResult
                     && !root.previewBusy && !root.resultPriming && !root.resultSourceSwitching
                 mediaActive: fullscreenLayer.visible && root.fullscreenResult
@@ -1001,6 +1021,11 @@ Rectangle {
                             else
                                 root.inputMuted = !root.inputMuted;
                         }
+                    }
+                    PlaybackSpeedButton {
+                        objectName: "manualFullscreenSpeedButton"
+                        speed: root.playbackSpeed
+                        onClicked: root.cyclePlaybackSpeed()
                     }
                     StudioSlider {
                         id: fullscreenSeekSlider
@@ -1119,7 +1144,7 @@ Rectangle {
         onTriggered: {
             const now = Date.now();
             const next = Math.min(root.durationSeconds * 1000,
-                scrubController.scrubPositionMs + Math.max(0, now - root.inputClockTickMs));
+                scrubController.scrubPositionMs + Math.max(0, now - root.inputClockTickMs) * root.playbackSpeed);
             root.inputClockTickMs = now;
             scrubController.observe(next);
             root.lastStablePositionMs = next;
@@ -1140,7 +1165,7 @@ Rectangle {
     Timer {
         interval: 180
         repeat: true
-        running: root.visible && (resultPlayer.playbackState === MediaPlayer.PlayingState
+        running: root.visible && !root.resultPriming && (root.resultPlaybackRequested
             || root.synchronizedPlayback)
         onTriggered: {
             if (!root.resultUsesSequenceTimeline && root.sourceEditDecisions.length > 0
@@ -1173,6 +1198,8 @@ Rectangle {
 
     MediaPlayer {
         id: inputPlayer
+        objectName: "manualInputPlayer"
+        playbackRate: root.playbackSpeed
         source: root.attachedInputSource
         videoOutput: fullscreenLayer.visible && !root.fullscreenResult
             ? fullscreenOutput : inputPane.videoOutputItem
@@ -1181,7 +1208,14 @@ Rectangle {
         }
 
         onMediaStatusChanged: function() {
+            if (inputPlayer.mediaStatus === MediaPlayer.EndOfMedia) {
+                if (!root.editedSourceTimeline)
+                    root.inputPlaybackRequested = false;
+                root.finishFrameRefresh(true);
+                return;
+            }
             if (inputPlayer.mediaStatus === MediaPlayer.InvalidMedia) {
+                root.inputPlaybackRequested = false;
                 root.inputSourceSwitching = false;
                 root.finishFrameRefresh(true);
                 return;
@@ -1195,6 +1229,7 @@ Rectangle {
         }
 
         onErrorOccurred: function() {
+            root.inputPlaybackRequested = false;
             root.inputSourceSwitching = false;
             root.finishFrameRefresh(true);
         }
@@ -1212,6 +1247,7 @@ Rectangle {
     MediaPlayer {
         id: resultPlayer
         objectName: "manualResultPlayer"
+        playbackRate: root.playbackSpeed
         source: root.attachedResultSource
         videoOutput: fullscreenLayer.visible && root.fullscreenResult
             ? fullscreenOutput : resultPane.videoOutputItem
@@ -1229,6 +1265,9 @@ Rectangle {
                     || String(root.attachedResultSource) !== String(root.effectiveResultSource))
                 return;
             if (resultPlayer.mediaStatus === MediaPlayer.EndOfMedia) {
+                scrubController.wasPlaying = false;
+                root.inputPlaybackRequested = false;
+                inputPlayer.pause();
                 root.resultPlaybackRequested = false;
                 root.synchronizedPlayback = false;
                 root.finishFrameRefresh(false);
@@ -1399,7 +1438,7 @@ Rectangle {
             outlinePercent: root.watermarkOutlinePercent
             scalePercent: root.watermarkScalePercent
             timeSeconds: root.positionSeconds
-            playing: resultPlayer.playbackState === MediaPlayer.PlayingState
+            playing: root.resultPlaybackRequested && !root.resultPriming
             referenceWidthPixels: root.subtitleReferenceWidth
             referenceHeightPixels: root.subtitleReferenceHeight
             interactive: pane === resultPane
@@ -1427,7 +1466,7 @@ Rectangle {
             overlays: root.editorOverlays
             selectedClipIds: root.selectedEditorClipIds
             timeSeconds: root.positionSeconds
-            playing: resultPlayer.playbackState === MediaPlayer.PlayingState
+            playing: root.resultPlaybackRequested && !root.resultPriming
             interactive: pane === resultPane && !fullscreenLayer.visible && pane.overlaysReady
             mediaActive: pane === resultPane && !fullscreenLayer.visible
             onClipSelected: function(clipId) { root.editorClipSelected(clipId); }
@@ -1530,6 +1569,11 @@ Rectangle {
                     iconName: "fullscreen"
                     toolTipText: qsTr("Toàn màn hình")
                     onClicked: pane.fullscreenRequested()
+                }
+                PlaybackSpeedButton {
+                    objectName: pane === inputPane ? "manualInputSpeedButton" : "manualResultSpeedButton"
+                    speed: root.playbackSpeed
+                    onClicked: root.cyclePlaybackSpeed()
                 }
             }
         }

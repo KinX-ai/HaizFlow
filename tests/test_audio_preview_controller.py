@@ -1,12 +1,15 @@
 import tempfile
 import unittest
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from haizflow.desktop.audio_preview_controller import AudioPreviewController
 from haizflow.desktop.catalog import OMNIVOICE_TTS_VOICES, POPULAR_TARGET_LANGUAGES
+from haizflow.core.edge_voices import EDGE_VOICES
+from haizflow.utils.ffmpeg import _binary
 
 
 def _host(**overrides):
@@ -62,7 +65,10 @@ class AudioPreviewControllerTests(unittest.TestCase):
 
         manifest_path = AudioPreviewController._PACKAGED_SAMPLE_DIR / "samples.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(len(manifest["samples"]), len(languages) * len(OMNIVOICE_TTS_VOICES))
+        self.assertEqual(len([item for item in manifest["samples"] if item["provider"] == "omnivoice"]),
+                         len(languages) * len(OMNIVOICE_TTS_VOICES))
+        self.assertEqual(len(manifest["samples"]),
+                         len(languages) * len(OMNIVOICE_TTS_VOICES) + sum(map(len, EDGE_VOICES.values())))
         self.assertEqual(set(manifest["sentences"]), set(languages))
         packaged_audio = list(AudioPreviewController._PACKAGED_SAMPLE_DIR.rglob("*.mp3"))
         self.assertEqual(len(packaged_audio), len(manifest["samples"]))
@@ -74,6 +80,33 @@ class AudioPreviewControllerTests(unittest.TestCase):
             "tặng một sao cho repository Github ứng dụng này. Cảm ơn bạn rất nhiều vì đã sử "
             "dụng ứng dụng của tôi, chúc bạn một ngày mới tốt lành.",
         )
+
+    def test_all_edge_voices_have_exact_offline_samples_and_decode_completely(self):
+        host = _host()
+        preview = AudioPreviewController(host)
+        manifest = json.loads((preview._PACKAGED_SAMPLE_DIR / "samples.json").read_text(encoding="utf-8"))
+        edge_entries = {(item["voice"], item["language"]): item
+                        for item in manifest["samples"] if item["provider"] == "edge"}
+        self.assertEqual(len(edge_entries), sum(map(len, EDGE_VOICES.values())))
+        with patch("haizflow.pipeline.edge_tts_backend.synthesize_to_mp3") as synthesize:
+            for language, voices in EDGE_VOICES.items():
+                for voice, *_labels in voices:
+                    with self.subTest(voice=voice, language=language):
+                        self.assertTrue(preview.has_voice_sample("edge", voice, language))
+                        path = Path(preview.voice_sample_path("edge", voice, language))
+                        self.assertEqual(path, preview._PACKAGED_SAMPLE_DIR / edge_entries[(voice, language)]["path"])
+                        self.assertTrue(preview.start(provider="edge", voice=voice,
+                                                      target_language=language, voice_only=True))
+                        self.assertEqual(host._audio_preview_source, path.as_uri())
+                        self.assertEqual(host._audio_preview_state, "ready")
+                        for other_language in EDGE_VOICES.keys() - {language}:
+                            self.assertFalse(preview.has_voice_sample("edge", voice, other_language))
+                        decoded = subprocess.run(
+                            [_binary("ffmpeg"), "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
+                            capture_output=True, timeout=20,
+                        )
+                        self.assertEqual(decoded.returncode, 0, decoded.stderr.decode(errors="replace"))
+            synthesize.assert_not_called()
 
     def test_invalidate_clears_all_previous_player_sources(self):
         host = _host(

@@ -5,6 +5,7 @@ import hashlib
 import bisect
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -98,6 +99,29 @@ def mix_frames(tracks, cursor, count, volumes, muted_ids=frozenset()):
     return np.clip(result, -32768, 32767).astype("<i2").tobytes()
 
 
+def mix_playback_frames(tracks, cursor, count, volumes, playback_rate, muted_ids=frozenset()):
+    """Resample only a small preview buffer; never rewrite cached/export audio.
+
+    Cursor is measured in timeline frames, whereas count is output frames at
+    48 kHz. Keep fractional source positions across partial device writes.
+    Non-unit rates change pitch, like playback without pitch compensation.
+    """
+    if count <= 0:
+        return b""
+    start = math.floor(cursor)
+    if playback_rate == 1.0 and cursor == start:
+        return mix_frames(tracks, start, count, volumes, muted_ids)
+    offsets = cursor - start + np.arange(count, dtype=np.float64) * playback_rate
+    indices = offsets.astype(np.int64)
+    source = np.frombuffer(
+        mix_frames(tracks, start, int(indices[-1]) + 2, volumes, muted_ids),
+        dtype="<i2",
+    ).reshape(-1, 2)
+    fraction = (offsets - indices)[:, None]
+    output = source[indices] * (1.0 - fraction) + source[indices + 1] * fraction
+    return np.clip(output, -32768, 32767).astype("<i2").tobytes()
+
+
 def apply_source_decisions(samples, decisions, allocate=None):
     """Map source PCM to sequence time, including silent gaps between clips."""
     if not decisions:
@@ -164,6 +188,7 @@ class ManualPreviewAudioController(QObject):
         self._key = ""
         self._reconciled_voice_state = None
         self._cursor = 0
+        self._playback_rate = 1.0
         self._position_seconds = 0.0
         self._playing = False
         self._muted = False
@@ -817,6 +842,7 @@ class ManualPreviewAudioController(QObject):
             self._native_source = path
             self._native_identity = identity
             self._native_player.setSource(QUrl.fromLocalFile(path))
+            self._native_player.setPlaybackRate(self._playback_rate)
             self._finish_preparing()
             self.voiceTimingsChanged.emit()
         source = next((c for c in document.clips if c.track_id == "source-audio" and c.enabled), None) if document else None
@@ -901,6 +927,20 @@ class ManualPreviewAudioController(QObject):
             self._native_output.setVolume(min(1.0, self._volumes["source"] * self._native_gain))
             self.nativeAudioChanged.emit()
 
+    @Slot(float, float)
+    def setPlaybackRate(self, rate, seconds):
+        # Preview speed is independent of project settings and export speed.
+        if rate not in (.5, 1.0, 1.5, 2.0) or not math.isfinite(seconds):
+            return
+        if rate == self._playback_rate:
+            return
+        self._playback_rate = rate
+        if self._native_player is not None:
+            self._native_player.setPlaybackRate(rate)
+        # Discard the previous-rate audio queue at the video's current clock.
+        # Do not call play() or pause(): changing speed must not start playback.
+        self.seek(seconds)
+
     @Slot(float, bool, bool)
     @Slot(float, bool, bool, bool)
     def synchronize(self, seconds, playing, muted, embedded_audio=False):
@@ -956,7 +996,7 @@ class ManualPreviewAudioController(QObject):
             self._timer.start()
         elif self._sink:
             buffered = (self._sink.bufferSize() - self._sink.bytesFree()) // 4
-            if self._needs_clock_resync(seconds, (self._cursor - buffered) / RATE):
+            if self._needs_clock_resync(seconds, (self._cursor - buffered * self._playback_rate) / RATE):
                 self.seek(seconds)
 
     def _reset_clock_tracking(self):
@@ -1047,13 +1087,13 @@ class ManualPreviewAudioController(QObject):
         if count <= 0:
             return
         data = (bytes(count * 4) if self._muted else
-                mix_frames(self._tracks, self._cursor, count, self._volumes,
-                           self._muted_ids | self._deferred_ids))
+                mix_playback_frames(self._tracks, self._cursor, count, self._volumes,
+                                    self._playback_rate, self._muted_ids | self._deferred_ids))
         written = self._device.write(data)
         if written > 0:
-            self._cursor += written // 4
+            self._cursor += (written // 4) * self._playback_rate
             buffered = max(0, (self._sink.bufferSize() - self._sink.bytesFree()) // 4)
-            self._publish_position(max(0, self._cursor - buffered) / RATE)
+            self._publish_position(max(0, self._cursor - buffered * self._playback_rate) / RATE)
 
     @Slot()
     def release(self):

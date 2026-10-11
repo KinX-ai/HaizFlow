@@ -85,6 +85,7 @@ def _file_state(path):
 def _voice_checkpoint_signature(video, transcript_state):
     """Sign only inputs used by synthesis, not a dormant narrator preset."""
     from haizflow.pipeline.speaker_identity import IDENTITY_VERSION
+    from haizflow.pipeline.edge_tts_backend import EDGE_CACHE_VERSION
 
     speaker_mode = str(getattr(video, "speaker_mode", "single") or "single")
     provider = str(getattr(video, "tts_provider", "omnivoice") or "omnivoice")
@@ -99,6 +100,7 @@ def _voice_checkpoint_signature(video, transcript_state):
         ("omnivoice-stable-speaker-map-target-language-r7" if speaker_mode == "multiple"
          else "omnivoice-dedicated-short-anchor-or-source-speaker-r5"),
         *((IDENTITY_VERSION,) if speaker_mode == "multiple" else ()),
+        *((EDGE_CACHE_VERSION,) if provider == "edge" else ()),
     )
 
 

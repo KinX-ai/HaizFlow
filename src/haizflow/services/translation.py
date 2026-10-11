@@ -18,6 +18,7 @@ from haizflow.core.hardware import processing_device_preference, runtime_profile
 from haizflow.core.paths import is_frozen, project_root
 from haizflow.pipeline.process_registry import check_cancellation, register_process, release_process_job, unregister_process
 from haizflow.services.video_store import log_to_video
+from haizflow.services.translation_timing import POLICY_VERSION, speech_duration, timing_budget
 
 WHISPER_LANGUAGE_NAMES = {}
 
@@ -106,21 +107,25 @@ def translate_segments(
         if not isinstance(segment, dict) or not str(segment.get("text") or "").strip():
             raise RuntimeError(f"Source sentence {index} is missing text.")
         try:
-            start = float(segment["start"])
-            end = float(segment["end"])
+            float(segment["start"])
+            float(segment["end"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(f"Source sentence {index} has invalid timestamps.") from exc
-        if start < 0 or end <= start:
-            raise RuntimeError(f"Source sentence {index} has an invalid time range.")
+        try:
+            speech_duration(segment)
+        except ValueError as exc:
+            raise RuntimeError(f"Source sentence {index} has an invalid time range.") from exc
 
     source_texts = [segment["text"] for segment in segments]
     source_codes = [str(segment.get("language") or source_language or "en").lower() for segment in segments]
+    speech_durations = [speech_duration(segment) for segment in segments]
     from haizflow.services.translation_progress import TranslationProgress
 
     checkpoint = TranslationProgress(checkpoint_path or output_json_path + ".progress.json", {
         "segments": segments, "model": requested_model, "provider": provider,
         "source_language": source_language, "target_language": target_language,
         "format": "sentence-translation-v1",
+        "speech_length_policy": POLICY_VERSION,
     }, len(segments))
     def save_valid_batch(indices, values):
         valid = [(index, value) for index, value in zip(indices, values)
@@ -143,6 +148,7 @@ def translate_segments(
             target_language=target_language_name,
             video_id=video_id, progress_callback=progress_callback,
             initial_translations=checkpoint.values, result_callback=save_valid_batch,
+            speech_durations=speech_durations,
         )
     else:
         translations = _translate_with_hymt2_worker(
@@ -153,6 +159,7 @@ def translate_segments(
             progress_callback=progress_callback,
             translate_indices=missing, initial_translations=checkpoint.values,
             result_callback=save_valid_batch,
+            speech_durations=speech_durations,
         )
     if len(translations) != len(segments):
         raise RuntimeError(
@@ -188,6 +195,7 @@ def translate_segments(
                     [source_texts[index] for index in retry_indexes],
                     model=requested_model, source_language="auto",
                     target_language=target_language_name, video_id=video_id,
+                    speech_durations=[speech_durations[index] for index in retry_indexes],
                 )
                 if len(retry_values) != len(retry_indexes):
                     raise ValueError("Recovery returned an incomplete translation batch.")
@@ -202,6 +210,7 @@ def translate_segments(
                     include_context=include_context,
                     strict_source_only=True,
                     translate_indices=retry_indexes,
+                    speech_durations=speech_durations,
                 )
             # Validate the whole retry before replacing any durable result.
             candidates = {index: clean_translation(retry_results[index]) for index in retry_indexes}
@@ -729,12 +738,18 @@ def _translate_with_hymt2_worker(
     translate_indices: list[int] | None = None,
     initial_translations: list[str | None] | None = None,
     result_callback=None,
+    speech_durations: list[float] | None = None,
 ) -> list[str]:
     global _WORKER_WARM
     if not texts:
         return []
     if len(source_languages) != len(texts):
         raise ValueError("Each translation segment must have a source language.")
+    if speech_durations is not None and len(speech_durations) != len(texts):
+        raise ValueError("Each source sentence must have a speech duration.")
+    if speech_durations is not None:
+        for duration in speech_durations:
+            timing_budget(duration, target_language_name)
     with _WORKER_OPERATION_LOCK:
         process, output_queue = _ensure_hymt2_worker()
         request_id = uuid.uuid4().hex
@@ -748,6 +763,7 @@ def _translate_with_hymt2_worker(
                 "strict_source_only": bool(strict_source_only),
                 "translate_indices": translate_indices,
                 "initial_translations": initial_translations,
+                "speech_durations": speech_durations,
             },
         }
         worker_output = []

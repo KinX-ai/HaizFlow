@@ -31,6 +31,8 @@ class PreviewTransportUiTests(unittest.TestCase):
                 property alias preview: preview
                 QtObject {
                     id: audio
+                    property real playbackRate: 1.0
+                    function setPlaybackRate(rate, seconds) { playbackRate = rate; }
                     function seek(seconds) {}
                     function synchronize(seconds, playing, muted) {}
                 }
@@ -49,6 +51,10 @@ class PreviewTransportUiTests(unittest.TestCase):
                 }
                 function restore(seconds) { preview.restorePosition(seconds); }
                 function stopSource() { preview.pausePlayback(); preview.seekTo(0); }
+                function replaceDuringPrime(source) {
+                    preview.primeResultFrame();
+                    preview.resultSource = source;
+                }
             }
         ''').encode(), QUrl())
         self.assertTrue(component.isReady(), "\n".join(e.toString() for e in component.errors()))
@@ -72,6 +78,48 @@ class PreviewTransportUiTests(unittest.TestCase):
         # Native decoders can hold proxy files until QML deferred deletion.
         from PySide6.QtCore import QCoreApplication, QEvent
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_single_speed_button_cycles_without_playing_or_changing_position(self):
+        button = self.child(self.preview, "manualResultSpeedButton")
+        self.assertIsNotNone(button)
+        self.item.restore(42)
+        players = [self.preview.findChild(QMediaPlayer, name)
+                   for name in ("manualInputPlayer", "manualResultPlayer")]
+        initial_geometry = (button.width(), button.height())
+        for expected in (1.5, 2, .5, 1):
+            point = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()
+            QTest.mouseClick(self.window, Qt.LeftButton, Qt.NoModifier, point)
+            self.app.processEvents()
+            self.assertEqual(self.preview.property("playbackSpeed"), expected)
+            self.assertEqual(button.property("speed"), expected)
+            self.assertEqual((button.width(), button.height()), initial_geometry)
+            self.assertEqual(self.preview.property("positionSeconds"), 42)
+            self.assertFalse(self.preview.property("resultPlaybackRequested"))
+            self.assertFalse(self.preview.property("inputPlaybackRequested"))
+            for player in players:
+                self.assertEqual(player.playbackRate(), expected)
+        self.preview.setProperty("playbackSpeed", 2)
+        QMetaObject.invokeMethod(self.preview, "pausePlayback", Qt.DirectConnection)
+        self.assertEqual(players[1].playbackRate(), 2)
+        self.preview.setProperty("activeMonitor", "source")
+        source_button = self.child(self.preview, "manualInputSpeedButton")
+        self.assertEqual(source_button.property("speed"), 2)
+
+    def test_edited_source_gap_clock_uses_selected_speed(self):
+        self.preview.setProperty("sourceEditDecisions", [{
+            "source_start_ms": 0, "source_end_ms": 1000, "sequence_start_ms": 4000,
+        }])
+        self.preview.setProperty("sequenceDurationSeconds", 10)
+        self.preview.setProperty("activeMonitor", "source")
+        self.preview.setProperty("inputSourceSwitching", False)
+        for rate in (.5, 2):
+            self.preview.setProperty("playbackSpeed", rate)
+            self.item.restore(0)
+            QMetaObject.invokeMethod(self.preview, "togglePlayback", Qt.DirectConnection)
+            QTest.qWait(240)
+            QMetaObject.invokeMethod(self.preview, "pausePlayback", Qt.DirectConnection)
+            self.assertGreater(self.preview.property("positionSeconds"), .14 * rate)
+            self.assertLess(self.preview.property("positionSeconds"), .4 * rate)
 
     def test_audio_preparing_notice_blocks_result_and_compare_playback(self):
         self.preview.setProperty("audioPreparationBusy", True)
@@ -213,3 +261,81 @@ class PreviewTransportUiTests(unittest.TestCase):
         QMetaObject.invokeMethod(output, "clearOutput")
         sink.setVideoFrame(QVideoFrame())
         QTest.qWait(300)
+
+    def test_metadata_update_during_first_frame_never_requests_playback(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "preview.mp4"
+        subprocess.run([
+            _binary("ffmpeg"), "-y", "-v", "error", "-f", "lavfi", "-i",
+            "color=c=blue:s=64x64:r=25:d=3", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+        ], check=True, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        player = self.preview.findChild(QMediaPlayer, "manualResultPlayer")
+        self.preview.setProperty("subtitleLivePreviewEnabled", True)
+        self.preview.setProperty("resultBaseSource", QUrl.fromLocalFile(str(path)))
+        for _ in range(150):
+            QTest.qWait(20)
+            if player.playbackState() == QMediaPlayer.PausedState and not self.preview.property("resultPriming"):
+                break
+        self.assertEqual(player.playbackState(), QMediaPlayer.PausedState)
+        # Cache metadata may arrive while the base decoder is painting a frame.
+        # The effective source is unchanged; this is not a user Play action.
+        self.item.replaceDuringPrime(QUrl.fromLocalFile(str(path)))
+        self.assertFalse(self.preview.property("resultPlaying"))
+        self.item.restore(1)
+        QTest.qWait(900)
+        self.assertFalse(self.preview.property("resultPlaybackRequested"))
+        self.assertFalse(self.preview.property("resultPlaying"))
+        QMetaObject.invokeMethod(self.preview, "releaseMedia", Qt.DirectConnection)
+        QTest.qWait(300)
+
+    def test_release_cancels_pending_scrub_resume_before_reopening(self):
+        self.preview.setProperty("resultPlaybackRequested", True)
+        self.item.restore(1)
+        QMetaObject.invokeMethod(self.preview, "releaseMedia", Qt.DirectConnection)
+        # A late decoder observation must not resurrect playback in a new project.
+        scrub = self.preview.findChild(QQuickItem, "manualPreviewScrubController")
+        self.assertFalse(scrub.property("wasPlaying"))
+        self.assertFalse(scrub.property("pending"))
+        scrub.observe(1000)
+        self.assertFalse(self.preview.property("resultPlaybackRequested"))
+
+    def test_explicit_pause_cancels_deferred_resume(self):
+        self.preview.setProperty("resultPlaybackRequested", True)
+        self.item.restore(1)
+        scrub = self.preview.findChild(QQuickItem, "manualPreviewScrubController")
+        self.assertTrue(scrub.property("wasPlaying"))
+        QMetaObject.invokeMethod(self.preview, "pausePlayback", Qt.DirectConnection)
+        scrub.observe(1000)
+        self.assertFalse(scrub.property("wasPlaying"))
+        self.assertFalse(self.preview.property("resultPlaybackRequested"))
+
+    def test_switch_project_resets_play_intent_and_priming_timers(self):
+        self.preview.setProperty("inputPlaybackRequested", True)
+        self.preview.setProperty("resultPlaybackRequested", True)
+        self.preview.setProperty("inputPriming", True)
+        self.preview.setProperty("resultPriming", True)
+        self.item.restore(1)
+        QMetaObject.invokeMethod(self.preview, "resetPlayback", Qt.DirectConnection)
+        QTest.qWait(900)
+        for name in ("resultPlaying", "inputPlaying", "inputPriming", "resultPriming"):
+            self.assertFalse(self.preview.property(name), name)
+
+    def test_hidden_workspace_does_not_resume_when_shown_again(self):
+        self.preview.setProperty("resultPlaybackRequested", True)
+        self.item.restore(1)
+        self.preview.setVisible(False)
+        self.preview.setVisible(True)
+        QTest.qWait(900)
+        self.assertFalse(self.preview.property("resultPlaying"))
+        self.assertFalse(self.preview.property("inputPlaying"))
+
+    def test_play_button_is_not_disabled_by_a_visual_background_refresh(self):
+        # A visual cache refresh is independent of usable loaded media/audio.
+        self.preview.setProperty("previewBusy", True)
+        self.preview.setProperty("audioPreparationBusy", False)
+        self.preview.setProperty("resultSourceSwitching", False)
+        QMetaObject.invokeMethod(self.preview, "togglePlayback", Qt.DirectConnection)
+        self.assertTrue(self.preview.property("resultPlaybackRequested"))
+        QMetaObject.invokeMethod(self.preview, "togglePlayback", Qt.DirectConnection)
+        self.assertFalse(self.preview.property("resultPlaybackRequested"))

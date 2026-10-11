@@ -4156,7 +4156,8 @@ class HaizFlowController(QObject):
 
     @Slot()
     def requestVideoExport(self):
-        if self.hasSelectedVideo and not self.videoExportBusy:
+        if (self.hasSelectedVideo and not self.videoExportBusy
+                and not self.isSelectedVideoProcessing and not self.isSelectedVideoQueued):
             self.videoExportRequested.emit()
 
     @Slot()
@@ -7402,13 +7403,14 @@ class HaizFlowController(QObject):
     @staticmethod
     def _normalized_tts_provider(language_code, provider):
         provider = str(provider or "omnivoice").lower()
-        return provider if provider in {"omnivoice", "omnivoice-gpu"} else "omnivoice"
+        return provider if provider in {"omnivoice", "omnivoice-gpu", "edge"} else "omnivoice"
 
     def _tts_provider_options_for_language(self, language_code):
         return [{"provider": provider, "label": label,
-                 "available": provider == "omnivoice" or HaizFlowController._project_gpu_available(self)}
+                 "available": provider != "omnivoice-gpu" or HaizFlowController._project_gpu_available(self)}
                 for provider, label in (
             ("omnivoice", "OmniVoice · CPU"), ("omnivoice-gpu", "OmniVoice · GPU"),
+            ("edge", "Edge TTS · Online"),
         )]
 
     def _show_app_alert(self, title: str, message: str, severity: str = "information") -> None:

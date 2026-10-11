@@ -153,6 +153,8 @@ AppDialog {
             text: root.processBeforeExport ? qsTr("Xử lý và xuất") : qsTr("Xuất")
             variant: "primary"
             enabled: root.destination.length > 0 && !root.controller.videoExportBusy
+                && (root.batchMode || (!root.controller.isSelectedVideoProcessing
+                    && !root.controller.isSelectedVideoQueued))
             onClicked: {
                 const started = root.batchMode
                     ? root.controller.processBatchTo(root.configuration.projectKey, root.configuration.videoIds,

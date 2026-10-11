@@ -115,6 +115,8 @@ class SmartWarmupController:
         if capability not in {"recognition", "translation", "voice", "separation", "ocr"}:
             return
         context = dict(context or {})
+        if capability == "voice" and context.get("provider") == "edge":
+            return
         if capability == "recognition":
             try:
                 context.update(recognition_context(str(context.get("model") or "small"), str(context.get("device") or "cpu")))

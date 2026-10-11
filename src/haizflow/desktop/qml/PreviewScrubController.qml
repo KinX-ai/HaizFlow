@@ -50,5 +50,12 @@ Item {
     }
     function sourceChanged() { generation += 1; pending = true; }
     function sourceReady() { seekRequested(desiredPositionMs); }
+    function reset() {
+        seekTimer.stop();
+        generation += 1;
+        wasPlaying = false;
+        scrubbing = false;
+        pending = false;
+    }
     Timer { id: seekTimer; interval: 75; onTriggered: root.seekRequested(root.desiredPositionMs) }
 }

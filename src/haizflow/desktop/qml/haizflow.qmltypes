@@ -65,6 +65,7 @@ Module {
         Property { name: "positionSeconds"; type: "double"; isReadonly: true }
         Property { name: "voiceTimings"; type: "QVariantMap"; isReadonly: true }
         Method { name: "setVolumes"; Parameter { name: "original"; type: "int" } Parameter { name: "voice"; type: "int" } Parameter { name: "music"; type: "int" } }
+        Method { name: "setPlaybackRate"; Parameter { name: "rate"; type: "double" } Parameter { name: "seconds"; type: "double" } }
         Method { name: "synchronize"; Parameter { name: "seconds"; type: "double" } Parameter { name: "playing"; type: "bool" } Parameter { name: "muted"; type: "bool" } }
         Method { name: "seek"; Parameter { name: "seconds"; type: "double" } }
         Method { name: "release" }

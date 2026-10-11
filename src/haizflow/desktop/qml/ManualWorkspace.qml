@@ -535,6 +535,7 @@ Item {
             if (root.previewVideoId !== AppController.selectedVideoId) {
                 root.sourceReplacementPending = false;
                 root.saveEditorView();
+                comparePreview.resetPlayback();
                 AppController.releaseEditorPreview();
                 root.previewVideoId = AppController.selectedVideoId;
                 root.restoreEditorView();
@@ -624,6 +625,7 @@ Item {
         spacing: Theme.space8
 
         ManualEditorToolbar {
+            id: manualEditorToolbar
             Layout.fillWidth: true
             resultSelected: String(root.selectedEditorClip.kind || "") === "result"
             onResultSplitRequested: AppController.splitResultClip("", Math.round(comparePreview.positionSeconds * 1000))
@@ -631,6 +633,8 @@ Item {
             projectTitle: AppController.projectName
             hasVideo: AppController.hasSelectedVideo
             hasOutput: AppController.hasSelectedOutput
+            exportEnabled: !AppController.isSelectedVideoProcessing
+                && !AppController.isSelectedVideoQueued && !AppController.videoExportBusy
             hasProject: AppController.hasOpenProject
             canUndo: AppController.canUndoEdit
             canRedo: AppController.canRedoEdit
@@ -648,6 +652,8 @@ Item {
                     comparePreview.positionSeconds + offset)));
             }
             onExportRequested: {
+                if (!manualEditorToolbar.exportEnabled)
+                    return;
                 root.selectedStageIndex = 6;
                 root.activatePanel("tasks", "right");
                 stageInspector.saveNow();
@@ -784,7 +790,7 @@ Item {
                             ? AppController.watermarkVideoPath.length > 0
                             : AppController.watermarkText.length > 0
                     watermarkEditEnabled: root.watermarkTransformActive
-                    editorOverlays: AppController.manualPreviewComposition.frame.overlays
+                    editorOverlays: AppController.manualPreviewComposition.overlays
                     selectedEditorClipIds: root.selectedEditorClipIds
                     sourceEditDecisions: root.editorModel.document.sequence
                         ? (root.editorModel.document.sequence.edit_decisions || []) : []

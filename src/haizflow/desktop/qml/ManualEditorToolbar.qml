@@ -10,6 +10,7 @@ Rectangle {
     property string projectTitle: ""
     property bool hasVideo: false
     property bool hasOutput: false
+    property bool exportEnabled: true
     property bool hasProject: false
     property bool canUndo: false
     property bool canRedo: false
@@ -149,6 +150,7 @@ Rectangle {
         StudioButton {
             objectName: "manualExportButton"
             visible: root.hasVideo
+            enabled: root.exportEnabled
             text: qsTr("Xuất")
             iconName: "open"
             variant: "primary"

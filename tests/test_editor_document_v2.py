@@ -1133,6 +1133,51 @@ def test_text_overlay_preview_resolves_the_same_style_as_export():
     model.close()
 
 
+def test_playback_indexes_only_overlays_and_notifies_only_visual_changes():
+    from unittest.mock import patch
+
+    document = EditorDocument(
+        video_id="long-preview",
+        sequence=EditorSequence(duration_ms=1800000),
+        tracks=[EditorTrack(track_id="overlays", kind="overlay", name="Lớp phủ")],
+        assets=[EditorAsset(asset_id="image-a", kind="image", name="Logo")],
+        clips=[EditorClip(clip_id=f"caption-{index}", track_id="subtitles", kind="subtitle",
+                          duration_ms=1000, start_ms=index * 1000) for index in range(1800)]
+        + [EditorClip(clip_id="image-1", track_id="overlays", kind="image", asset_id="image-a",
+                      duration_ms=2000)],
+    )
+    model = ManualEditorDocumentModel()
+    model.set_document(document)
+    preview = ManualPreviewCompositionController(model)
+    notifications = []
+    preview.overlaysChanged.connect(lambda: notifications.append(preview.overlays))
+    try:
+        assert len(preview._overlay_clips) == 1
+        assert preview.overlays == preview.frame["overlays"]
+        with patch.object(preview, "refresh", wraps=preview.refresh) as reindex:
+            for tick in range(1, 101):
+                preview.setTime(tick / 100)
+            reindex.assert_not_called()
+        assert preview.timeMs == 1000
+        assert not notifications  # Static logo must not reconstruct QML delegates each tick.
+        preview.setTime(2)
+        assert notifications == [[]]
+        preview.setTime(.5)
+        assert len(notifications) == 2
+        document.clips[-1].transform.opacity_percent = 42
+        model.changed.emit()
+        assert len(notifications) == 3
+        assert preview.overlays[0]["transform"]["opacity_percent"] == 42
+        document.tracks[0].visible = False
+        model.changed.emit()
+        assert preview.overlays == []
+        model.clear()
+        assert preview.overlays == []
+    finally:
+        preview.close()
+        model.close()
+
+
 def test_waveform_is_attached_to_audio_clip_without_mutating_document():
     document = EditorDocument(
         video_id="manual-waveform",

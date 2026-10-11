@@ -710,6 +710,8 @@ class ResourcePackManager:
         context = context or {}
         device = "gpu" if str(context.get("device") or "cpu") == "gpu" else "cpu"
         provider = str(context.get("provider") or "omnivoice")
+        if str(capability) == "voice" and provider == "edge":
+            return []
         voice_device = "gpu" if provider.endswith("-gpu") else "cpu"
         voice_packs = [f"engine-{'cuda128-py313' if voice_device == 'gpu' else 'cpu-py313'}", "model-omnivoice"]
         if context.get("voice_clone") and not any(

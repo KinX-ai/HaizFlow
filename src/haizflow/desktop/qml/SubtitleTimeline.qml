@@ -2,7 +2,9 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
+import QtQml.Models
 import "."
+import "TimelineViewport.js" as TimelineViewport
 
 Rectangle {
     id: root
@@ -26,6 +28,8 @@ Rectangle {
     property real visibleEndSeconds: 1
     property real pendingZoomAnchorTime: 0
     property real pendingZoomAnchorX: 0
+    property real wheelZoomFactor: 1
+    property real wheelZoomAnchorX: 0
 
     signal segmentSelected(int index)
     signal segmentFocused(int index)
@@ -65,7 +69,29 @@ Rectangle {
     readonly property real pixelsPerSecond: fitPixelsPerSecond * zoomFactor
     readonly property real trackWidth: Math.max(usableWidth, timelineDuration * pixelsPerSecond)
     readonly property real snapDistanceSeconds: Math.min(0.16, 8 / Math.max(1, pixelsPerSecond))
-    readonly property real tickStep: pixelsPerSecond >= 240 ? 0.25 : pixelsPerSecond >= 120 ? 0.5 : pixelsPerSecond >= 58 ? 1 : pixelsPerSecond >= 28 ? 2 : 5
+    readonly property real tickStep: TimelineViewport.tickInterval(pixelsPerSecond)
+    readonly property var clipIndicesById: {
+        const indices = {};
+        for (let index = 0; index < editorClips.length; ++index)
+            indices[String(editorClips[index].clip_id || "")] = index;
+        return indices;
+    }
+    readonly property var indexedSegments: segments.map(function(segment, index) {
+        return Object.assign({ "sourceIndex": index }, segment);
+    })
+    readonly property var clipsByTrack: {
+        const groups = {};
+        for (let index = 0; index < editorClips.length; ++index) {
+            const clip = editorClips[index];
+            const trackId = String(clip.track_id || "");
+            if (trackId === "overlays" && String(clip.clip_id || "") !== "watermark-1")
+                continue;
+            if (!groups[trackId])
+                groups[trackId] = [];
+            groups[trackId].push(clip);
+        }
+        return groups;
+    }
     readonly property real minimumSegmentDuration: 0.12
     readonly property var extraTracks: editorTracks.filter(function(track) {
         const trackId = String(track.track_id || "");
@@ -187,6 +213,8 @@ Rectangle {
     }
 
     function zoomAt(viewX, requestedFactor) {
+        if (editingClip)
+            return;
         const oldScale = Math.max(0.001, pixelsPerSecond);
         const anchorX = clamp(viewX, trackLeft, timelineFlick.width);
         const anchorTime = clamp((timelineFlick.contentX + anchorX - trackLeft) / oldScale, 0, timelineDuration);
@@ -194,6 +222,19 @@ Rectangle {
         pendingZoomAnchorTime = anchorTime;
         zoomFactor = clamp(requestedFactor, 1, 24);
         zoomPositionTimer.restart();
+    }
+
+    function zoomTimeline(multiplier) {
+        // Use the same anchored zoom as the wheel, without editing clip time.
+        wheelZoomTimer.stop();
+        zoomAt(trackLeft + usableWidth / 2, zoomFactor * multiplier);
+    }
+
+    function queueWheelZoom(viewX, multiplier) {
+        wheelZoomAnchorX = viewX;
+        wheelZoomFactor = clamp((wheelZoomTimer.running ? wheelZoomFactor : zoomFactor) * multiplier, 1, 24);
+        if (!wheelZoomTimer.running)
+            wheelZoomTimer.start();
     }
 
     function panByPixels(delta) {
@@ -222,20 +263,24 @@ Rectangle {
             return;
         // Fit zoom for long videos is often below one pixel per second.
         // Keep that scale when converting the viewport back to media time.
+        const buffer = Math.max(2, 160 / Math.max(0.001, pixelsPerSecond));
         const left = Math.max(0, (timelineFlick.contentX - trackLeft)
-            / Math.max(0.001, pixelsPerSecond) - 2);
+            / Math.max(0.001, pixelsPerSecond) - buffer);
         const right = (timelineFlick.contentX + timelineFlick.width - trackLeft)
-            / Math.max(0.001, pixelsPerSecond) + 2;
+            / Math.max(0.001, pixelsPerSecond) + buffer;
         visibleStartSeconds = left;
         visibleEndSeconds = right;
         const next = [];
-        for (let index = 0; index < segments.length; ++index) {
-            const segment = segments[index];
+        for (let index = 0; index < indexedSegments.length; ++index) {
+            const segment = indexedSegments[index];
             if (Number(segment.end || 0) < left || Number(segment.start || 0) > right)
                 continue;
-            next.push(Object.assign({ "sourceIndex": index }, segment));
+            next.push(segment);
         }
         visibleSegments = next;
+        TimelineViewport.sync(visibleSegmentModel, next.map(function(segment) {
+            return { "entryKey": String(segment.sourceIndex), "entryIndex": segment.sourceIndex };
+        }));
         const firstTick = Math.max(0, Math.floor(left / tickStep));
         const lastTick = Math.min(Math.ceil(timelineDuration / tickStep),
             Math.ceil(right / tickStep));
@@ -243,24 +288,42 @@ Rectangle {
         for (let index = firstTick; index <= lastTick; ++index)
             ticks.push(index);
         visibleTicks = ticks;
+        TimelineViewport.sync(visibleTickModel, ticks.map(function(index) {
+            return { "entryKey": String(index), "entryIndex": index };
+        }));
+    }
+
+    function scheduleVisibleRefresh() {
+        // Throttle, not debounce: continuous input must not postpone updates.
+        if (!visibleRefreshTimer.running)
+            visibleRefreshTimer.start();
     }
 
     onPositionChanged: ensurePositionVisible()
     onSegmentsChanged: {
         editingClip = false;
-        visibleRefreshTimer.restart();
+        scheduleVisibleRefresh();
     }
-    onZoomFactorChanged: visibleRefreshTimer.restart()
-    onWidthChanged: visibleRefreshTimer.restart()
-    onDurationChanged: visibleRefreshTimer.restart()
-    onTimelineDurationChanged: visibleRefreshTimer.restart()
-    onEditingClipChanged: if (!editingClip) visibleRefreshTimer.restart()
-    Component.onCompleted: visibleRefreshTimer.restart()
+    onZoomFactorChanged: scheduleVisibleRefresh()
+    onWidthChanged: scheduleVisibleRefresh()
+    onDurationChanged: scheduleVisibleRefresh()
+    onTimelineDurationChanged: scheduleVisibleRefresh()
+    onEditingClipChanged: if (!editingClip) scheduleVisibleRefresh()
+    Component.onCompleted: scheduleVisibleRefresh()
+
+    ListModel { id: visibleSegmentModel }
+    ListModel { id: visibleTickModel }
 
     Timer {
         id: visibleRefreshTimer
-        interval: 35
+        interval: 16
         onTriggered: root.refreshVisibleSegments()
+    }
+
+    Timer {
+        id: wheelZoomTimer
+        interval: 16
+        onTriggered: root.zoomAt(root.wheelZoomAnchorX, root.wheelZoomFactor)
     }
 
     Timer {
@@ -286,8 +349,9 @@ Rectangle {
 
         Flickable {
             id: timelineFlick
-            onContentXChanged: visibleRefreshTimer.restart()
-            onWidthChanged: visibleRefreshTimer.restart()
+            objectName: "timelineViewport"
+            onContentXChanged: root.scheduleVisibleRefresh()
+            onWidthChanged: root.scheduleVisibleRefresh()
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentWidth: root.trackLeft + root.trackWidth + 8
@@ -305,6 +369,7 @@ Rectangle {
                 id: timelineWheelHandler
                 target: null
                 blocking: true
+                enabled: !root.editingClip
                 onWheel: function (event) {
                     const angle = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x;
                     const pixel = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.pixelDelta.x;
@@ -313,7 +378,7 @@ Rectangle {
                         return;
                     if ((event.modifiers & Qt.ShiftModifier) === 0) {
                         const steps = angle !== 0 ? delta / 120 : delta / 80;
-                        root.zoomAt(event.x, root.zoomFactor * Math.pow(1.2, steps));
+                        root.queueWheelZoom(event.x, Math.pow(1.2, steps));
                     } else if (root.zoomFactor > 1.001) {
                         root.panByPixels(-delta);
                     }
@@ -346,11 +411,45 @@ Rectangle {
                     }
                 }
 
+                Rectangle {
+                    objectName: "timelineZoomControls"
+                    x: timelineFlick.contentX
+                    y: timelineFlick.contentY
+                    width: root.trackLeft
+                    height: 28
+                    color: Theme.surface
+                    z: 12
+
+                    RowLayout {
+                        anchors.left: parent.left
+                        anchors.leftMargin: Theme.space8
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Theme.space4
+                        StudioIconButton {
+                            objectName: "timelineZoomOutButton"
+                            controlSize: 28
+                            iconName: "zoomOut"
+                            toolTipText: qsTr("Thu nhỏ timeline")
+                            enabled: !root.editingClip && root.zoomFactor > 1
+                            onClicked: root.zoomTimeline(1 / 1.5)
+                        }
+                        StudioIconButton {
+                            objectName: "timelineZoomInButton"
+                            controlSize: 28
+                            iconName: "zoomIn"
+                            toolTipText: qsTr("Phóng to timeline")
+                            enabled: !root.editingClip && root.zoomFactor < 24
+                            onClicked: root.zoomTimeline(1.5)
+                        }
+                    }
+                }
+
                 Repeater {
-                    model: root.visibleTicks
+                    model: visibleTickModel
                     delegate: Item {
                         id: tick
-                        required property int modelData
+                        required property int entryIndex
+                        readonly property int modelData: entryIndex
                         x: root.trackLeft + modelData * root.tickStep * root.pixelsPerSecond
                         y: timelineFlick.contentY
                         width: 1
@@ -405,15 +504,19 @@ Rectangle {
                         readonly property bool combinedVoice: trackId === "voice"
                         readonly property bool canEditClips: trackId !== "overlays"
                         readonly property bool canMoveClips: canEditClips && trackId !== "result"
-                        readonly property var clips: root.editorClips.filter(function(clip) {
+                        readonly property var clips: (root.clipsByTrack[trackId] || []).filter(function(clip) {
                             const start = Number(clip.start_ms || 0) / 1000;
                             const end = start + Number(clip.duration_ms || 0) / 1000;
-                            return String(clip.track_id || "") === layerTrack.trackId
-                                && (layerTrack.trackId !== "overlays"
-                                    || String(clip.clip_id || "") === "watermark-1")
-                                && end >= root.visibleStartSeconds
+                            return end >= root.visibleStartSeconds
                                 && start <= root.visibleEndSeconds;
                         })
+                        onClipsChanged: {
+                            TimelineViewport.sync(layerClipModel, clips.map(function(clip) {
+                                const key = String(clip.clip_id || "");
+                                return { "entryKey": key, "entryIndex": root.clipIndicesById[key] };
+                            }));
+                        }
+                        ListModel { id: layerClipModel }
                         x: 0
                         y: combinedVoice ? 104 + root.resultTrackOffset : root.trackY(index)
                         width: root.trackLeft + root.trackWidth
@@ -455,11 +558,12 @@ Rectangle {
 
                         Repeater {
                             visible: true
-                            model: layerTrack.clips
+                            model: layerClipModel
                             delegate: Rectangle {
                                 id: editorClip
                                 required property int index
-                                required property var modelData
+                                required property int entryIndex
+                                readonly property var modelData: root.editorClips[entryIndex] || ({})
                                 readonly property string clipId: String(modelData.clip_id || "")
                                 readonly property bool selected: root.selectedClipIds.indexOf(clipId) >= 0
                                 property int previewStartMs: Number(modelData.start_ms || 0)
@@ -554,12 +658,13 @@ Rectangle {
                                             (mouse.modifiers & Qt.ControlModifier) !== 0);
                                         if (mouse.button === Qt.RightButton) {
                                             if (layerTrack.trackId === "result") {
-                                                resultClipMenu.popup();
+                                                if (resultClipMenuLoader.status === Loader.Ready)
+                                                    resultClipMenuLoader.item.popup();
                                                 return;
                                             }
                                             if (String(layerTrack.modelData.kind || "") === "ocr")
-                                                if (layerTrack.trackId !== "ocr-source")
-                                                    ocrClipMenu.popup();
+                                                if (ocrClipMenuLoader.status === Loader.Ready)
+                                                    ocrClipMenuLoader.item.popup();
                                             return;
                                         }
                                         if (!layerTrack.canMoveClips)
@@ -597,31 +702,37 @@ Rectangle {
                                     }
                                 }
 
-                                TopBarPopupMenu {
-                                    id: resultClipMenu
-                                    menuContentWidth: 188
-                                    AppMenuItem {
-                                        text: qsTr("Chia tại vị trí phát")
-                                        iconGlyph: IconCatalog.glyph("split")
-                                        enabled: root.position * 1000 >= editorClip.previewStartMs + 80
-                                            && root.position * 1000 <= editorClip.previewStartMs + editorClip.previewDurationMs - 80
-                                        onTriggered: root.resultSplitRequested(editorClip.clipId, Math.round(root.position * 1000))
-                                    }
-                                    AppMenuItem {
-                                        text: qsTr("Xóa đoạn")
-                                        iconGlyph: IconCatalog.glyph("delete")
-                                        onTriggered: root.resultDeleteRequested(editorClip.clipId)
+                                Loader {
+                                    id: resultClipMenuLoader
+                                    active: layerTrack.trackId === "result"
+                                    sourceComponent: TopBarPopupMenu {
+                                        menuContentWidth: 188
+                                        AppMenuItem {
+                                            text: qsTr("Chia tại vị trí phát")
+                                            iconGlyph: IconCatalog.glyph("split")
+                                            enabled: root.position * 1000 >= editorClip.previewStartMs + 80
+                                                && root.position * 1000 <= editorClip.previewStartMs + editorClip.previewDurationMs - 80
+                                            onTriggered: root.resultSplitRequested(editorClip.clipId, Math.round(root.position * 1000))
+                                        }
+                                        AppMenuItem {
+                                            text: qsTr("Xóa đoạn")
+                                            iconGlyph: IconCatalog.glyph("delete")
+                                            onTriggered: root.resultDeleteRequested(editorClip.clipId)
+                                        }
                                     }
                                 }
 
-                                TopBarPopupMenu {
-                                    id: ocrClipMenu
-                                    menuContentWidth: 188
-                                    AppMenuItem {
-                                        text: qsTr("Xóa lớp")
-                                        collapsed: layerTrack.trackId === "ocr-source"
-                                        iconGlyph: IconCatalog.glyph("delete")
-                                        onTriggered: root.layerDeleteRequested(layerTrack.trackId)
+                                Loader {
+                                    id: ocrClipMenuLoader
+                                    active: String(layerTrack.modelData.kind || "") === "ocr"
+                                        && layerTrack.trackId !== "ocr-source"
+                                    sourceComponent: TopBarPopupMenu {
+                                        menuContentWidth: 188
+                                        AppMenuItem {
+                                            text: qsTr("Xóa lớp")
+                                            iconGlyph: IconCatalog.glyph("delete")
+                                            onTriggered: root.layerDeleteRequested(layerTrack.trackId)
+                                        }
                                     }
                                 }
 
@@ -968,13 +1079,14 @@ Rectangle {
 
                 Repeater {
                     id: clipRepeater
-                    model: root.visibleSegments
+                    model: visibleSegmentModel
 
                     delegate: Rectangle {
                         id: clip
                         objectName: "subtitleTimelineClip-" + sourceIndex
-                        required property var modelData
-                        readonly property int sourceIndex: Number(modelData.sourceIndex)
+                        required property int entryIndex
+                        readonly property var modelData: root.segments[entryIndex] || ({})
+                        readonly property int sourceIndex: entryIndex
 
                         property real previewStart: Number(modelData.start || 0)
                         property real previewEnd: Number(modelData.end || 0)
