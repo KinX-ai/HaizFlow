@@ -39,7 +39,7 @@ Xem trước video, chỉnh phụ đề và chọn giọng đọc phù hợp tr�
 
 Tìm dự án gần đây, lọc theo loại và tạo dự án mới.
 
-![Trang chủ HaizFlow với các thẻ dự án và bộ lọc tìm kiếm](docs/images/screenshots/home.png)
+![Trang chủ HaizFlow với các thẻ dự án và bộ lọc tìm kiếm](docs/images/screenshots/home-2026-10-11.png)
 
 ### Xử lý tự động
 
@@ -51,7 +51,7 @@ Chọn model nhận dạng, dịch và giọng đọc; thiết lập che phụ �
 
 So sánh video nguồn và kết quả, chạy từng bước độc lập, chia đoạn trên timeline Kết quả và xuất phụ đề SRT để dùng trong phần mềm khác.
 
-![Trình sửa thủ công với preview, bảng xử lý và timeline phụ đề, âm thanh](docs/images/screenshots/manual-editor.png)
+![Trình sửa thủ công với preview, bảng xử lý và timeline phụ đề, âm thanh](docs/images/screenshots/manual-editor-2026-10-11.png)
 
 ### Tải xuống
 

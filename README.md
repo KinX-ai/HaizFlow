@@ -39,7 +39,7 @@ The screenshots show the Vietnamese interface. Options and version labels may di
 
 Find recent projects, filter by project type and create a new project.
 
-![HaizFlow home page with project cards and search filters](docs/images/screenshots/home.png)
+![HaizFlow home page with project cards and search filters](docs/images/screenshots/home-2026-10-11.png)
 
 ### Automatic processing
 
@@ -51,7 +51,7 @@ Choose recognition, translation and voice models, then configure subtitle covera
 
 Review source and result previews, run individual processing steps, split the Result timeline into clips and export subtitles as SRT for other editors.
 
-![Manual editor with video preview, processing panel and subtitle and audio timeline](docs/images/screenshots/manual-editor.png)
+![Manual editor with video preview, processing panel and subtitle and audio timeline](docs/images/screenshots/manual-editor-2026-10-11.png)
 
 ### Downloads
 
