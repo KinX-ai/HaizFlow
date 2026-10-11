@@ -64,7 +64,9 @@ class SmartWarmupController:
     def request_startup_prediction(self) -> None:
         # Startup belongs to the app, not to whichever project was opened last.
         device = str(getattr(self._host, "_settings_processing_device", "cpu") or "cpu")
-        model = project_model_defaults(device)["_speech_recognition_model"]
+        capabilities = getattr(self._host, "_hardware_capabilities", None)
+        model = project_model_defaults(device, total_vram_bytes=getattr(capabilities, "total_vram_bytes", None))[
+            "_speech_recognition_model"]
         self.request("recognition", {"device": device, "model": model}, priority=30)
 
     def request_setup_prediction(self) -> None:
@@ -84,7 +86,9 @@ class SmartWarmupController:
         context = {
             "device": str(getattr(self._host, "_settings_processing_device", "cpu") or "cpu"),
             "model": project_recognition_choice(str(getattr(video, "speech_recognition_model", "small") or "small"),
-                         str(getattr(self._host, "_settings_processing_device", "cpu") or "cpu")),
+                         str(getattr(self._host, "_settings_processing_device", "cpu") or "cpu"),
+                         total_vram_bytes=getattr(getattr(self._host, "_hardware_capabilities", None),
+                                                  "total_vram_bytes", None)),
             "source_language": str(getattr(video, "source_language", "auto") or "auto"),
             "language": str(getattr(video, "target_language", "") or ""),
             "provider": str(getattr(video, "tts_provider", "omnivoice") or "omnivoice"),
@@ -258,6 +262,8 @@ class SmartWarmupController:
 
     def _has_warmup_budget(self, capability: str, context: dict) -> bool:
         profile = runtime_profile()
+        if profile.cuda_available and profile.total_vram_gib < 5:
+            return False  # Four GB cards load CUDA models only for foreground work.
         available = available_memory_bytes()
         # Leave headroom for Qt, video decoding and the next foreground job.
         required_gib = 7 if capability in {"translation", "voice"} else 5

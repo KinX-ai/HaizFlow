@@ -260,7 +260,7 @@ class HaizFlowController(QObject):
         self._video_thumbnail_source = ""
         self._target_language = "vi"
         self._speech_recognition_model = "small"
-        self._translation_model = "auto"
+        self._translation_model = "q4"
         self._tts_provider = "omnivoice"
         self._tts_voice = "omnivoice:female"
         self._speaker_mode = "single"
@@ -1245,7 +1245,7 @@ class HaizFlowController(QObject):
 
     @Property(int, notify=batchChanged)
     def batchCompletedCount(self):
-        completed_states = {"done", "failed", "cancelled"}
+        completed_states = {"done"}
         videos = self._batch_catalog_videos()
         return sum(1 for video in videos if video and video.status in completed_states)
 
@@ -1266,7 +1266,8 @@ class HaizFlowController(QObject):
     @Property(int, notify=batchChanged)
     def batchProgress(self):
         videos = self._batch_catalog_videos()
-        return round(sum(video.progress for video in videos) / len(videos)) if videos else 0
+        return round(sum(100 if video.status in {"done", "failed", "cancelled"} else video.progress
+                         for video in videos) / len(videos)) if videos else 0
 
     @Property(str, notify=batchChanged)
     def batchTargetLanguageLabel(self):
@@ -1364,9 +1365,21 @@ class HaizFlowController(QObject):
             return validate_processing_device("gpu", capabilities)[0]
         return True  # The asynchronous probe has not confirmed the adapter yet.
 
+    @staticmethod
+    def _heavy_gpu_models_available(host) -> bool:
+        capabilities = getattr(host, "_hardware_capabilities", None)
+        return HaizFlowController._project_gpu_available(host) and (
+            capabilities is None or not getattr(host, "_startup_hardware_resolved", True)
+            or getattr(
+                capabilities,
+                "heavy_gpu_models_supported",
+                getattr(capabilities, "total_vram_bytes", 0) >= 5 * 1024**3,
+            )
+        )
+
     @Property(bool, notify=ttsProviderOptionsChanged)
     def gpuModelsAvailable(self):
-        return HaizFlowController._project_gpu_available(self)
+        return HaizFlowController._heavy_gpu_models_available(self)
 
     @Property(str, notify=speechRecognitionModelChanged)
     def speechRecognitionModel(self):
@@ -1387,6 +1400,9 @@ class HaizFlowController(QObject):
         if requested in {"small-gpu", "large-v3-turbo"} and not gpu_available:
             reason = validate_processing_device("gpu", capabilities)[1] if capabilities else "GPU NVIDIA chưa khả dụng."
             self._show_app_alert("Máy không đáp ứng", reason, "warning")
+            return
+        if requested == "large-v3-turbo" and not HaizFlowController._heavy_gpu_models_available(self):
+            self._show_app_alert("Máy không đáp ứng", "Card 4 GB dùng Whisper Small trên GPU.", "warning")
             return
         if requested == "large-v3-turbo" and not getattr(self, "_whisper_turbo_model_ready", False):
             self._show_app_alert(
@@ -1410,11 +1426,12 @@ class HaizFlowController(QObject):
         # therefore reports CUDA as unavailable.  This property is evaluated
         # after the asynchronous hardware probe as well, so use its cached,
         # authoritative result instead of permanently disabling Turbo.
-        turbo_available = HaizFlowController._project_gpu_available(self)
+        gpu_available = HaizFlowController._project_gpu_available(self)
+        turbo_available = HaizFlowController._heavy_gpu_models_available(self)
         if getattr(self, "_settings_language", "en") == "vi":
             return [
                 {"value": "small-cpu", "label": "Whisper Small · CPU", "available": True},
-                {"value": "small-gpu", "label": "Whisper Small · GPU", "available": turbo_available},
+                {"value": "small-gpu", "label": "Whisper Small · GPU", "available": gpu_available},
                 {
                     "value": "large-v3-turbo",
                     "label": "Whisper Turbo · GPU NVIDIA",
@@ -1423,7 +1440,7 @@ class HaizFlowController(QObject):
             ]
         return [
             {"value": "small-cpu", "label": "Whisper Small · CPU", "available": True},
-            {"value": "small-gpu", "label": "Whisper Small · GPU", "available": turbo_available},
+            {"value": "small-gpu", "label": "Whisper Small · GPU", "available": gpu_available},
             {
                 "value": "large-v3-turbo",
                 "label": "Whisper Turbo · NVIDIA GPU",
@@ -2301,7 +2318,9 @@ class HaizFlowController(QObject):
         pre-TTS review instead previews the source/Demucs bed and optional
         background music with the same persisted volume settings as render.
         """
-        video = self._selected_video()
+        return HaizFlowController._review_preview_media_for(self, self._selected_video())
+
+    def _review_preview_media_for(self, video):
         if not video:
             return {}
 
@@ -3019,8 +3038,8 @@ class HaizFlowController(QObject):
 
     @translationModel.setter
     def translationModel(self, value):
-        normalized = str(value or "auto").lower()
-        if normalized not in {"auto", "q4", "full", *gemini_translation.MODELS}:
+        normalized = str(value or "").lower()
+        if normalized not in {"q4", "full", *gemini_translation.MODELS}:
             return
         if normalized in gemini_translation.MODELS:
             if normalized != self._translation_model:
@@ -3033,6 +3052,9 @@ class HaizFlowController(QObject):
             return
         if normalized == "full" and self._settings_processing_device != "gpu":
             self._show_app_alert("Máy không đáp ứng", "HY-MT2 GPU cần GPU NVIDIA tương thích.", "warning")
+            return
+        if normalized == "full" and not HaizFlowController._heavy_gpu_models_available(self):
+            self._show_app_alert("GPU không đủ VRAM", "HY-MT2 GPU đầy đủ cần ít nhất 5 GiB VRAM. Chọn HY-MT2 CPU Q4 để dịch trên máy này.", "warning")
             return
         resource_packs = getattr(self, "_resource_packs", None)
         if resource_packs is not None:
@@ -3657,23 +3679,34 @@ class HaizFlowController(QObject):
         device = getattr(self, "_active_processing_device", self._settings_processing_device)
         previous = getattr(self, "_draft_processing_device", device)
         self._draft_processing_device = device
+        capabilities = getattr(self, "_hardware_capabilities", None)
+        vram = (getattr(capabilities, "total_vram_bytes", None)
+                if getattr(self, "_startup_hardware_resolved", False) else None)
         if previous == device:
-            return
+            # The initial quick probe has no CUDA memory data. Correct only
+            # untouched empty-project defaults after the full probe arrives.
+            if device != "gpu" or getattr(self, "_selected_video_id", None) or vram is None:
+                return
+            from haizflow.core.model_choices import project_model_defaults
+
+            legacy = project_model_defaults("gpu")
+            if any(getattr(self, name, None) != value for name, value in legacy.items()):
+                return
         from haizflow.core.model_choices import models_for_device, project_model_defaults
 
         for video_id, draft in list(getattr(self, "_manual_settings_drafts", {}).items()):
             if not self._processing_queue.contains(video_id):
                 self._manual_settings_drafts[video_id] = draft.model_copy(update=models_for_device(device,
                     recognition=draft.speech_recognition_model, translation=draft.translation_model,
-                    voice=draft.tts_provider))
+                    voice=draft.tts_provider, total_vram_bytes=vram))
         if self._selected_video_id:
             if self._processing_queue.contains(self._selected_video_id):
                 return
             values = {"_" + key: value for key, value in models_for_device(device,
                 recognition=self._speech_recognition_model, translation=self._translation_model,
-                voice=self._tts_provider).items()}
+                voice=self._tts_provider, total_vram_bytes=vram).items()}
         else:
-            values = project_model_defaults(device)
+            values = project_model_defaults(device, total_vram_bytes=vram)
         changed = {}
         for attribute, value in values.items():
             if getattr(self, attribute) != value:
@@ -3702,6 +3735,20 @@ class HaizFlowController(QObject):
     def batchSettings(self):
         """Return a batch draft without mutating shared editor state."""
         return self._batch_settings_values()
+
+    @Slot(result="QVariantMap")
+    def batchResults(self):
+        return HaizFlowController._project_commands_for(self).batch_results()
+
+    @Slot(result="QVariantList")
+    def batchPreviewSources(self):
+        return HaizFlowController._project_commands_for(self).batch_preview_sources()
+
+    @Slot(str, result="QVariantMap")
+    def batchPreviewMedia(self, video_id):
+        if str(video_id) not in self._batch_video_ids:
+            return {}
+        return HaizFlowController._review_preview_media_for(self, video_store.get_video(str(video_id)))
 
     @Slot(str, "QVariantMap", bool, result=bool)
     def applyBatchSettingsValues(self, project_key, values, replace_overrides):
@@ -4131,6 +4178,10 @@ class HaizFlowController(QObject):
     @Slot(str, result=str)
     def chooseVideoExportDestination(self, video_id):
         return self._video_exports.choose_file(video_id)
+
+    @Slot(result=bool)
+    def exportSelectedSrt(self):
+        return HaizFlowController._project_commands_for(self).export_selected_srt()
 
     @Slot(str, str, str, bool, result=bool)
     def exportVideoTo(self, video_id, preset, destination, overwrite):
@@ -5325,7 +5376,10 @@ class HaizFlowController(QObject):
         from haizflow.services import result_segments
 
         def split(document):
-            result_segments.split(document, str(clip_id), int(time_ms), editor_documents.new_id("result"))
+            if clip_id:
+                result_segments.split(document, str(clip_id), int(time_ms), editor_documents.new_id("result"))
+            else:
+                result_segments.split_at(document, int(time_ms), editor_documents.new_id("result"))
 
         return self._apply_editor_mutation("split_result", split)
 
@@ -6917,7 +6971,12 @@ class HaizFlowController(QObject):
         )
 
     def _build_config(self):
+        from haizflow.core.model_choices import project_translation_choice
+
         manual_subtitle_layout = bool(self._subtitle_layout_override)
+        translation_model = project_translation_choice(
+            self._translation_model, self._settings_processing_device,
+            total_vram_bytes=getattr(getattr(self, "_hardware_capabilities", None), "total_vram_bytes", None))
         return VideoConfig(
             # Auto and Batch no longer expose the legacy pre-TTS review mode.
             # Manual projects provide the explicit, checkpointed editing flow.
@@ -6925,8 +6984,8 @@ class HaizFlowController(QObject):
             source_language="auto",
             target_language=self._target_language,
             speech_recognition_model=self._speech_recognition_model,
-            translation_model=self._translation_model,
-            translator_provider="gemini" if self._translation_model in gemini_translation.MODELS else "hymt2",
+            translation_model=translation_model,
+            translator_provider="gemini" if translation_model in gemini_translation.MODELS else "hymt2",
             tts_provider=self._tts_provider,
             tts_voice=self._tts_voice,
             speaker_mode=self._speaker_mode,

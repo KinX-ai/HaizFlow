@@ -19,7 +19,8 @@ FloatingToolDialog {
     property bool autoAlignToCover: false
     property var coverLayout: ({})
     readonly property bool layoutLocked: coverEnabled && autoAlignToCover
-    readonly property var previewMedia: AppController.reviewPreviewMedia || ({})
+    property var previewMedia: AppController.reviewPreviewMedia || ({})
+    property url previewSource: AppController.videoThumbnailSource
     readonly property int sourceWidth: Number(previewMedia.videoWidth || 1920)
     readonly property int sourceHeight: Number(previewMedia.videoHeight || 1080)
 
@@ -164,7 +165,7 @@ FloatingToolDialog {
                     id: previewImage
                     anchors.fill: parent
                     anchors.margins: 1
-                    source: AppController.videoThumbnailSource
+                    source: root.previewSource
                     sourceSize.width: 1280
                     sourceSize.height: 720
                     fillMode: Image.PreserveAspectFit

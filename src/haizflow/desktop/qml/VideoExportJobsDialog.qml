@@ -11,6 +11,18 @@ AppDialog {
     preferredWidth: 640
     maximumHeight: 650
 
+    Text {
+        Layout.fillWidth: true
+        visible: AppController.videoExportJobs.length > 1
+        text: qsTr("%1 thành công · %2 lỗi · %3 đã hủy")
+            .arg(AppController.videoExportJobs.filter(item => item.status === "done").length)
+            .arg(AppController.videoExportJobs.filter(item => item.status === "failed").length)
+            .arg(AppController.videoExportJobs.filter(item => item.status === "cancelled").length)
+        color: Theme.text
+        font.pixelSize: TypeScale.control
+        wrapMode: Text.WordWrap
+    }
+
     ScrollView {
         id: jobsView
         Layout.fillWidth: true

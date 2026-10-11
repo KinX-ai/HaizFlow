@@ -99,6 +99,21 @@ def _load_whisper_model(device: str, compute_type: str, threads: int, model_name
     )
 
 
+def _constrain_four_gb_vad(asr_model, profile, device: str) -> None:
+    """Leave CUDA for Whisper Small; Pyannote VAD can run on the CPU."""
+    total_vram_bytes = getattr(profile, "total_vram_bytes", None)
+    if device != "cuda" or total_vram_bytes is None or not 0 < total_vram_bytes < 5 * 1024**3:
+        return
+    if getattr(asr_model, "_haizflow_vad_cpu", False) is True:
+        return
+    vad_pipeline = getattr(getattr(asr_model, "vad_model", None), "vad_pipeline", None)
+    if vad_pipeline is not None:
+        vad_pipeline.to(torch.device("cpu"))
+        asr_model._haizflow_vad_cpu = True
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 def warm_whisperx_model(model_name: str = "small", *, device_preference: str | None = None):
     """Load the ASR model once in the background so the first video starts promptly."""
     global _WARM_ASR_MODEL, _WARM_DEVICE, _WARM_MODEL_NAME
@@ -118,6 +133,7 @@ def warm_whisperx_model(model_name: str = "small", *, device_preference: str | N
         compute_type = whisper_compute_type(device)
         try:
             model = _load_whisper_model(device, compute_type, profile.cpu_threads, model_name)
+            _constrain_four_gb_vad(model, profile, device)
         except Exception:
             _WARM_ASR_MODEL = None
             _WARM_DEVICE = None
@@ -170,7 +186,7 @@ def _transcribe_with_vad_recovery(asr_model, audio, profile, device: str, video_
     initial_batch = min(int(profile.whisper_batch_size), 4 if low_vram else 8)
     vad_inference.batch_size = max(1, min(int(vad_inference.batch_size), initial_batch))
     log_to_video(video_id, f"WhisperX VAD batch size: {vad_inference.batch_size}.")
-    vad_on_cpu = device != "cuda"
+    vad_on_cpu = device != "cuda" or getattr(asr_model, "_haizflow_vad_cpu", False) is True
 
     while True:
         check_cancellation(video_id)
@@ -1181,6 +1197,8 @@ def transcribe(
 
     profile = cpu_runtime_profile(runtime_profile(), force_cpu=device_preference == "cpu")
     device = "cuda" if profile.cuda_available and device_preference != "cpu" else "cpu"
+    if model_name == "large-v3-turbo" and device == "cuda" and 0 < profile.total_vram_bytes < 5 * 1024**3:
+        raise RuntimeError("Card 4 GB dùng Whisper Small trên GPU; Whisper Turbo cần thêm VRAM.")
     if model_name == "large-v3-turbo" and device != "cuda":
         raise RuntimeError(
             "Whisper large-v3-turbo requires an available NVIDIA GPU. "
@@ -1223,6 +1241,9 @@ def transcribe(
                         "Released the warmed WhisperX model before switching ASR models.",
                     )
                 asr_model = _load_whisper_model(device, compute_type, profile.cpu_threads, model_name)
+        _constrain_four_gb_vad(asr_model, profile, device)
+        if getattr(asr_model, "_haizflow_vad_cpu", False):
+            log_to_video(video_id, "Four GB GPU profile: Whisper runs on CUDA; VAD runs on CPU.")
         audio = whisperx.load_audio(audio_path)
         if source_language != "auto":
             log_to_video(video_id, f"Ignoring legacy source language '{source_language}'; using automatic detection.")
@@ -1256,10 +1277,11 @@ def transcribe(
                 asr_model, audio, initial_segments, detected_language, video_id,
             )
 
+        alignment_device = "cpu" if device == "cuda" and 0 < profile.total_vram_bytes < 5 * 1024**3 else device
         sentence_segments = _align_segments_by_language(
             audio,
             initial_segments,
-            device,
+            alignment_device,
             video_id,
             progress_callback=progress_callback,
         )
@@ -1288,7 +1310,7 @@ def transcribe(
             aligned_segments = _align_segments_by_language(
                 audio,
                 source_segments,
-                device,
+                alignment_device,
                 video_id,
                 progress_callback=None,
             )

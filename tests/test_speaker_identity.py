@@ -12,6 +12,32 @@ from haizflow.pipeline import speaker_identity as identity
 
 
 class SpeakerIdentityTests(unittest.TestCase):
+    def test_pitch_keeps_male_fundamental_with_a_stronger_second_harmonic(self):
+        time = np.arange(16000) / 16000
+        audio = 2000 * (0.35 * np.sin(2 * np.pi * 120 * time) + np.sin(2 * np.pi * 240 * time))
+        samples = identity._pitch_samples(audio)
+        self.assertGreater(len(samples), 8)
+        self.assertAlmostEqual(float(np.median(samples)), 120, delta=2)
+        self.assertEqual(identity._voice_pitch_profile(samples)[0], "male")
+
+    def test_clear_female_register_is_retained(self):
+        audio = 2000 * np.sin(2 * np.pi * 260 * np.arange(32000) / 16000)
+        samples = identity._pitch_samples(audio)
+        self.assertAlmostEqual(float(np.median(samples)), 260, delta=2)
+        self.assertEqual(identity._voice_pitch_profile(samples)[:2], ("female", False))
+
+    def test_shouting_does_not_replace_the_habitual_register(self):
+        kind, uncertain, _ = identity._voice_pitch_profile([140] * 30 + [240] * 70)
+        self.assertEqual(kind, "male")
+        self.assertTrue(uncertain)
+
+    def test_noise_silence_and_unknown_pitch_are_not_confident_gender_evidence(self):
+        self.assertEqual(identity._pitch_samples(np.zeros(16000)), [])
+        self.assertEqual(identity._pitch_samples(np.full(16000, np.nan)), [])
+        self.assertEqual(identity._pitch_samples(np.random.default_rng(7).normal(0, 2000, 16000)), [])
+        self.assertEqual(identity._voice_pitch_profile([])[:2], ("male", True))
+        self.assertTrue(identity._voice_pitch_profile([180] * 30)[1])
+
     def test_short_only_dialogue_is_not_forced_to_one_person(self):
         vectors = np.array([[1, 0], [0, 1], [.99, .02], [.01, .99]], dtype=np.float32)
         vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
@@ -25,6 +51,32 @@ class SpeakerIdentityTests(unittest.TestCase):
         segments = [{"start": 0, "end": 3}, {"start": 3, "end": 6}, {"start": 6, "end": 6.7}]
         labels, _scores = identity._label_turns(vectors, list(range(3)), segments)
         self.assertEqual(labels, [0, 1, 0])
+
+    def test_male_source_profile_reaches_tts_despite_default_female_preset(self):
+        from types import SimpleNamespace
+        from haizflow.pipeline import tts
+
+        kind, uncertain, pitch = identity._voice_pitch_profile([120] * 30 + [240] * 50)
+        self.assertEqual(kind, "male")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            segments = [{"start": 11.184, "end": 12.744, "text": "A translated line."}]
+            transcript = root / "translated.json"
+            transcript.write_text(json.dumps(segments), encoding="utf-8")
+            audio = root / "source.wav"
+            audio.touch()
+            mapped = [{**segments[0], "speaker_id": "speaker-3", "speaker_voice": "omnivoice:male",
+                       "speaker_pitch_hz": pitch, "speaker_voice_uncertain": uncertain}]
+            video = SimpleNamespace(speaker_mode="multiple", files={"source_segments": str(transcript),
+                                                                      "speech_audio": str(audio)})
+            def synthesize(items, *_args, **_kwargs):
+                for item in items:
+                    Path(item["output_path"]).write_bytes(b"ID3" + bytes(600))
+            with (patch.object(tts, "get_video", return_value=video), patch.object(tts, "log_to_video"),
+                  patch.object(identity, "prepare_speakers", return_value=mapped),
+                  patch("haizflow.pipeline.omnivoice_tts.synthesize_batch_to_mp3", side_effect=synthesize) as worker):
+                tts.generate_voice_parts(str(transcript), str(root / "parts"), "omnivoice:female", "fixture")
+            self.assertEqual(worker.call_args.args[0][0]["voice"], "omnivoice:male")
 
     def test_multiple_speaker_logs_match_voices_sent_to_worker(self):
         from types import SimpleNamespace

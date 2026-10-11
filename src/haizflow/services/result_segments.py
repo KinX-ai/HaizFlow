@@ -46,3 +46,10 @@ def split(document, clip_id, position, new_id) -> bool:
                                         key=lambda item: (item.start_ms, item.clip_id)), 1):
         item.name = f"Đoạn {index}"
     return True
+
+
+def split_at(document, position, new_id) -> bool:
+    """Split the result range under the playhead without requiring selection."""
+    clip = next((item for item in document.clips if item.kind == "result" and item.enabled
+                 and item.start_ms + 80 <= position <= item.start_ms + item.duration_ms - 80), None)
+    return split(document, clip.clip_id, position, new_id) if clip else False

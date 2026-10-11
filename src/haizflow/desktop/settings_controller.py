@@ -79,6 +79,15 @@ class SettingsController:
         if model_changed and translation_model == "full" and host._settings_processing_device != "gpu":
             QMessageBox.warning(None, "Translation model", "HY-MT2 đầy đủ cần GPU NVIDIA tương thích. Hãy chọn Tự động hoặc Q4.")
             return False
+        if translation_model == "full":
+            if not host._ensure_hardware_ready_for_action():
+                return False
+            from haizflow.core.model_choices import heavy_gpu_choice_blocked
+
+            if heavy_gpu_choice_blocked(host._settings_processing_device,
+                                        getattr(host, "_hardware_capabilities", None), translation="full"):
+                host.appAlertRequested.emit("GPU không đủ VRAM", "HY-MT2 GPU đầy đủ cần ít nhất 5 GiB VRAM. Chọn HY-MT2 CPU Q4.", "warning")
+                return False
         history_before = {
             "language": str(host._settings_language),
             "translation_model": str(getattr(host, "_settings_translation_model", "auto")),

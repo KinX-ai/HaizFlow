@@ -934,6 +934,15 @@ def _usable_source_reference(start: float, end: float, text: str) -> bool:
     return 2.5 <= end - start <= 15.0 and enough_text
 
 
+def _validate_speaker_voices(items, speaker_mode: str) -> None:
+    """Reject incomplete per-speaker requests instead of using a narrator fallback."""
+    if speaker_mode == "multiple" and any(
+        not isinstance(item, dict) or item.get("voice") not in OMNIVOICE_VOICE_INSTRUCTIONS
+        for item in items
+    ):
+        raise RuntimeError("Không xác định được giọng từng người nói. Hãy chạy lại nhận diện người nói.")
+
+
 def synthesize_batch_to_mp3(
     items: list[dict[str, str]],
     video_id: str,
@@ -950,6 +959,7 @@ def synthesize_batch_to_mp3(
     """Synthesize missing segments, normally reusing one warm isolated model."""
     if not items:
         return
+    _validate_speaker_voices(items, speaker_mode)
     cancellation_id = process_registry_id or video_id
     check_cancellation(cancellation_id)
     log_to_video(
@@ -1051,8 +1061,8 @@ def synthesize_batch_to_mp3(
             "device": "cuda:0" if (device or processing_device_preference()) == "gpu" else "cpu",
             "cpu_threads": _cpu_voice_threads() if (device or processing_device_preference()) != "gpu" else 1,
             "language": _omnivoice_language_id(language_id),
-            "narrator_anchor_text": str(narrator_anchor_text or "").strip()
-            or _narrator_anchor_text(language_id),
+            "narrator_anchor_text": (str(narrator_anchor_text or "").strip()
+                                     or _narrator_anchor_text(language_id)) if speaker_mode != "multiple" else "",
             "items": request_items,
             "speaker_mode": "multiple" if speaker_mode == "multiple" else "single",
             "inference_steps": max(8, min(32, int(inference_steps or
@@ -1347,12 +1357,24 @@ def _gpu_batch_ceiling(torch, device: str, maximum: int = 2) -> int:
     """Use reclaimable allocator blocks as well as driver free VRAM."""
     if not device.startswith("cuda"):
         return 1  # CPU throughput is not improved by padding unlike GPU.
-    free, _total = torch.cuda.mem_get_info()
+    free, total = torch.cuda.mem_get_info()
+    # A paired utterance can spike the codec above the single-voice peak.
+    # On a 4 GB board keep the official FP16/32-step model, but synthesize
+    # one sentence at a time. Larger boards keep their reclaimable budget.
+    if 0 < total < 5 * 1024**3:
+        return 1
     reclaimable = max(0, torch.cuda.memory_reserved() - torch.cuda.memory_allocated())
     # Reserve 1.5 GiB for codec work and other desktop/GPU consumers, plus a
     # conservative 0.5 GiB for each concurrent short sentence.
     budget = free + reclaimable - int(1.5 * 1024**3)
     return max(1, min(maximum, int(budget // (512 * 1024**2))))
+
+
+def _low_vram_gpu(torch, device: str, *, requested: bool = False) -> bool:
+    if not device.startswith("cuda"):
+        return False
+    _free, total = torch.cuda.mem_get_info()
+    return requested or 0 < total < 5 * 1024**3
 
 
 def _adaptive_batch_profile(runtime, device, language, item, steps=32):
@@ -1406,7 +1428,7 @@ def _validated_waveforms(generated, count, np, torch):
     return waves
 
 
-def _generate_bounded_batch(generate, items, torch, device):
+def _generate_bounded_batch(generate, items, torch, device, *, retry_single_oom=None):
     """Reduce invalid paired audio or CUDA OOM to individual synthesis.
 
     Never retry arbitrary SDK errors, a corrupt single output, or CPU OOM.
@@ -1416,6 +1438,7 @@ def _generate_bounded_batch(generate, items, torch, device):
     retries = 0
     while True:
         allocation_failed = False
+        retry_with_shorter_chunks = False
         try:
             return generate(candidate), candidate, retries
         except RuntimeError as exc:
@@ -1425,7 +1448,9 @@ def _generate_bounded_batch(generate, items, torch, device):
                 )
             )
             invalid_batch = isinstance(exc, _InvalidSynthesisAudio)
-            if (len(candidate) == 1 or not (invalid_batch or (device.startswith("cuda") and allocation_error))):
+            if len(candidate) == 1 and device.startswith("cuda") and allocation_error and retry_single_oom is not None:
+                retry_with_shorter_chunks = True
+            elif (len(candidate) == 1 or not (invalid_batch or (device.startswith("cuda") and allocation_error))):
                 raise
             allocation_failed = True
         # Leave the exception frame before GC: its traceback may own tensors.
@@ -1433,7 +1458,14 @@ def _generate_bounded_batch(generate, items, torch, device):
             gc.collect()
             if device.startswith("cuda"):
                 torch.cuda.empty_cache()
-            candidate = candidate[:1 if invalid_batch else max(1, len(candidate) // 2)]
+            if retry_with_shorter_chunks:
+                # Only one emergency retry: a smaller audio chunk bounds a
+                # long utterance's decoder peak without changing weights,
+                # precision or inference steps. Never retry arbitrary errors.
+                generate = retry_single_oom
+                retry_single_oom = None
+            else:
+                candidate = candidate[:1 if invalid_batch else max(1, len(candidate) // 2)]
             retries += 1
 
 
@@ -1502,6 +1534,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
     if request.get("operation") == "release_model":
         _release_worker_model(runtime)
         return 0
+    _validate_speaker_voices(request.get("items") or [], str(request.get("speaker_mode") or "single"))
     site_packages = str(request["site_packages"])
     modules = runtime.get("modules")
     items = request.get("items") or []
@@ -1563,6 +1596,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
     if device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+    low_vram_gpu = _low_vram_gpu(torch, device, requested=bool(request.get("low_vram_gpu")))
     dtype = torch.float16 if device.startswith("cuda") else torch.float32
     model_key = (str(request["model_root"]), device)
     model = runtime.get("model") if runtime.get("model_key") == model_key else None
@@ -1635,7 +1669,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
             reference_started = time.monotonic()
             anchor_prompt = _encode_voice_reference(model, torch, preset_reference, preset_transcript)
             narrator_prompt_cache[anchor_key] = anchor_prompt
-            while len(narrator_prompt_cache) > 4:
+            while len(narrator_prompt_cache) > (1 if low_vram_gpu else 4):
                 narrator_prompt_cache.pop(next(iter(narrator_prompt_cache)))
             timings["reference_encoding"] += time.monotonic() - reference_started
         elif anchor_prompt is None and anchor_text:
@@ -1667,7 +1701,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
                 sf.write(str(anchor_path), anchor_waveform, sample_rate, subtype="PCM_16")
                 anchor_prompt = _encode_voice_reference(model, torch, str(anchor_path), anchor_text)
                 narrator_prompt_cache[anchor_key] = anchor_prompt
-                while len(narrator_prompt_cache) > 4:
+                while len(narrator_prompt_cache) > (1 if low_vram_gpu else 4):
                     narrator_prompt_cache.pop(next(iter(narrator_prompt_cache)))
             finally:
                 del generated_anchor, anchor_waveform
@@ -1676,7 +1710,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
 
     write_status(0, "synthesizing")
     offset = 0
-    maximum_batch = 2
+    maximum_batch = 1 if low_vram_gpu else 2
     while offset < len(synthesis_items):
         item = synthesis_items[offset]
         completed = offset + 1
@@ -1711,7 +1745,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
                 voice_clone_prompt = _encode_voice_reference(model, torch, reference_path, reference_text)
                 if cache_prompt:
                     prompt_cache[prompt_key] = voice_clone_prompt
-                    while len(prompt_cache) > 2:
+                    while len(prompt_cache) > (1 if low_vram_gpu else 2):
                         prompt_cache.pop(next(iter(prompt_cache)))
                 timings["reference_encoding"] += time.monotonic() - reference_started
         elif speaker_mode == "multiple" and item.get("preset_reference_path") and item.get("preset_reference_text"):
@@ -1723,7 +1757,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
                 voice_clone_prompt = _encode_voice_reference(
                     model, torch, str(item["preset_reference_path"]), str(item["preset_reference_text"]))
                 preset_cache[preset_key] = voice_clone_prompt
-                while len(preset_cache) > 4:
+                while len(preset_cache) > (1 if low_vram_gpu else 4):
                     preset_cache.pop(next(iter(preset_cache)))
                 timings["reference_encoding"] += time.monotonic() - reference_started
         elif anchor_prompt is not None and speaker_mode != "multiple":
@@ -1741,7 +1775,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
             reset_seed(item_seed if speaker_mode == "multiple" else voice_seed)
             synthesis_started = time.monotonic()
 
-            def generate(candidate):
+            def generate(candidate, *, chunk_duration=10.0, chunk_threshold=8.0):
                 last_observation = 0.0
 
                 def observe_forward():
@@ -1763,14 +1797,18 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
                         voice_clone_prompt=voice_clone_prompt,
                         num_step=int(request.get("inference_steps") or 32),
                         normalize_text=False,
-                        audio_chunk_duration=10.0,
-                        audio_chunk_threshold=8.0,
+                        audio_chunk_duration=chunk_duration,
+                        audio_chunk_threshold=chunk_threshold,
                     )
                 # Validate inside the bounded batch operation, not afterwards:
                 # otherwise one invalid pair aborts the complete video.
                 return _validated_waveforms(result, len(candidate), np, torch)
 
-            generated, batch, retries = _generate_bounded_batch(generate, batch, torch, device)
+            generated, batch, retries = _generate_bounded_batch(
+                generate, batch, torch, device,
+                retry_single_oom=(lambda candidate: generate(candidate, chunk_duration=6.0, chunk_threshold=5.0))
+                if low_vram_gpu else None,
+            )
             batch_retries += retries
             if retries:
                 maximum_batch = len(batch)

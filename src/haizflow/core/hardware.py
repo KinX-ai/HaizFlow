@@ -19,8 +19,10 @@ _GIB = 1024 ** 3
 # inference policy, not an approximation of how much RAM was installed.
 _MIN_INSTALLED_RAM_BYTES = 16 * _GIB
 _MIN_USABLE_RAM_BYTES = 8 * _GIB
-MIN_GPU_VRAM_GIB = 5
-_MIN_GPU_VRAM_BYTES = MIN_GPU_VRAM_GIB * _GIB
+# A nominal 4 GB board may report slightly under 4 GiB to the driver. Keep
+# 3 GB boards excluded, while admitting 4 GB CUDA cards for the light GPU path.
+_MIN_GPU_VRAM_BYTES = 7 * _GIB // 2
+_HEAVY_GPU_VRAM_BYTES = 5 * _GIB
 _FULL_GPU_VRAM_BYTES = 12 * _GIB
 _DEVICE_PREFERENCES = {"cpu", "gpu"}
 _TRANSLATION_MODELS = {"auto", "q4", "full"}
@@ -82,6 +84,11 @@ class HardwareCapabilities:
         # Free VRAM and AC state change during a session. They affect speed or
         # whether a particular load succeeds, not whether the GPU is capable.
         return self.cpu_supported
+
+    @property
+    def heavy_gpu_models_supported(self) -> bool:
+        """Turbo and full HY-MT2 need more VRAM than the light GPU path."""
+        return self.gpu_supported and self.total_vram_bytes >= _HEAVY_GPU_VRAM_BYTES
 
     @property
     def cpu_supported(self) -> bool:
@@ -465,8 +472,8 @@ def validate_processing_device(
             return False, "Không phát hiện GPU NVIDIA tương thích CUDA." if language == "vi" else "CUDA-compatible NVIDIA GPU was not detected."
         if capabilities.total_vram_bytes < _MIN_GPU_VRAM_BYTES:
             available = capabilities.total_vram_bytes / _GIB
-            return False, (f"Cần GPU NVIDIA 6 GB (ít nhất 5 GiB VRAM khả dụng); hiện có {available:.1f} GiB." if language == "vi" else
-                f"GPU mode requires a 6 GB NVIDIA GPU (at least 5 GiB usable VRAM); detected {available:.1f} GiB."
+            return False, (f"Cần GPU NVIDIA CUDA có ít nhất 3.5 GiB VRAM riêng (card 4 GB); hiện có {available:.1f} GiB." if language == "vi" else
+                f"GPU mode requires a CUDA NVIDIA card with at least 3.5 GiB dedicated VRAM (4 GB class); detected {available:.1f} GiB."
             )
     installed = getattr(capabilities, "installed_ram_bytes", None)
     usable = capabilities.total_ram_bytes
@@ -529,8 +536,9 @@ def runtime_profile_for(
             total_vram_bytes=capabilities.total_vram_bytes,
             total_ram_bytes=total_ram,
             logical_cpu_count=logical_cpus,
-            cpu_threads=max(1, min(8, logical_cpus - 1 if logical_cpus > 2 else logical_cpus)),
-            whisper_batch_size=2 if capabilities.total_vram_bytes < 7 * _GIB else 8 if low_vram else 16,
+            cpu_threads=max(1, min(4 if not capabilities.heavy_gpu_models_supported else 8,
+                logical_cpus - 1 if logical_cpus > 2 else logical_cpus)),
+            whisper_batch_size=1 if not capabilities.heavy_gpu_models_supported else 2 if capabilities.total_vram_bytes < 7 * _GIB else 8 if low_vram else 16,
             # CUDA keeps the official checkpoint. Precision is selected from
             # the active GPU architecture without changing model quality.
             hymt2_backend="transformers",
@@ -538,7 +546,7 @@ def runtime_profile_for(
             warm_hymt2_on_startup=not constrained_memory,
             # Low-memory workers are loaded on demand and released shortly
             # after use instead of pinning model weights for the whole session.
-            translation_idle_seconds=30 if constrained_memory else 0,
+            translation_idle_seconds=0 if not capabilities.heavy_gpu_models_supported else 30 if constrained_memory else 0,
             hymt2_dtype="bfloat16" if capabilities.cuda_bf16_supported else "float16",
         )
 

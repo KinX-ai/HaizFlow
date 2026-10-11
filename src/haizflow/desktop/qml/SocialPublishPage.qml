@@ -222,11 +222,13 @@ Item {
             Layout.maximumWidth: 1680
             Layout.alignment: Qt.AlignHCenter | Qt.AlignTop
             Layout.preferredHeight: Math.min(Math.max(queueList.count * 64, 72),
-                Math.max(72, root.height
+                Math.max(0, root.height - UiMetrics.pageMargin * 2
                     - pageHeader.height - setupPanel.height - queueHeader.height
-                    - Theme.space16 * 3))
+                    - Theme.space16 * 4))
+            Layout.minimumHeight: 0
             Layout.maximumHeight: Layout.preferredHeight
             padding: 0
+            clip: true
 
             ListView {
                 id: queueList

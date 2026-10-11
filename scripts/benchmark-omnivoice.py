@@ -20,6 +20,7 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=2, help="Repeat matched workloads after a single warm-up.")
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--pipeline", action="store_true", help="Also verify production batching and model-release/reload timings.")
+    parser.add_argument("--gpu-limit-gib", type=float, help="Cap the PyTorch CUDA allocator for a low-VRAM smoke test.")
     args = parser.parse_args()
     from haizflow.config import MODELS_DIR
     from haizflow.pipeline.omnivoice_tts import _encode_voice_reference, _prepare_isolated_runtime, _preset_reference, _worker_environment
@@ -34,7 +35,18 @@ def main() -> int:
     import torch
     from omnivoice import OmniVoice
 
+    if args.gpu_limit_gib is not None:
+        if args.device != "gpu" or args.gpu_limit_gib < 3:
+            parser.error("--gpu-limit-gib requires GPU mode and a limit of at least 3 GiB.")
+        total = torch.cuda.get_device_properties(0).total_memory
+        fraction = args.gpu_limit_gib * 1024**3 / total
+        if fraction >= 1:
+            parser.error("--gpu-limit-gib must be below the physical GPU memory.")
+        torch.cuda.set_per_process_memory_fraction(fraction, 0)
+
     report = {"device": args.device, "imports_seconds": round(time.perf_counter() - started, 3), "results": []}
+    if args.gpu_limit_gib is not None:
+        report["gpu_allocator_limit_gib"] = args.gpu_limit_gib
     args.report.parent.mkdir(parents=True, exist_ok=True)
 
     def save():
@@ -126,6 +138,7 @@ def main() -> int:
         output_root.mkdir(parents=True, exist_ok=True)
         request = {"model_root": str(Path(MODELS_DIR) / "omnivoice"), "site_packages": str(sdk),
                    "device": device, "language": "vi", "speaker_mode": "single", "voice_seed": 42,
+                   "low_vram_gpu": args.gpu_limit_gib is not None and args.gpu_limit_gib < 5,
                    "inference_steps": 32 if args.device == "gpu" else 16,
                    "preset_reference_path": reference, "preset_reference_text": transcript,
                    "items": [{"text": text, "voice": "omnivoice:male", "wav_path": str(output_root / f"voice_{index:04d}.wav")}

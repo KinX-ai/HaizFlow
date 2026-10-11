@@ -15,7 +15,66 @@ from haizflow.utils.ffmpeg import _binary
 from haizflow.utils.atomic_file import atomic_json
 
 from haizflow.core.bundled_models import MODEL_FILE, MODEL_SIZE, MODEL_SHA256, MODEL_REVISION, MODEL_URL as MODEL_URL
-IDENTITY_VERSION = "wespeaker-stable-target-voices-v3-short-dialogue"
+IDENTITY_VERSION = "wespeaker-stable-target-voices-v4-periodic-pitch"
+
+
+def _pitch_samples(audio):
+    """Reliable F0 frames at 16 kHz, using YIN's normalized difference.
+
+    Unlike windowed autocorrelation peaks, the first periodic minimum is
+    less prone to selecting a strong second harmonic as the fundamental.
+    Mathematical reference: de Cheveigne & Kawahara, JASA 111 (2002).
+    Work is bounded by the eight-second turn supplied by the caller.
+    """
+    import numpy as np
+
+    audio = np.asarray(audio, dtype=np.float64)
+    if len(audio) < 1024 or not np.isfinite(audio).all():
+        return []
+    frames = np.lib.stride_tricks.sliding_window_view(audio, 1024)[::800].copy()
+    frames -= frames.mean(axis=1, keepdims=True)
+    frames = frames[np.sqrt(np.mean(frames ** 2, axis=1)) >= 20]
+    if not len(frames):
+        return []
+    max_lag = 229
+    correlation = np.fft.irfft(np.abs(np.fft.rfft(frames, n=2048)) ** 2, n=2048)[:, :max_lag + 1]
+    energy = np.concatenate((np.zeros((len(frames), 1)), np.cumsum(frames ** 2, axis=1)), axis=1)
+    lags = np.arange(1, max_lag + 1)
+    difference = np.maximum(0, energy[:, 1024 - lags] + energy[:, -1, None]
+                            - energy[:, lags] - 2 * correlation[:, 1:])
+    difference /= 1024 - lags
+    normalized = difference * lags / np.maximum(np.cumsum(difference, axis=1), 1e-12)
+    estimates = []
+    for curve in normalized:
+        # Only accept clearly periodic frames; noise/silence is not evidence
+        # of either a male or female voice.
+        for index in range(39, max_lag - 1):
+            if curve[index] < 0.18 and curve[index] <= curve[index - 1] and curve[index] < curve[index + 1]:
+                denominator = curve[index - 1] - 2 * curve[index] + curve[index + 1]
+                offset = (0.5 * (curve[index - 1] - curve[index + 1]) / denominator
+                          if denominator > 1e-12 else 0.0)
+                estimates.append(16000 / (index + 1 + float(np.clip(offset, -.5, .5))))
+                break
+    return estimates
+
+
+def _voice_pitch_profile(samples):
+    """Choose a preset family, not a person's gender, from voiced evidence.
+
+    A raised/shouted phrase should not change the whole speaker to a female
+    preset. Retain their lower, habitual register across reliable frames.
+    Overlapping registers and sparse evidence are explicitly uncertain.
+    """
+    import numpy as np
+
+    values = np.asarray(samples, dtype=np.float64)
+    values = values[np.isfinite(values) & (values >= 70) & (values <= 400)]
+    if len(values) < 8:
+        return "male", True, None
+    lower, median, upper = np.percentile(values, [25, 50, 75])
+    kind = "male" if lower < 175 else "female"
+    uncertain = len(values) < 20 or (160 <= lower <= 200) or upper - lower > 85
+    return kind, bool(uncertain), round(float(median), 1)
 
 
 def verify_model(root: Path) -> Path:
@@ -194,15 +253,7 @@ def identify(audio_path: str, segments: list[dict], video_id: str, progress=None
                 valid_indices.append(index)
                 # Pitch is used only to choose a natural target-language preset,
                 # never as the identity classifier.
-                estimates = []
-                for offset in range(0, len(audio) - 640, 1600):
-                    frame = audio[offset : offset + 640]
-                    frame = (frame - frame.mean()) * np.hanning(640)
-                    correlation = np.correlate(frame, frame, mode="full")[639:]
-                    lag = 40 + int(np.argmax(correlation[40:229]))
-                    if correlation[0] > 0 and correlation[lag] / correlation[0] > 0.65:
-                        estimates.append(16000 / lag)
-                pitches[index] = float(np.median(estimates)) if estimates else 150.0
+                pitches[index] = _pitch_samples(audio)
                 if progress:
                     progress(index + 1, len(segments))
     if not embeddings:
@@ -238,10 +289,12 @@ def identify(audio_path: str, segments: list[dict], video_id: str, progress=None
         "omnivoice:show_host",
         "omnivoice:radio_warm",
     ]
-    voices, counts = {}, {"male": 0, "female": 0}
+    voices, pitch_profiles, counts = {}, {}, {"male": 0, "female": 0}
     for label in sorted(set(labels)):
-        pitch = np.median([pitches[index] for index, identity in label_by_index.items() if identity == label])
-        kind = "female" if pitch >= 175 else "male"
+        samples = [pitch for index, identity in label_by_index.items() if identity == label
+                   for pitch in pitches[index]]
+        kind, uncertain, pitch = _voice_pitch_profile(samples)
+        pitch_profiles[label] = (uncertain, pitch)
         choices = female if kind == "female" else male
         voices[label] = choices[counts[kind] % len(choices)]
         counts[kind] += 1
@@ -263,6 +316,8 @@ def identify(audio_path: str, segments: list[dict], video_id: str, progress=None
                 **segment,
                 "speaker_id": f"speaker-{label + 1}",
                 "speaker_voice": voices[label],
+                "speaker_voice_uncertain": pitch_profiles[label][0],
+                "speaker_pitch_hz": pitch_profiles[label][1],
                 "speaker_confidence": confidence,
                 "speaker_uncertain": confidence < 0.55 or margin < 0.10
                 or float(segment["end"]) - float(segment["start"]) < 1.8,
@@ -306,8 +361,6 @@ def prepare_speakers(audio_path: str, segments: list[dict], video_id: str, progr
     from haizflow.services.external_engine import shared_external_engine_pool
     # CPU has a lower cold-load cost and turn latency on real speech.
     selected_device = "cpu"
-    directory = model_root()
-    verify_model(directory)
     stat = Path(audio_path).stat()
     key = hashlib.sha256(
         json.dumps(
@@ -323,6 +376,10 @@ def prepare_speakers(audio_path: str, segments: list[dict], video_id: str, progr
             return cached
     except (OSError, ValueError, TypeError):
         pass
+    # A validated source-bound map is sufficient for subtitle-only edits.
+    # Do not re-verify/load the model when only regenerated speech needs it.
+    directory = model_root()
+    verify_model(directory)
     try:
         result = run_external_task(
             "speaker",

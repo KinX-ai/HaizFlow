@@ -26,6 +26,7 @@ class VideoExportController(QObject):
         self.events = queue.Queue()
         self._last_busy = False
         self._chosen_targets = {}
+        self._batch_notices = []
         self.timer = QTimer(self)
         self.timer.setInterval(150)
         self.timer.timeout.connect(self.poll)
@@ -41,6 +42,26 @@ class VideoExportController(QObject):
 
     def changed(self):
         self.host.exportStateChanged.emit()
+
+    def _watch_batch(self, jobs):
+        # Capture actual job objects, not the currently open project. Paused
+        # batches survive navigation and cannot be confused with a later run.
+        identifiers = {job["videoId"] for job in jobs}
+        self._batch_notices = [group for group in self._batch_notices
+                               if not any(job["videoId"] in identifiers for job in group)]
+        self._batch_notices.append(list(jobs))
+
+    def _report_finished_batches(self):
+        from haizflow.services.batch_feedback import completion_notice
+
+        for group in list(self._batch_notices):
+            if any(job["status"] not in {"done", "failed", "cancelled"} for job in group):
+                continue
+            summary = {"succeeded": sum(job["status"] == "done" for job in group),
+                       "failed": sum(job["status"] == "failed" for job in group),
+                       "cancelled": sum(job["status"] == "cancelled" for job in group)}
+            self._batch_notices.remove(group)
+            self.host.appAlertRequested.emit(*completion_notice(summary, self.host._settings_language))
 
     def settings(self, video) -> dict:
         if not video:
@@ -255,12 +276,19 @@ class VideoExportController(QObject):
                 # Validate every member before touching any cached result.
                 for video in videos:
                     video_store.validate_video_restart(video.video_id)
-                for video in videos:
-                    video_store.prepare_video_restart(video.video_id)
             except (OSError, RuntimeError, ValueError) as exc:
                 self.alert(exc)
                 return False
-        previous_jobs = self.jobs
+            ready_videos = []
+            for video, job in zip(videos, jobs):
+                try:
+                    video_store.prepare_video_restart(video.video_id)
+                    ready_videos.append(video)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    # A per-file cleanup failure after the safe preflight is
+                    # isolated. Never discard other members' successful work.
+                    job.update(status="failed", error=str(exc))
+            videos = ready_videos
         self._set_jobs(jobs)
         self.cancel.clear()
         for video in videos:
@@ -272,11 +300,13 @@ class VideoExportController(QObject):
                 prepare_video_resume(video.video_id)
             self.host._batch_running = True
             self.host._batch_stop_requested = False
-            if not self.host._enqueue_videos(list(video_ids)):
+            if not videos or not self.host._enqueue_videos([video.video_id for video in videos]):
                 self.host._batch_running = False
-                self.jobs = previous_jobs
-                self.changed()
-                return False
+                for job in jobs:
+                    if job["status"] == "rendering":
+                        video = video_store.get_video(job["videoId"])
+                        job.update(status="failed", error=str(getattr(video, "error", "") or "") or self.text(
+                            "Không thể đưa video vào hàng đợi.", "Cannot enqueue video."))
             self.host.batchChanged.emit()
             self.host.refreshVideos()
         else:
@@ -290,6 +320,7 @@ class VideoExportController(QObject):
             if ready:
                 self.launch(ready)
         self.changed()
+        self._watch_batch(jobs)
         return True
 
     def request_render(self, video, job):
@@ -383,6 +414,7 @@ class VideoExportController(QObject):
                 job["overwrite"] = Path(job["path"]).exists()
         self.jobs = jobs
         self.cancel.clear()
+        self._watch_batch(jobs)
         self.launch(jobs)
         if skipped:
             self.host.appAlertRequested.emit(
@@ -408,6 +440,8 @@ class VideoExportController(QObject):
                 return False
         for job in jobs:
             job.update(status="pending", progress=0, error="")
+        if any((video := video_store.get_video(job["videoId"])) and video.project_type == "batch" for job in jobs):
+            self._watch_batch(jobs)
         self.cancel.clear()
         ready = []
         for job in jobs:
@@ -467,11 +501,12 @@ class VideoExportController(QObject):
                 job["status"] = "pending"
                 self.launch([job])
             else:
-                job.update(status="failed", error=self.text("Chưa hoàn tất dựng video. Tiếp tục tác vụ trong dự án rồi xuất lại.",
+                job.update(status="failed", error=str(getattr(video, "error", "") or "") or self.text("Chưa hoàn tất dựng video. Tiếp tục tác vụ trong dự án rồi xuất lại.",
                                                             "Render not completed. Resume the project task, then export again."))
             changed = True
         if changed:
             self.changed()
+        self._report_finished_batches()
         if self.busy != self._last_busy:
             self._last_busy = self.busy
             self.changed()

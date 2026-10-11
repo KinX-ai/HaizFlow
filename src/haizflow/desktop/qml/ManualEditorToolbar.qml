@@ -131,7 +131,7 @@ Rectangle {
         }
         StudioIconButton {
             objectName: "manualSplitResultButton"
-            visible: root.hasVideo && root.resultSelected
+            visible: root.hasVideo
             controlSize: 40
             iconName: "split"
             toolTipText: qsTr("Chia đoạn tại vị trí phát (S)")

@@ -504,6 +504,12 @@ Item {
                 root.sourceReplacementPending = true;
                 previewTimer.stop();
                 overlayTimer.stop();
+                root.selectedSubtitleIndex = -1;
+                root.subtitleTransformActive = false;
+                root.subtitleTransformDraft = null;
+                root.watermarkTransformActive = false;
+                root.subtitleAudioRefreshPending = false;
+                root.subtitleVisualRefreshPending = false;
                 root.ocrRegionDrafts = ({});
                 root.ocrModeDrafts = ({});
                 root.ocrTransformActive = false;
@@ -512,8 +518,11 @@ Item {
         }
 
         function onMediaImportChanged() {
-            if (!AppController.mediaImportBusy)
+            if (!AppController.mediaImportBusy) {
+                if (root.sourceReplacementPending)
+                    root.restoreEditorView();
                 root.sourceReplacementPending = false;
+            }
             if (!AppController.mediaImportBusy && String(comparePreview.attachedInputSource).length === 0) {
                 root.reloadSegments();
                 comparePreview.reloadInputMedia();
@@ -578,8 +587,8 @@ Item {
         } else if ((event.modifiers & Qt.ControlModifier) !== 0 && event.key === Qt.Key_Y) {
             AppController.redoEdit();
             event.accepted = true;
-        } else if (event.key === Qt.Key_S && String(root.selectedEditorClip.kind || "") === "result") {
-            AppController.splitResultClip(String(root.selectedEditorClip.clip_id), Math.round(comparePreview.positionSeconds * 1000));
+        } else if (event.key === Qt.Key_S && AppController.hasSelectedVideo) {
+            AppController.splitResultClip("", Math.round(comparePreview.positionSeconds * 1000));
             event.accepted = true;
         } else if (event.key === Qt.Key_Delete) {
             if (root.editorHasSelection && !root.editorSourceSelected)
@@ -617,7 +626,7 @@ Item {
         ManualEditorToolbar {
             Layout.fillWidth: true
             resultSelected: String(root.selectedEditorClip.kind || "") === "result"
-            onResultSplitRequested: AppController.splitResultClip(String(root.selectedEditorClip.clip_id), Math.round(comparePreview.positionSeconds * 1000))
+            onResultSplitRequested: AppController.splitResultClip("", Math.round(comparePreview.positionSeconds * 1000))
             Layout.preferredHeight: 42
             projectTitle: AppController.projectName
             hasVideo: AppController.hasSelectedVideo
@@ -969,9 +978,15 @@ Item {
             Object.assign({}, root.toolModel[3], {label: qsTr("Che phụ đề")}),
             {label: qsTr("Watermark"), stageIndex: 7},
             Object.assign({}, root.toolModel[4], {stageIndex: 4}),
-            Object.assign({}, root.toolModel[5], {stageIndex: 5})]
+            Object.assign({}, root.toolModel[5], {stageIndex: 5}),
+            {label: qsTr("Xuất SRT"), stageIndex: 8}]
         currentIndex: root.selectedStageIndex
         onToolSelected: function(index) {
+            if (index === 8) {
+                root.dismissSubtitleEditor();
+                AppController.exportSelectedSrt();
+                return;
+            }
             root.selectedStageIndex = index;
             root.warmTool(index);
             root.activatePanel("tasks", "right");

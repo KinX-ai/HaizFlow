@@ -55,13 +55,18 @@ class ProjectWorkspaceController:
             )
         host._workflow_mode = video.mode
         host._target_language = str(video.target_language or "vi")
-        from haizflow.core.model_choices import models_for_device, project_recognition_choice
+        from haizflow.core.model_choices import models_for_device, project_recognition_choice, project_translation_choice
+
+        device = str(getattr(host, "_settings_processing_device", "cpu"))
+        vram = (getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None)
+                if getattr(host, "_startup_hardware_resolved", False) else None)
 
         if not host._processing_queue.contains(video.video_id) and video.status != "processing":
-            compatible = models_for_device(str(getattr(host, "_settings_processing_device", "cpu")),
+            compatible = models_for_device(device,
                 recognition=str(getattr(video, "speech_recognition_model", "small") or "small"),
                 translation=str(getattr(video, "translation_model", "auto") or "auto"),
-                voice=str(getattr(video, "tts_provider", "omnivoice") or "omnivoice"))
+                voice=str(getattr(video, "tts_provider", "omnivoice") or "omnivoice"),
+                total_vram_bytes=vram)
             changes = {key: value for key, value in compatible.items() if getattr(video, key, value) != value}
             if changes:
                 video = video_store.update_video(video.video_id, **changes) or video
@@ -69,8 +74,10 @@ class ProjectWorkspaceController:
         host._speech_recognition_model = project_recognition_choice(
             str(getattr(video, "speech_recognition_model", "small") or "small"),
             str(getattr(host, "_settings_processing_device", "cpu")),
+            total_vram_bytes=getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None),
         )
-        host._translation_model = str(getattr(video, "translation_model", "auto") or "auto")
+        host._translation_model = project_translation_choice(
+            str(getattr(video, "translation_model", "auto") or "auto"), device, total_vram_bytes=vram)
         host._tts_provider = host._normalized_tts_provider(
             host._target_language, getattr(video, "tts_provider", "omnivoice")
         )

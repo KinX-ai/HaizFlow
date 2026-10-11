@@ -285,8 +285,10 @@ class CpuRuntimeTests(unittest.TestCase):
         self.assertFalse(low_vram_gpu.warm_whisper_on_startup)
         self.assertFalse(low_vram_gpu.warm_hymt2_on_startup)
 
-        unsupported_gpu = self._profile(cuda=True, vram_gib=4, preference="gpu")
-        self.assertFalse(unsupported_gpu.cuda_available)
+        four_gb_gpu = self._profile(cuda=True, vram_gib=4, preference="gpu")
+        self.assertTrue(four_gb_gpu.cuda_available)
+        self.assertEqual(four_gb_gpu.whisper_batch_size, 1)
+        self.assertEqual(four_gb_gpu.translation_idle_seconds, 0)
 
     def test_gpu_capability_does_not_depend_on_transient_free_memory(self):
         hardware.clear_runtime_profile_cache()
@@ -730,6 +732,39 @@ class CpuRuntimeTests(unittest.TestCase):
         self.assertEqual(command[command.index("-j") + 1], "1")
         self.assertEqual(command[command.index("-d") + 1], "cpu")
         self.assertIn("--segment", command)
+
+    def test_four_gb_demucs_keeps_cuda_with_short_segments(self):
+        from haizflow.pipeline import audio_separation
+
+        captured = {}
+
+        def run_task(_capability, _task, payload, _video_id, **kwargs):
+            arguments = payload["arguments"]
+            captured["arguments"] = arguments
+            captured["context"] = kwargs["context"]
+            output_root = Path(arguments[arguments.index("-o") + 1]) / "htdemucs" / "audio"
+            output_root.mkdir(parents=True)
+            (output_root / "vocals.wav").write_bytes(b"V" * 100)
+            (output_root / "no_vocals.wav").write_bytes(b"B" * 100)
+            return {}
+
+        profile = SimpleNamespace(cuda_available=True, total_vram_bytes=4 * 1024**3)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                mock.patch.object(audio_separation, "runtime_profile", return_value=profile),
+                mock.patch.object(audio_separation, "_demucs_model_directory", return_value=Path(temp_dir)),
+                mock.patch.object(audio_separation, "run_external_task", side_effect=run_task),
+                mock.patch.object(audio_separation, "check_cancellation"),
+                mock.patch.object(audio_separation, "log_to_video"),
+            ):
+                vocals, background = audio_separation.separate_audio(
+                    "audio.wav", str(Path(temp_dir) / "out"), "video")
+            self.assertTrue(Path(vocals).is_file())
+            self.assertTrue(Path(background).is_file())
+        arguments = captured["arguments"]
+        self.assertEqual(arguments[arguments.index("-d") + 1], "cuda")
+        self.assertEqual(arguments[arguments.index("--segment") + 1], "2")
+        self.assertEqual(captured["context"], {"device": "gpu"})
 
 
 if __name__ == "__main__":

@@ -52,6 +52,31 @@ class GpuRecoveryTests(unittest.TestCase):
         self.assertEqual(device, "cpu-gguf")
         self.assertEqual(fake_llama.Llama.call_args.kwargs["n_gpu_layers"], 0)
 
+    def test_four_gb_auto_translation_never_falls_through_to_full_gpu(self):
+        profile = SimpleNamespace(key="cuda_low_memory", hymt2_backend="transformers",
+                                  cuda_available=True, total_vram_bytes=4 * 1024**3)
+        with (
+            mock.patch.object(hymt2_worker, "runtime_profile", return_value=profile),
+            mock.patch("haizflow.core.hardware.cpu_runtime_profile", return_value=profile),
+            mock.patch.object(hymt2_worker, "translation_model_preference", return_value="auto"),
+            mock.patch.object(hymt2_worker.importlib.util, "find_spec", return_value=None),
+            mock.patch.object(hymt2_worker, "_prepare_torch_runtime", side_effect=AssertionError("Torch loaded")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HY-MT2 CPU Q4"):
+                hymt2_worker._load_model("HY-MT2")
+
+        def engine_command(_capability, _command, context):
+            return ["gpu-engine.exe"] if context["device"] == "gpu" else None
+
+        with (
+            mock.patch.object(translation, "runtime_profile", return_value=profile),
+            mock.patch.object(translation, "translation_model_preference", return_value="auto"),
+            mock.patch.object(translation, "is_frozen", return_value=True),
+            mock.patch("haizflow.services.resource_packs.installed_engine_command", side_effect=engine_command),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HY-MT2 CPU Q4"):
+                translation._worker_command()
+
     def test_recovery_checkpoint_is_not_a_pause_resume_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             artifact = Path(temp_dir) / "timeline.wav"

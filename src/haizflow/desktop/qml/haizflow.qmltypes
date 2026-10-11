@@ -1960,6 +1960,12 @@ Module {
         Method { name: "startBatch" }
         Method { name: "resumeBatch" }
         Method { name: "batchSettings"; type: "QVariantMap" }
+        Method { name: "batchResults"; type: "QVariantMap" }
+        Method { name: "batchPreviewSources"; type: "QVariantList" }
+        Method {
+            name: "batchPreviewMedia"; type: "QVariantMap"
+            Parameter { name: "video_id"; type: "QString" }
+        }
         Method { name: "batchSettingOverrides"; type: "QVariantList" }
         Method { name: "applyBatchSettings"; type: "bool" }
         Method {
@@ -2300,6 +2306,7 @@ Module {
         Method { name: "manualExportSettings"; type: "QVariantMap" }
         Method { name: "setManualExportPreset"; type: "bool"; Parameter { name: "a1"; type: "QString" } }
         Method { name: "chooseVideoExportDestination"; type: "QString"; Parameter { name: "a1"; type: "QString" } }
+        Method { name: "exportSelectedSrt"; type: "bool" }
         Method { name: "exportDestinationExists"; type: "bool"; Parameter { name: "a1"; type: "QString" } }
         Method { name: "exportVideoTo"; type: "bool"; Parameter { name: "a1"; type: "QString" } Parameter { name: "a2"; type: "QString" } Parameter { name: "a3"; type: "QString" } Parameter { name: "a4"; type: "bool" } }
         Method { name: "exportBatchVideos"; type: "bool" }

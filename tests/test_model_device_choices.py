@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from haizflow.core.model_choices import gpu_choice_blocked, models_for_device, project_model_defaults, project_recognition_choice, recognition_context
+from haizflow.core.model_choices import gpu_choice_blocked, models_for_device, project_model_defaults, project_recognition_choice, project_translation_choice, recognition_context
 from haizflow.core.hardware import HardwareCapabilities
 from haizflow.desktop.project_import_controller import ProjectImportController
 from haizflow.desktop.qml_controller import HaizFlowController
@@ -35,6 +35,83 @@ def test_legacy_automatic_recognition_follows_device_but_explicit_choices_surviv
     assert project_recognition_choice("small", device) == expected
     for explicit in ("small-cpu", "small-gpu", "large-v3-turbo"):
         assert project_recognition_choice(explicit, device) == explicit
+
+
+def test_four_gb_gpu_defaults_keep_omnivoice_on_gpu_without_full_translation():
+    choices = project_model_defaults("gpu", total_vram_bytes=4 * 1024**3)
+    assert choices == {"_speech_recognition_model": "small-gpu", "_translation_model": "q4",
+                       "_tts_provider": "omnivoice-gpu"}
+    assert project_model_defaults("gpu", total_vram_bytes=8 * 1024**3) == {
+        "_speech_recognition_model": "large-v3-turbo", "_translation_model": "full",
+        "_tts_provider": "omnivoice-gpu"}
+
+
+@pytest.mark.parametrize("device,vram,expected", [("cpu", 0, "q4"), ("gpu", 4, "q4"),
+    ("gpu", 8, "q4"), ("gpu", 24, "full"), ("gpu", None, "q4")])
+def test_legacy_translation_auto_resolves_to_visible_model(device, vram, expected):
+    memory = None if vram is None else vram * 1024**3
+    assert project_translation_choice("auto", device, total_vram_bytes=memory) == expected
+    for choice in ("q4", "full", "gemini-3.5-flash-lite"):
+        assert project_translation_choice(choice, device, total_vram_bytes=memory) == choice
+
+
+def gpu_caps(vram):
+    return HardwareCapabilities(True, "GPU fixture", vram * 1024**3, vram * 1024**3,
+                                16 * 1024**3, 8, True, None)
+
+
+@pytest.mark.parametrize("vram,accepted", [(4, False), (8, True), (24, True)])
+def test_translation_picker_rejects_full_on_four_gb_even_without_resource_delegate(vram, accepted):
+    host = SimpleNamespace(_translation_model="q4", _settings_processing_device="gpu",
+                           _hardware_capabilities=gpu_caps(vram), _startup_hardware_resolved=True,
+                           _ensure_hardware_ready_for_action=Mock(return_value=True),
+                           _show_app_alert=Mock(), translationModelChanged=Mock())
+    HaizFlowController.translationModel.fset(host, "full")
+    assert host._translation_model == ("full" if accepted else "q4")
+    assert host._show_app_alert.called is (not accepted)
+    assert host.translationModelChanged.emit.called is accepted
+    HaizFlowController.translationModel.fset(host, "auto")
+    assert host._translation_model == ("full" if accepted else "q4")
+
+
+@pytest.mark.parametrize("project_type", ["single", "manual", "batch", None])
+@pytest.mark.parametrize("recognition,translation", [("small-gpu", "full"), ("large-v3-turbo", "q4")])
+def test_four_gb_preflight_blocks_heavy_models_for_saved_and_new_projects(project_type, recognition, translation):
+    host = SimpleNamespace(_settings_processing_device="gpu", _hardware_capabilities=gpu_caps(4),
+                           _speech_recognition_model=recognition, _translation_model=translation,
+                           _tts_provider="omnivoice-gpu", appAlertRequested=Mock(),
+                           _processing_queue=SimpleNamespace(contains=lambda _: False))
+    video = SimpleNamespace(video_id="fixture", status="pending", project_type=project_type,
+                            speech_recognition_model=recognition, translation_model=translation,
+                            tts_provider="omnivoice-gpu") if project_type else None
+    with patch("haizflow.desktop.project_commands_controller.video_store.update_video") as save:
+        assert not ProjectCommandsController._resources_ready(host, video)
+    host.appAlertRequested.emit.assert_called_once()
+    save.assert_not_called()
+
+
+def test_batch_apply_blocks_full_before_assets_or_project_mutations():
+    host = SimpleNamespace(_selected_project_key="batch", _batch_video_ids=[],
+                           _settings_processing_device="gpu", _hardware_capabilities=gpu_caps(4),
+                           _processing_queue=SimpleNamespace(contains=lambda _: False), _show_app_alert=Mock())
+    controller = ProjectCommandsController(host)
+    controller.batch_settings_values = Mock(return_value={"translationModel": "q4"})
+    with patch("haizflow.services.batch_settings.stage_asset") as stage, \
+         patch("haizflow.desktop.project_commands_controller.project_store.save_batch_settings") as save:
+        assert not controller.apply_batch_settings_values("batch", {"translationModel": "full"})
+    host._show_app_alert.assert_called_once()
+    stage.assert_not_called()
+    save.assert_not_called()
+
+
+def test_legacy_batch_apply_blocks_full_before_saving_videos():
+    host = SimpleNamespace(_settings_processing_device="gpu", _hardware_capabilities=gpu_caps(4),
+                           _show_app_alert=Mock(), _speech_recognition_model="small-gpu")
+    with patch("haizflow.desktop.project_commands_controller.video_store.update_video") as save:
+        assert not ProjectCommandsController(host).apply_batch_settings(
+            "A", "vi", "omnivoice-gpu", "omnivoice:male", False, 60, translation_model="full")
+    host._show_app_alert.assert_called_once()
+    save.assert_not_called()
 
 
 def test_opened_legacy_project_warms_same_turbo_choice_as_gpu_ui():
@@ -271,7 +348,7 @@ def test_no_model_load_is_queued_before_runtime_switch_starts():
     ("cpu", True, 8, 16, False, False),
     ("gpu", True, 8, 16, False, True),
     ("gpu", False, 8, 16, False, False),
-    ("gpu", True, 4, 16, False, False),
+    ("gpu", True, 4, 16, False, True),
     ("gpu", True, 8, 8, False, False),
     ("gpu", False, 0, 16, True, True),
 ])
@@ -286,7 +363,8 @@ def test_gpu_options_use_resolved_hardware_not_only_saved_preference(device, cud
     assert HaizFlowController._project_gpu_available(host) is expected
     choices = HaizFlowController.speechRecognitionModelOptions.fget(host)
     assert choices[0]["available"]
-    assert all(choice["available"] is expected for choice in choices[1:])
+    assert choices[1]["available"] is expected
+    assert choices[2]["available"] is (expected and (pending or vram >= 5))
 
 
 def test_api_guide_navigates_to_single_owner_before_opening():

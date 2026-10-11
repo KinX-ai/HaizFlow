@@ -104,6 +104,12 @@ class SocialPublishLayoutUiTests(unittest.TestCase):
         queue = page.findChild(QQuickItem, "socialQueueList")
         self.assertGreater(queue.property("contentHeight"), queue.height())
         self.assertGreater(queue.height(), 100)
+        surface = page.findChild(QQuickItem, "socialQueueSurface")
+        self.assertLessEqual(surface.mapToScene(QPointF(0, surface.height())).y(), page.height() - 12)
+        queue.setProperty("contentY", queue.property("contentHeight") - queue.height())
+        QTest.qWait(30)
+        self.assertAlmostEqual(queue.property("contentY") + queue.height(), queue.property("contentHeight"), delta=1)
+        queue.setProperty("contentY", 0)
 
         def wheel(delta):
             position = queue.mapToScene(QPointF(queue.width() / 2, queue.height() / 2))
@@ -128,9 +134,24 @@ class SocialPublishLayoutUiTests(unittest.TestCase):
         page.setSize(window.size())
         QTest.qWait(30)
         self.assertGreater(queue.height(), 80)
+        self.assertLessEqual(surface.mapToScene(QPointF(0, surface.height())).y(), page.height() - 12)
         self.assertGreater(queue.property("contentHeight"), queue.height())
         wheel(-1200)
         self.assertGreater(queue.property("contentY"), 0)
+
+    def test_published_row_actions_remain_enabled_while_other_video_uploads(self):
+        window, page = self.create_page(2)
+        state, model = self.context_objects
+        state.insert("tiktokPublishBusy", True)
+        QTest.qWait(30)
+        def visual_descendants(item):
+            for child in item.childItems():
+                yield child
+                yield from visual_descendants(child)
+        for name in ("socialRemoveButton", "socialPostButton"):
+            buttons = [item for item in visual_descendants(page) if item.objectName() == name]
+            self.assertEqual(len(buttons), 2)
+            self.assertTrue(all(button.isEnabled() for button in buttons), name)
 
 
 def test_social_publish_queue_layout_in_isolated_qt_process():

@@ -57,6 +57,14 @@ FloatingToolDialog {
     property bool draftWatermarkItalic: true
     property var draftSubtitleStyle: ({})
     property string draftPreviewVoice: ""
+    property var previewSources: []
+    property int previewIndex: 0
+    property var previewMedia: ({})
+    readonly property var previewSource: previewSources[previewIndex] || ({})
+
+    function refreshPreview() {
+        previewMedia = AppController.batchPreviewMedia(String(previewSource.videoId || ""));
+    }
 
     readonly property var draftProviderOptions: localizedProviderOptions(
         draftTargetLanguage, AppController.settingsLanguage, AppController.processingDevice)
@@ -106,6 +114,10 @@ FloatingToolDialog {
     function loadDraft() {
         const settings = AppController.batchSettings()
         openedProjectKey = AppController.projectKey;
+        previewSources = AppController.batchPreviewSources();
+        const selected = previewSources.findIndex(item => item.videoId === AppController.selectedVideoId);
+        previewIndex = Math.max(0, selected);
+        refreshPreview();
         replaceOverrides = false;
         draftVoiceReferencePath = settings.voiceReferencePath || "";
         draftBackgroundMusicLoop = settings.backgroundMusicLoop !== false;
@@ -125,7 +137,7 @@ FloatingToolDialog {
         baselineSettings = settings
         draftTargetLanguage = settings.targetLanguage || "vi"
         draftSpeechRecognitionModel = settings.speechRecognitionModel || "small"
-        draftTranslationModel = settings.translationModel || "auto"
+        draftTranslationModel = settings.translationModel || "q4"
         draftTtsProvider = settings.ttsProvider || "omnivoice"
         draftTtsVoice = normalizedDraftVoice(draftTargetLanguage, draftTtsProvider, settings.ttsVoice || "")
         draftSpeakerMode = draftTtsProvider.indexOf("omnivoice") === 0 && settings.speakerMode === "multiple"
@@ -219,8 +231,13 @@ FloatingToolDialog {
     Connections {
         target: AppController
         function onBatchChanged() {
-            if (root.visible)
-                root.settingOverrides = AppController.batchSettingOverrides()
+            if (root.visible) {
+                root.settingOverrides = AppController.batchSettingOverrides();
+                const owner = root.previewSource.videoId;
+                root.previewSources = AppController.batchPreviewSources();
+                root.previewIndex = Math.max(0, root.previewSources.findIndex(item => item.videoId === owner));
+                root.refreshPreview();
+            }
         }
     }
 
@@ -229,14 +246,34 @@ FloatingToolDialog {
         anchors.margins: Theme.space12
         spacing: Theme.space8
 
+        RowLayout {
+            Layout.fillWidth: true
+            Text {
+                text: qsTr("Video xem trước")
+                color: Theme.textMuted
+                font.pixelSize: TypeScale.label
+            }
+            StudioComboBox {
+                Layout.fillWidth: true
+                model: root.previewSources
+                textRole: "fileName"
+                currentIndex: root.previewIndex
+                enabled: root.previewSources.length > 0
+                onActivated: function(index) {
+                    root.previewIndex = index;
+                    root.refreshPreview();
+                }
+            }
+        }
+
         Rectangle {
             Layout.fillWidth: true
             visible: root.settingOverrides.length > 0
             implicitHeight: overrideRow.implicitHeight + Theme.space16
-            color: Theme.interactiveMuted
+            color: Theme.warningMuted
             radius: Theme.radiusSmall
             border.width: 1
-            border.color: Theme.interactiveOutline
+            border.color: Theme.warning
 
             RowLayout {
                 id: overrideRow
@@ -250,6 +287,11 @@ FloatingToolDialog {
                     font.pixelSize: Theme.caption
                     font.weight: Font.DemiBold
                     wrapMode: Text.Wrap
+                }
+                StudioButton {
+                    text: qsTr("Chi tiết")
+                    variant: "ghost"
+                    onClicked: overrideDetailsLoader.invoke("open", [])
                 }
                 Text {
                     Layout.fillWidth: true
@@ -276,7 +318,7 @@ FloatingToolDialog {
                 width: settingsScroll.width
                 editable: !AppController.isBatchRunning
                 cpuOnly: AppController.cpuOnly
-                hasSource: AppController.batchCount > 0 && AppController.videoPath.length > 0
+                hasSource: root.previewSources.length > 0
                 showCloneAction: true
                 showMusicPlaybackSettings: true
                 speechRecognitionModel: root.draftSpeechRecognitionModel
@@ -400,7 +442,7 @@ FloatingToolDialog {
         signal selectedVideoChanged()
         readonly property string selectedVideoId: root.openedProjectKey
         readonly property bool canEditSelectedVideo: !AppController.isBatchRunning
-        readonly property string videoThumbnailSource: AppController.videoThumbnailSource
+        readonly property string videoThumbnailSource: root.previewSource.thumbnailSource || ""
         property alias ttsProvider: root.draftTtsProvider
         property alias voiceCloneReferencePath: root.draftVoiceReferencePath
         property alias watermarkKind: root.draftWatermarkKind
@@ -455,6 +497,7 @@ FloatingToolDialog {
         id: batchWatermarkDialogLoader
         sourceComponent: Component {
             AutoWatermarkPreviewDialog {
+                toolSubtitle: root.previewSource.fileName || ""
                 controller: draftController
                 onClosed: batchWatermarkDialogLoader.release()
             }
@@ -499,12 +542,15 @@ FloatingToolDialog {
         id: batchSubtitlePreviewDialogLoader
         sourceComponent: Component {
             SubtitlePreviewDialog {
+                toolSubtitle: root.previewSource.fileName || ""
+                previewMedia: root.previewMedia
+                previewSource: root.previewSource.thumbnailSource || ""
                 appearance: Object.assign({}, root.draftSubtitleStyle, {
                     font_size: root.draftSubtitleFontSize, outline: root.draftSubtitleOutline
                 })
                 coverEnabled: root.draftRemoveOriginalSubtitles
                 autoAlignToCover: !root.draftSubtitleManual
-                coverLayout: (AppController.reviewPreviewMedia || ({})).subtitleAutoCoverLayout || ({})
+                coverLayout: root.previewMedia.subtitleAutoCoverLayout || ({})
                 onAutoAlignmentEdited: function(enabled) { root.draftSubtitleManual = !enabled; }
                 onSubtitleAppearanceEdited: function(patch) {
                     root.draftSubtitleStyle = Object.assign({}, root.draftSubtitleStyle, patch);
@@ -520,6 +566,17 @@ FloatingToolDialog {
                     root.draftSubtitleBoxHeight = boxHeight
                     root.draftSubtitleManual = true
                 }
+            }
+        }
+    }
+
+    LazyDialogLoader {
+        id: overrideDetailsLoader
+        sourceComponent: Component {
+            BatchDetailsDialog {
+                overrides: true
+                rows: root.settingOverrides
+                onClosed: overrideDetailsLoader.release()
             }
         }
     }

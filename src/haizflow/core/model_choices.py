@@ -1,29 +1,49 @@
 """Lightweight model/device choices shared by Core, workers and desktop UI."""
 
 RECOGNITION_CHOICES = frozenset({"small", "small-cpu", "small-gpu", "large-v3-turbo"})
+_FOUR_GB_GPU_LIMIT_BYTES = 5 * 1024**3
+_LEGACY_AUTO_FULL_VRAM_BYTES = 12 * 1024**3
 
 
-def project_recognition_choice(choice: str, app_device: str) -> str:
+def project_recognition_choice(choice: str, app_device: str, *, total_vram_bytes: int | None = None) -> str:
     """Resolve the old automatic default without replacing explicit choices."""
     if not choice or choice == "small":
-        return project_model_defaults(app_device)["_speech_recognition_model"]
+        return project_model_defaults(app_device, total_vram_bytes=total_vram_bytes)["_speech_recognition_model"]
     return choice
 
 
-def project_model_defaults(app_device: str) -> dict[str, str]:
+def project_model_defaults(app_device: str, *, total_vram_bytes: int | None = None) -> dict[str, str]:
     gpu = app_device == "gpu"
+    small_gpu = gpu and total_vram_bytes is not None and total_vram_bytes < _FOUR_GB_GPU_LIMIT_BYTES
     return {
-        # GPU mode is admitted only after the hardware policy's 8 GB-class
-        # VRAM check. Turbo is the default; an explicit Small/CPU choice stays
-        # project-local and is never overwritten on reopening a project.
-        "_speech_recognition_model": "large-v3-turbo" if gpu else "small-cpu",
-        "_translation_model": "full" if gpu else "q4",
+        # Keep the established defaults on larger GPUs. On a 4 GB card,
+        # Whisper Small and OmniVoice run sequentially on CUDA; translation
+        # uses its smaller CPU pack so the full GPU weights never overlap.
+        "_speech_recognition_model": "small-gpu" if small_gpu else "large-v3-turbo" if gpu else "small-cpu",
+        "_translation_model": "q4" if small_gpu or not gpu else "full",
         "_tts_provider": "omnivoice-gpu" if gpu else "omnivoice",
     }
 
 
-def models_for_device(app_device: str, *, recognition: str, translation: str, voice: str) -> dict[str, str]:
+def project_translation_choice(choice: str, app_device: str, *, total_vram_bytes: int | None = None) -> str:
+    """Resolve saved pre-picker 'auto' to one of the two visible local models."""
+    if str(choice or "auto").lower() != "auto":
+        return choice
+    return "full" if app_device == "gpu" and isinstance(total_vram_bytes, int) \
+        and total_vram_bytes >= _LEGACY_AUTO_FULL_VRAM_BYTES else "q4"
+
+
+def heavy_gpu_choice_blocked(app_device: str, capabilities, *, recognition: str = "", translation: str = "") -> bool:
+    return bool(app_device == "gpu" and capabilities is not None
+                and getattr(capabilities, "gpu_supported", False)
+                and not getattr(capabilities, "heavy_gpu_models_supported", False)
+                and (recognition == "large-v3-turbo" or translation == "full"))
+
+
+def models_for_device(app_device: str, *, recognition: str, translation: str, voice: str,
+                      total_vram_bytes: int | None = None) -> dict[str, str]:
     """Keep compatible project choices, replacing GPU-only choices in CPU mode."""
+    translation = project_translation_choice(translation, app_device, total_vram_bytes=total_vram_bytes)
     if app_device == "cpu":
         if recognition in {"small-gpu", "large-v3-turbo"}:
             recognition = "small-cpu"

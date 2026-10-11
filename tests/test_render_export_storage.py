@@ -779,6 +779,91 @@ class RenderExportStorageTests(unittest.TestCase):
         self.assertEqual([job["status"] for job in self.exporter.jobs], ["done", "done"])
         self.assertEqual(Path(self.exporter.jobs[1]["path"]).read_bytes(), b"second-render")
 
+    def test_batch_pipeline_failure_keeps_original_error_and_exports_next_video(self):
+        project, first = self.make_video(kind="batch")
+        config = VideoConfig(project_type="batch", project_key=project["key"], project_id=project["project_id"],
+                             project_name=project["project_name"], project_directory=project["project_directory"])
+        second = video_store.create_video(str(uuid.uuid4()), "second.mp4", config)
+        self.host._selected_project_key = project["key"]
+        self.host._batch_video_ids = [first.video_id, second.video_id]
+        alerts = []
+        self.host.appAlertRequested.connect(lambda *args: alerts.append(args))
+        with patch("haizflow.desktop.project_commands_controller.ProjectCommandsController._resources_ready_for_videos", return_value=True):
+            self.assertTrue(self.exporter.start_batch_to(project["key"], self.host._batch_video_ids, "source", str(self.external)))
+        video_store.update_video(first.video_id, status="failed", error="HY-MT2: example failure", progress=35)
+        video_store.update_video(second.video_id, status="paused")
+        self.exporter.poll()
+        self.assertEqual(self.exporter.jobs[0]["error"], "HY-MT2: example failure")
+        self.assertEqual(alerts, [])
+        revision = video_export.render_revision(second)
+        staging = manual_artifacts.create_staging_directory(second.video_id, "export")
+        (staging / "video.mp4").write_bytes(b"second-success")
+        record = manual_artifacts.publish(second.video_id, "export", revision, staging, {"video": "video.mp4"}, config_fingerprint=revision)
+        video_store.update_video(second.video_id, status="done", files=dict(second.files, final_video=record["resolved_outputs"]["video"]))
+        # Finishing another project/opening a different page cannot steal the report.
+        self.host._selected_project_key = "another-project"
+        self.exporter.poll()
+        self.exporter.worker.join(timeout=10)
+        self.exporter.poll()
+        self.exporter.poll()
+        self.assertEqual([job["status"] for job in self.exporter.jobs], ["failed", "done"])
+        self.assertEqual(Path(self.exporter.jobs[1]["path"]).read_bytes(), b"second-success")
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("1 thành công · 1 lỗi", alerts[0][1])
+
+    def test_batch_export_copy_failure_does_not_stop_next_file_or_lose_checkpoint(self):
+        project, first = self.make_video(kind="batch")
+        config = VideoConfig(project_type="batch", project_key=project["key"], project_id=project["project_id"],
+                             project_name=project["project_name"], project_directory=project["project_directory"])
+        second = video_store.create_video(str(uuid.uuid4()), "second.mp4", config)
+        # Reuse a managed render only for this deterministic copy fixture.
+        calls = []
+        def copier(video, target, **kwargs):
+            calls.append(video.video_id)
+            if video.video_id == first.video_id:
+                raise OSError("Synthetic destination failure")
+            Path(target).write_bytes(b"second-output")
+            return target
+        self.exporter.copier = copier
+        jobs = [{"videoId": current.video_id, "status": "pending", "path": str(self.external / f"{index}.mp4"),
+                 "name": current.original_filename, "progress": 0, "error": "", "overwrite": False}
+                for index, current in enumerate([first, second])]
+        self.exporter.jobs = jobs
+        self.exporter._watch_batch(jobs)
+        alerts = []
+        self.host.appAlertRequested.connect(lambda *args: alerts.append(args))
+        # The copy fixture deliberately does not emulate inference or codecs.
+        with patch("haizflow.desktop.video_export_controller.current_render", return_value={"valid": True}):
+            self.exporter.launch(jobs)
+            self.exporter.worker.join(timeout=10)
+            self.exporter.poll()
+        self.assertEqual(calls, [first.video_id, second.video_id])
+        self.assertEqual([job["status"] for job in jobs], ["failed", "done"])
+        self.assertEqual(video_store.get_video(first.video_id).checkpoints, first.checkpoints)
+        self.assertIn("Synthetic destination failure", jobs[0]["error"])
+        self.assertEqual(len(alerts), 1)
+
+    def test_batch_cleanup_failure_is_isolated_after_safe_preflight(self):
+        project, first = self.make_video(kind="batch")
+        config = VideoConfig(project_type="batch", project_key=project["key"], project_id=project["project_id"],
+                             project_name=project["project_name"], project_directory=project["project_directory"])
+        second = video_store.create_video(str(uuid.uuid4()), "second.mp4", config)
+        self.host._selected_project_key = project["key"]
+        self.host._batch_video_ids = [first.video_id, second.video_id]
+        prepare = video_store.prepare_video_restart
+        def prepare_with_one_failure(identifier):
+            if identifier == first.video_id:
+                raise PermissionError("WinError 32: synthetic locked file")
+            return prepare(identifier)
+        with patch("haizflow.desktop.project_commands_controller.ProjectCommandsController._resources_ready_for_videos", return_value=True), \
+                patch.object(video_store, "prepare_video_restart", side_effect=prepare_with_one_failure):
+            self.assertTrue(self.exporter.start_batch_to(project["key"], self.host._batch_video_ids, "source", str(self.external)))
+        self.host._enqueue_videos.assert_called_once_with([second.video_id])
+        self.assertEqual(self.exporter.jobs[0]["status"], "failed")
+        self.assertIn("WinError 32", self.exporter.jobs[0]["error"])
+        self.assertEqual(self.exporter.jobs[1]["status"], "rendering")
+        self.assertIsNotNone(video_export.current_render(video_store.get_video(first.video_id)))
+
     def test_pausing_process_export_never_copies_previous_render(self):
         _, video = self.make_video()
         self.host._selected_video_id = video.video_id

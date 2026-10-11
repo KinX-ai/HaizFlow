@@ -47,7 +47,8 @@ MACHINES = [
     Machine("GTX-1070", 128, 127, 8, True, (6, 1), True, True, 4),
     Machine("RTX-2060-6", 16, 13.9, 6, True, (7, 5), True, True, 2),
     Machine("RTX-4090-24", 64, 63, 24, True, (8, 9), True, True, 4),
-    Machine("GPU-4", 32, 31, 4, True, (7, 5), True, False, 4),
+    Machine("GPU-4", 32, 31, 4, True, (7, 5), True, True, 4),
+    Machine("RTX-2050-4-16", 16, 13.9, 4, True, (8, 6), True, True, 2),
     Machine("driver-unavailable", 32, 31, 8, False, (8, 6), True, False, 4),
     Machine("GPU-but-insufficient-RAM", 8, 7.8, 24, True, (8, 9), False, False, 2),
 ]
@@ -67,10 +68,16 @@ def test_admission_ui_and_resource_packs_agree(machine, device):
     packs = ("engine-cpu-py313", "model-hymt2-cpu", "model-demucs-cpu") if device == "cpu" else (
         "engine-cuda128-py313", "model-whisper-turbo", "model-hymt2-gpu", "model-demucs-gpu")
     for pack in packs:
-        assert controller._hardware_compatibility(pack)[0] is expected
+        pack_expected = expected and not (device == "gpu" and caps.gpu_supported
+            and not caps.heavy_gpu_models_supported and pack in {"model-whisper-turbo", "model-hymt2-gpu"})
+        assert controller._hardware_compatibility(pack)[0] is pack_expected
     options = HaizFlowController.speechRecognitionModelOptions.fget(host)
     assert options[0]["available"]
-    assert all(row["available"] is (device == "gpu" and machine.gpu_ok) for row in options[1:])
+    assert options[1]["available"] is (device == "gpu" and machine.gpu_ok)
+    assert options[2]["available"] is (device == "gpu" and machine.gpu_ok
+        and caps.heavy_gpu_models_supported)
+    voice_options = HaizFlowController._tts_provider_options_for_language(host, "vi")
+    assert voice_options[1]["available"] is (device == "gpu" and machine.gpu_ok)
     profile = hardware.runtime_profile_for(caps, device)
     assert profile.cuda_available is (device == "gpu" and machine.gpu_ok)
     if not profile.cuda_available:
@@ -82,7 +89,7 @@ def test_admission_ui_and_resource_packs_agree(machine, device):
 
 @pytest.mark.parametrize("project_type", ["single", "manual", "batch"])
 @pytest.mark.parametrize("device", ["cpu", "gpu"])
-@pytest.mark.parametrize("machine", [MACHINES[0], MACHINES[2], MACHINES[7], MACHINES[9]], ids=lambda value: value.name)
+@pytest.mark.parametrize("machine", [MACHINES[0], MACHINES[2], MACHINES[7], MACHINES[9], MACHINES[10]], ids=lambda value: value.name)
 def test_auto_manual_batch_preflight_share_hardware_admission(machine, device, project_type):
     from haizflow.schemas.video import VideoConfig
 
@@ -99,7 +106,8 @@ def test_auto_manual_batch_preflight_share_hardware_admission(machine, device, p
                                            _hardware_compatibility=resources._hardware_compatibility)
     host._ensure_hardware_ready_for_action = lambda: hardware.validate_processing_device(device, caps)[0]
     video = SimpleNamespace(**VideoConfig(project_type=project_type, speech_recognition_model=(
-        "small-gpu" if device == "gpu" else "small-cpu"), translation_model="q4", tts_provider="omnivoice",
+        "small-gpu" if device == "gpu" else "small-cpu"), translation_model="q4",
+        tts_provider="omnivoice-gpu" if device == "gpu" else "omnivoice",
         tts_voice="omnivoice:male").model_dump(), video_id="matrix", status="pending")
     expected = machine.cpu_ok if device == "cpu" else machine.gpu_ok
     assert ProjectCommandsController._resources_ready_for_videos(host, [video]) is expected

@@ -70,6 +70,16 @@ class OmniVoiceBatchTests(unittest.TestCase):
         self.assertEqual(voice._gpu_batch_ceiling(torch, "cuda:0"), 2)
         self.assertEqual(voice._gpu_batch_ceiling(torch, "cpu"), 1)
 
+    def test_four_gb_gpu_uses_single_sentence_without_lowering_inference_quality(self):
+        torch = fake_torch()
+        torch.cuda.mem_get_info = lambda: (3 * 1024**3, 4 * 1024**3)
+        self.assertTrue(voice._low_vram_gpu(torch, "cuda:0"))
+        self.assertFalse(voice._low_vram_gpu(torch, "cpu"))
+        self.assertEqual(voice._gpu_batch_ceiling(torch, "cuda:0", maximum=2), 1)
+        torch.cuda.mem_get_info = lambda: (2 * 1024**3, 8 * 1024**3)
+        self.assertFalse(voice._low_vram_gpu(torch, "cuda:0"))
+        self.assertEqual(voice._gpu_batch_ceiling(torch, "cuda:0", maximum=2), 1)
+
     def test_cuda_oom_retries_smaller_batch_without_reordering(self):
         torch = fake_torch()
         items = [{"text": str(index)} for index in range(4)]
@@ -114,6 +124,22 @@ class OmniVoiceBatchTests(unittest.TestCase):
                 with self.assertRaises(type(error)):
                     voice._generate_bounded_batch(Mock(side_effect=error), items, torch, "cuda:0")
         torch.cuda.empty_cache.assert_not_called()
+
+    def test_four_gb_single_oom_retries_shorter_chunks_only_once(self):
+        torch = fake_torch()
+        items = [{"text": "A long sentence"}]
+        standard = Mock(side_effect=FakeCudaOom("CUDA out of memory"))
+        shorter = Mock(return_value=["audio"])
+        result, used, retries = voice._generate_bounded_batch(
+            standard, items, torch, "cuda:0", retry_single_oom=shorter)
+        self.assertEqual((result, used, retries), (["audio"], items, 1))
+        standard.assert_called_once_with(items)
+        shorter.assert_called_once_with(items)
+        torch.cuda.empty_cache.assert_called_once()
+        with self.assertRaises(FakeCudaOom):
+            voice._generate_bounded_batch(Mock(side_effect=FakeCudaOom("CUDA out of memory")),
+                                          items, torch, "cuda:0",
+                                          retry_single_oom=Mock(side_effect=FakeCudaOom("CUDA out of memory")))
 
     def test_release_request_keeps_modules_but_no_model_or_prompt(self):
         torch = fake_torch()
@@ -163,15 +189,19 @@ class OmniVoiceBatchTests(unittest.TestCase):
                 self.assertEqual(stop.call_count, int(not expected))
 
     def test_worker_outputs_every_item_in_order_and_reports_batch_progress(self):
-        for device, oom in (("cuda:0", False), ("cuda:0", True), ("cpu", False)):
-            with self.subTest(device=device, oom=oom), tempfile.TemporaryDirectory() as directory:
+        for device, oom, four_gb in (("cuda:0", False, False), ("cuda:0", True, False),
+                                     ("cuda:0", False, True), ("cpu", False, False)):
+            with self.subTest(device=device, oom=oom, four_gb=four_gb), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 torch = fake_torch()
-                writes, statuses, sizes = [], [], []
+                if four_gb:
+                    torch.cuda.mem_get_info = lambda: (3 * 1024**3, 4 * 1024**3)
+                writes, statuses, sizes, settings = [], [], [], []
 
                 def generate(**kwargs):
                     texts = kwargs["text"] if isinstance(kwargs["text"], list) else [kwargs["text"]]
                     sizes.append(len(texts))
+                    settings.append((kwargs["num_step"], kwargs["audio_chunk_duration"]))
                     if oom and len(texts) > 1:
                         raise FakeCudaOom("CUDA out of memory")
                     return [np.full(480, float(text.split()[0]), dtype=np.float32) for text in texts]
@@ -195,6 +225,9 @@ class OmniVoiceBatchTests(unittest.TestCase):
                 if device == "cpu":
                     self.assertEqual(sizes, [1] * 5)
                     self.assertEqual([call.args[0] for call in torch.set_num_threads.call_args_list], [1, 4])
+                elif four_gb:
+                    self.assertEqual(sizes, [1] * 5)
+                    self.assertEqual(settings, [(32, 10.0)] * 5)
                 elif oom:
                     self.assertEqual(sizes, [1, 2, 1, 1, 1, 1])
                     self.assertEqual(statuses[-1]["batch_retries"], 1)

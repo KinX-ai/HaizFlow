@@ -143,6 +143,7 @@ def render_segment(video, document, range_ms, output, token, progress):
     try:
         if token.is_set():
             raise ExportCancelled("Export cancelled.")
+        manual_tools._audible_manual_voice_sources(video, document, range_ms=range_ms)
         video_store.log_to_video(video.video_id, f"Segment export window: {start}–{end} ms; no full-video render.")
         report(1)
         source, source_start = _source_picture(manual_tools._video_input(video), document, range_ms,

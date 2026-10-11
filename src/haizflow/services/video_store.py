@@ -24,6 +24,7 @@ from haizflow.schemas.video import (
     MediaSource,
     CropSettings,
     SubtitleStyle,
+    subtitle_style_for_project,
 )
 from haizflow.services import project_store
 from haizflow.utils.atomic_file import atomic_json
@@ -240,6 +241,7 @@ def create_video(video_id: str, original_filename: str, config: VideoConfig, vid
         mode=config.mode,
         source_language=config.source_language,
         target_language=config.target_language,
+        speech_recognition_model=config.speech_recognition_model,
         translator_provider=config.translator_provider,
         translation_model=config.translation_model,
         tts_provider=config.tts_provider,
@@ -505,7 +507,7 @@ def _migrate_video_metadata(raw_data: dict) -> tuple[dict, bool]:
     if data.get("speech_recognition_model") not in {"small", "small-cpu", "small-gpu", "large-v3-turbo"}:
         data["speech_recognition_model"] = "small"
     if data.get("translation_model") not in {"auto", "q4", "full", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"}:
-        data["translation_model"] = "auto"
+        data["translation_model"] = "q4"
     data["translator_provider"] = "gemini" if str(data["translation_model"]).startswith("gemini-") else "hymt2"
     if data.get("speaker_mode") not in {"single", "multiple"}:
         data["speaker_mode"] = "single"
@@ -849,15 +851,10 @@ def replace_video_input(
                 editor_backed_up = True
 
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            for generated_key in (
-                "source_audio",
-                "speech_audio",
-                "background_audio",
-                "source_segments",
-                "ocr_region",
-                "voice_parts_dir",
-            ):
-                video.files.pop(generated_key, None)
+            # Input assets, editor overrides and generated paths all belong to
+            # the old source. A blacklist misses new asset types (music, voice
+            # anchors, watermark media), so publish a fresh base file map.
+            video.files = {}
             video.files["video_input"] = input_path
             video.files["final_video"] = os.path.join(video_dir, "temp", "render.mp4")
             video.files["srt_output"] = os.path.join(video_dir, "temp", "vi.srt")
@@ -869,6 +866,20 @@ def replace_video_input(
             video.video_width = 0
             video.video_height = 0
             video.original_subtitle_region_override = {}
+            defaults = VideoConfig()
+            for field in VideoConfig.model_fields:
+                if field.startswith("watermark_") and field in type(video).model_fields:
+                    setattr(video, field, getattr(defaults, field))
+            video.crop = defaults.crop.model_copy(deep=True)
+            video.subtitle_style = subtitle_style_for_project(
+                video.project_type, defaults.subtitle_style, overridden=False,
+            )
+            video.subtitle_layout_override = video.project_type == "manual"
+            video.export_history = []
+            # A clone cannot remain selected after its source reference has
+            # been replaced together with the input directory.
+            if video.tts_voice == "omnivoice:clone":
+                video.tts_voice = defaults.tts_voice
             video.review_approved = False
             video.status = "pending"
             video.progress = 0
@@ -877,7 +888,12 @@ def replace_video_input(
             video.runtime_recovery_step = ""
             video.gpu_recovery_attempted = False
             video.checkpoints = {}
+            video.processing_configuration = {}
             video.active_artifacts = {}
+            video.manual_tool_generations = {
+                "source": int((video.manual_tool_generations or {}).get("source", 0)) + 1,
+            }
+            video.manual_artifact_migration_version = 0
             video.editor_document_schema_version = 0
             video.editor_document_revision = 0
             video.editor_document_path = ""

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QObject, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlComponent, QQmlEngine
 
@@ -23,6 +23,8 @@ def test_manual_toolbar_loads_and_exposes_compact_actions():
         assert toolbar is not None, "\n".join(error.toString() for error in component.errors())
         assert toolbar.property("comparing") is False
         assert toolbar.property("hasVideo") is True
+        split = toolbar.findChild(QObject, "manualSplitResultButton")
+        assert split is not None and split.property("visible") is True
     finally:
         if toolbar is not None:
             toolbar.deleteLater()

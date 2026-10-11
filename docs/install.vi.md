@@ -4,17 +4,17 @@
 
 ## 1. Chuẩn bị
 
-HaizFlow dùng trên Windows 10 phiên bản 1809 trở lên hoặc Windows 11 x64, RAM hệ thống từ 16 GB. GPU NVIDIA không bắt buộc. Chế độ GPU hỗ trợ card NVIDIA tương thích có VRAM riêng từ 6 GB; bộ nhớ đồ họa chia sẻ không tính vào mức này. Cần Internet để tải ứng dụng và những gói bạn chọn.
+HaizFlow dùng trên Windows 10 phiên bản 1809 trở lên hoặc Windows 11 x64, RAM hệ thống từ 16 GB. GPU NVIDIA không bắt buộc. Chế độ GPU hỗ trợ card NVIDIA loại 4 GB tương thích khi CUDA báo ít nhất 3,5 GiB VRAM riêng; bộ nhớ đồ họa chia sẻ không tính vào mức này. Cần Internet để tải ứng dụng và những gói bạn chọn.
 
 Mức 16 GB là RAM lắp đặt (16 GiB theo đơn vị bộ nhớ). Windows có thể sử dụng ít hơn vì phần cứng dành riêng một phần RAM. HaizFlow kiểm tra hai số liệu riêng; máy lắp 16 GB không bị loại chỉ vì Windows dùng được khoảng 13–14 GiB. Nếu Windows sử dụng được dưới 8 GiB, cần kiểm tra lại phần bộ nhớ dành riêng trước khi xử lý.
 
-Trên máy 16 GB, nên chọn Whisper Small CPU, HY-MT2 CPU Q4 và OmniVoice CPU. Các model chạy lần lượt để giảm RAM chiếm dụng. Giọng đọc CPU vẫn dùng chất lượng model gốc và có thể chạy chậm. Đóng ứng dụng không cần thiết, để Windows tự quản lý bộ nhớ ảo và dành đủ dung lượng trống cho ổ chứa bộ nhớ ảo. HaizFlow kiểm tra RAM trống và lượng bộ nhớ Windows còn cấp phát được trước từng bước nặng; đủ RAM lắp đặt không có nghĩa mọi bước đều chạy được khi máy đang thiếu bộ nhớ. Khi cần thêm bộ nhớ, kết quả đã lưu vẫn được giữ để xử lý tiếp sau khi giải phóng tài nguyên.
+Trên máy 16 GB không có GPU phù hợp, nên chọn Whisper Small CPU, HY-MT2 CPU Q4 và OmniVoice CPU. Các model chạy lần lượt để giảm RAM chiếm dụng. Giọng đọc CPU vẫn dùng chất lượng model gốc và có thể chạy chậm. Đóng ứng dụng không cần thiết, để Windows tự quản lý bộ nhớ ảo và dành đủ dung lượng trống cho ổ chứa bộ nhớ ảo. HaizFlow kiểm tra RAM trống và lượng bộ nhớ Windows còn cấp phát được trước từng bước nặng; đủ RAM lắp đặt không có nghĩa mọi bước đều chạy được khi máy đang thiếu bộ nhớ. Khi cần thêm bộ nhớ, kết quả đã lưu vẫn được giữ để xử lý tiếp sau khi giải phóng tài nguyên.
 
 Chọn ổ còn đủ chỗ cho ứng dụng, tài nguyên, video nguồn và video xuất. Setup hiển thị yêu cầu của bản đang cài; mỗi gói có yêu cầu riêng và có thể cần thêm chỗ tạm khi tải, giải nén hoặc sửa.
 
 ## 2. Cài ứng dụng
 
-**[Tải HaizFlow-0.1.8-Setup.exe](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.8/HaizFlow-0.1.8-Setup.exe).** Đây là file duy nhất bạn cần để cài ứng dụng. Các tệp Core ở [trang phiên bản](https://github.com/MachHongHai/HaizFlow/releases/latest) dành cho cập nhật tự động; không tải hoặc giải nén chúng để cài.
+**[Tải HaizFlow-0.1.10-Setup.exe](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-Setup.exe).** Đây là file duy nhất bạn cần để cài ứng dụng. Các tệp Core ở [trang phiên bản](https://github.com/MachHongHai/HaizFlow/releases/latest) dành cho cập nhật tự động; không tải hoặc giải nén chúng để cài.
 
 1. Mở tệp **Setup.exe**, chọn ngôn ngữ và đọc điều kiện sử dụng.
 2. Chọn thư mục cài. Có thể dùng ổ D hoặc ổ khác còn đủ chỗ.
@@ -31,7 +31,7 @@ Mở **Cài đặt → Chung**:
 - **CPU:** dành cho máy không có GPU NVIDIA tương thích, hoặc khi bạn muốn dùng các model CPU.
 - **GPU NVIDIA:** dành cho máy có GPU tương thích. Các lựa chọn GPU còn cần gói xử lý và model tương ứng.
 
-Chọn **Áp dụng**. Khi đổi chế độ, kiểm tra lại model trong dự án trước khi chạy. Máy CPU không cần cài gói CUDA. Bạn cũng không cần tự cài CUDA Toolkit để dùng gói xử lý của HaizFlow.
+Chọn **Áp dụng**. Khi đổi chế độ, kiểm tra lại model trong dự án trước khi chạy. Với card 4 GB và RAM 16 GB, nên chọn Whisper Small GPU, HY-MT2 CPU Q4 (hoặc Gemini) và OmniVoice GPU. Bước nhận dạng và giọng đọc dùng GPU lần lượt; OmniVoice tạo từng câu, giữ nguyên checkpoint, FP16 và 32 bước suy luận. Whisper Turbo và HY-MT2 GPU đầy đủ không khả dụng trên cấu hình này. Demucs dùng đoạn GPU ngắn hơn. Đóng ứng dụng nặng và để Windows quản lý page file; các tối ưu này không bảo đảm mọi video dài đều đủ bộ nhớ khi máy đang bận. Máy CPU không cần cài gói CUDA. Bạn cũng không cần tự cài CUDA Toolkit để dùng gói xử lý của HaizFlow.
 
 ## 4. Cài những gói cần dùng
 

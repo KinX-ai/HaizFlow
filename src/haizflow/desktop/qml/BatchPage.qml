@@ -16,11 +16,16 @@ Item {
     property bool dropActive: false
     readonly property bool compactHeight: height < 740
     property var settingOverrides: []
-    function refreshOverrides() { settingOverrides = AppController.batchSettingOverrides(); }
+    property var results: ({})
+    function refreshOverrides() {
+        settingOverrides = AppController.batchSettingOverrides();
+        results = AppController.batchResults();
+    }
     Component.onCompleted: refreshOverrides()
     Connections {
         target: AppController
         function onBatchChanged() { root.refreshOverrides(); }
+        function onExportStateChanged() { root.results = AppController.batchResults(); }
     }
 
     function importDrop(drop) {
@@ -189,13 +194,6 @@ Item {
                 textFormat: Text.PlainText
             }
 
-            Text {
-                visible: root.settingOverrides.length > 0
-                text: qsTr("%1 video dùng cài đặt riêng").arg(root.settingOverrides.length)
-                color: Theme.textMuted
-                font.pixelSize: Theme.caption
-                textFormat: Text.PlainText
-            }
 
             Rectangle {
                 visible: AppController.isBatchRunning
@@ -221,6 +219,34 @@ Item {
                 color: Theme.textMuted
                 font.pixelSize: Theme.caption
                 textFormat: Text.PlainText
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: overrideWarning.implicitHeight + Theme.space16
+            visible: root.settingOverrides.length > 0
+            radius: Theme.radiusSmall
+            color: Theme.warningMuted
+            border.color: Theme.warning
+            border.width: 1
+            RowLayout {
+                id: overrideWarning
+                anchors.fill: parent
+                anchors.margins: Theme.space8
+                Text {
+                    Layout.fillWidth: true
+                    text: qsTr("%1 video dùng cài đặt riêng. Hàng loạt vẫn xử lý các video này.").arg(root.settingOverrides.length)
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: TypeScale.label
+                    color: Theme.warning
+                }
+                StudioButton {
+                    text: qsTr("Chi tiết")
+                    variant: "ghost"
+                    onClicked: overrideDetailsLoader.invoke("open", [])
+                }
             }
         }
 
@@ -341,8 +367,14 @@ Item {
 
                 InfoRow {
                     Layout.preferredWidth: 112
-                    label: qsTr("Hoàn tất")
-                    value: qsTr("%1 / %2").arg(AppController.batchCompletedCount).arg(AppController.batchCount)
+                    label: qsTr("Thành công")
+                    value: qsTr("%1 / %2").arg(root.results.succeeded || 0).arg(AppController.batchCount)
+                }
+
+                StudioButton {
+                    text: (root.results.failed || 0) > 0 ? qsTr("%1 lỗi · Chi tiết").arg(root.results.failed) : qsTr("Chi tiết")
+                    variant: "ghost"
+                    onClicked: resultDetailsLoader.invoke("open", [])
                 }
 
                 ColumnLayout {
@@ -399,6 +431,26 @@ Item {
                         active: AppController.isBatchRunning
                     }
                 }
+            }
+        }
+    }
+
+    LazyDialogLoader {
+        id: overrideDetailsLoader
+        sourceComponent: Component {
+            BatchDetailsDialog {
+                overrides: true
+                rows: root.settingOverrides
+                onClosed: overrideDetailsLoader.release()
+            }
+        }
+    }
+    LazyDialogLoader {
+        id: resultDetailsLoader
+        sourceComponent: Component {
+            BatchDetailsDialog {
+                rows: root.results.rows || []
+                onClosed: resultDetailsLoader.release()
             }
         }
     }

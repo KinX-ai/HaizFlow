@@ -30,6 +30,15 @@ Item {
             color: root.currentIndex === stageIndex ? Theme.sidebarSelected
                 : pointer.hovered ? Theme.surfaceMuted : "transparent"
             radius: Theme.radiusTiny
+            activeFocusOnTab: true
+            border.width: activeFocus ? 1 : 0
+            border.color: Theme.focus
+            Accessible.role: Accessible.Button
+            Accessible.name: String(row.modelData.label || "")
+            Accessible.onPressAction: root.toolSelected(row.stageIndex)
+            Keys.onReturnPressed: root.toolSelected(row.stageIndex)
+            Keys.onEnterPressed: root.toolSelected(row.stageIndex)
+            Keys.onSpacePressed: root.toolSelected(row.stageIndex)
 
             RowLayout {
                 anchors.fill: parent

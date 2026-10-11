@@ -337,6 +337,14 @@ class ProcessingLifecycleController:
                 host.refreshVideos()
                 host.processingChanged.emit()
                 host.batchChanged.emit()
+                identifiers = getattr(host, "_batch_summary_ids", [])
+                if identifiers:
+                    from haizflow.services.batch_feedback import completion_notice, results
+
+                    summary = results([video_store.get_video(key) for key in identifiers])
+                    if summary["total"] and not summary["waiting"]:
+                        host._batch_summary_ids = []
+                        host.appAlertRequested.emit(*completion_notice(summary, host._settings_language))
             elif item == "__QUEUE_CHANGED__":
                 host.refreshVideos()
                 host.selectedVideoChanged.emit()

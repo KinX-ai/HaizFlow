@@ -95,6 +95,19 @@ class ManualSubtitleModel(QAbstractListModel):
         self.endResetModel()
         self.changed.emit()
 
+    def wait_for_saves(self) -> None:
+        """Import worker barrier: finish old-source publication before replacement.
+
+        Never called on the GUI thread. The single executor preserves save
+        order; a barrier prevents an old pending save publishing on new media.
+        """
+        if not self._closed:
+            self._executor.submit(lambda: None).result()
+
+    def reset_source(self, video_id: str) -> None:
+        if self.video_id == video_id:
+            self.load("", [])
+
     def replace_timeline(self, segments: list[dict]) -> bool:
         """Persist a timeline-derived subtitle snapshot without new history.
 

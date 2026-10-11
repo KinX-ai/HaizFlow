@@ -298,12 +298,16 @@ def _worker_command() -> list[str]:
     # available. The CUDA engine pack does not include llama_cpp, and loading
     # full HY-MT2 alongside Whisper can exhaust both Windows commit and VRAM.
     preference = translation_model_preference()
-    if preference == "q4" or (preference == "auto" and runtime_profile().key == "cuda_low_memory"):
+    profile = runtime_profile() if preference == "auto" else None
+    if preference == "q4" or (preference == "auto" and profile.key == "cuda_low_memory"):
         cpu_engine = installed_engine_command(
             "translation", "hymt2_server", {"device": "cpu", "translation_model": "q4"}
         )
         if cpu_engine:
             return cpu_engine
+        if (preference == "auto" and getattr(profile, "cuda_available", False)
+                and 0 < getattr(profile, "total_vram_bytes", 0) < 5 * 1024**3 and is_frozen()):
+            raise ResourcePackError("Card 4 GB cần gói HY-MT2 CPU Q4 để dịch. Hãy cài gói này trong Gói tài nguyên.")
     external = installed_engine_command(
         "translation",
         "hymt2_server",

@@ -26,7 +26,7 @@ from haizflow.pipeline.process_registry import check_cancellation, clean_video, 
 from haizflow.pipeline.render import render_video
 from haizflow.pipeline.subtitle import generate_srt
 from haizflow.pipeline.timing_contract import AUDIO_TIMELINE_VERSION, TIMING_SOURCE
-from haizflow.pipeline.tts import generate_voice_parts, resolve_tts_provider
+from haizflow.pipeline.tts import generate_voice_parts, resolve_tts_provider, voice_selection_identity
 from haizflow.schemas.video import SubtitleStyle
 from haizflow.services.video_store import get_video, log_to_video, update_video
 from haizflow.services.translation import (
@@ -80,6 +80,26 @@ def _file_state(path):
         return None
     stat = os.stat(path)
     return (os.path.abspath(path), stat.st_size, stat.st_mtime_ns)
+
+
+def _voice_checkpoint_signature(video, transcript_state):
+    """Sign only inputs used by synthesis, not a dormant narrator preset."""
+    from haizflow.pipeline.speaker_identity import IDENTITY_VERSION
+
+    speaker_mode = str(getattr(video, "speaker_mode", "single") or "single")
+    provider = str(getattr(video, "tts_provider", "omnivoice") or "omnivoice")
+    language = str(getattr(video, "target_language", "vi") or "vi")
+    files = dict(video.files or {})
+    return _signature(
+        transcript_state, provider, resolve_tts_provider(provider, language), language,
+        voice_selection_identity(video.tts_voice, speaker_mode), speaker_mode,
+        _file_state(str(files.get("voice_reference") or "")) if speaker_mode != "multiple" else None,
+        str(files.get("voice_reference_transcript") or "") if speaker_mode != "multiple" else "",
+        # Never mix clips produced by different source identity/anchor policies.
+        ("omnivoice-stable-speaker-map-target-language-r7" if speaker_mode == "multiple"
+         else "omnivoice-dedicated-short-anchor-or-source-speaker-r5"),
+        *((IDENTITY_VERSION,) if speaker_mode == "multiple" else ()),
+    )
 
 
 def _required_video_path(video, key: str, *, must_exist: bool = False) -> str:
@@ -854,26 +874,7 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
     target_language = str(getattr(video, "target_language", "vi") or "vi")
     configured_tts_provider = str(getattr(video, "tts_provider", "omnivoice") or "omnivoice")
     effective_tts_provider = resolve_tts_provider(configured_tts_provider, target_language)
-    voice_reference = str((video.files or {}).get("voice_reference") or "")
-    voice_reference_transcript = str((video.files or {}).get("voice_reference_transcript") or "")
-    from haizflow.pipeline.speaker_identity import IDENTITY_VERSION
-    voice_signature = _signature(
-        transcript_state,
-        configured_tts_provider,
-        effective_tts_provider,
-        target_language,
-        video.tts_voice,
-        getattr(video, "speaker_mode", "single"),
-        _file_state(voice_reference),
-        voice_reference_transcript,
-        # Dedicated short narrator anchors are materially different from the
-        # old first-segment reference. Do not combine cached voice parts made
-        # by both strategies after a paused/failed run.
-        ("omnivoice-stable-speaker-map-target-language-r7"
-         if getattr(video, "speaker_mode", "single") == "multiple"
-         else "omnivoice-dedicated-short-anchor-or-source-speaker-r5"),
-        *((IDENTITY_VERSION,) if getattr(video, "speaker_mode", "single") == "multiple" else ()),
-    )
+    voice_signature = _voice_checkpoint_signature(video, transcript_state)
     with open(transcript_json, "r", encoding="utf-8") as transcript_file:
         transcript_segments = json.load(transcript_file)
     if not isinstance(transcript_segments, list) or not transcript_segments:

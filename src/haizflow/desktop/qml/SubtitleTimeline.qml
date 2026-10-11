@@ -220,10 +220,12 @@ Rectangle {
     function refreshVisibleSegments() {
         if (editingClip)
             return;
+        // Fit zoom for long videos is often below one pixel per second.
+        // Keep that scale when converting the viewport back to media time.
         const left = Math.max(0, (timelineFlick.contentX - trackLeft)
-            / Math.max(1, pixelsPerSecond) - 2);
+            / Math.max(0.001, pixelsPerSecond) - 2);
         const right = (timelineFlick.contentX + timelineFlick.width - trackLeft)
-            / Math.max(1, pixelsPerSecond) + 2;
+            / Math.max(0.001, pixelsPerSecond) + 2;
         visibleStartSeconds = left;
         visibleEndSeconds = right;
         const next = [];
@@ -988,11 +990,11 @@ Rectangle {
                         visible: previewEnd >= Math.max(
                             0,
                             (timelineFlick.contentX - root.trackLeft)
-                                / Math.max(1, root.pixelsPerSecond) - 2
+                                / Math.max(0.001, root.pixelsPerSecond) - 2
                         ) && previewStart <= Math.min(
                             root.timelineDuration,
                             (timelineFlick.contentX + timelineFlick.width - root.trackLeft)
-                                / Math.max(1, root.pixelsPerSecond) + 2
+                                / Math.max(0.001, root.pixelsPerSecond) + 2
                         )
                         radius: Theme.radiusTiny
                         color: Theme.interactiveMuted

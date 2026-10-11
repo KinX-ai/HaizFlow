@@ -19,7 +19,7 @@ def fixture():
     return host, video
 
 
-@pytest.mark.parametrize("field,value", [("translation_model", "q4"), ("target_language", "en"),
+@pytest.mark.parametrize("field,value", [("translation_model", "full"), ("target_language", "en"),
                                         ("speech_recognition_model", "small-gpu"), ("enable_audio_separation", False)])
 def test_changed_processing_setting_blocks_resume(field, value):
     host, video = fixture()

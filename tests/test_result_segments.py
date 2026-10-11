@@ -62,6 +62,20 @@ def test_split_trim_delete_keep_other_tracks_clock_and_render_identity():
     assert len(result_segments.ranges(document)) == 1
 
 
+def test_toolbar_split_finds_result_clip_at_playhead_without_selection():
+    document = make_document()
+    host = host_for(document)
+    assert HaizFlowController.splitResultClip(host, "", 1800)
+    assert [(item["startMs"], item["endMs"]) for item in result_segments.ranges(document)] == [
+        (0, 1800), (1800, 4000)]
+    assert HaizFlowController.splitResultClip(host, "", 2900)
+    assert [(item["startMs"], item["endMs"]) for item in result_segments.ranges(document)] == [
+        (0, 1800), (1800, 2900), (2900, 4000)]
+    assert not HaizFlowController.splitResultClip(host, "", 2900)
+    assert not HaizFlowController.splitResultClip(host, "", 4000)
+    assert document.clips[0].asset_id == "published-voice"
+
+
 def test_ranges_survive_save_reload_and_empty_track_is_not_recreated(tmp_path, monkeypatch):
     document = make_document()
     assert result_segments.split(document, "result-1", 1500, "second")

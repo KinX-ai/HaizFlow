@@ -971,7 +971,7 @@ class MultiProjectControllerTests(unittest.TestCase):
             source_language="auto",
             target_language="en",
             speech_recognition_model="small",
-            translation_model="auto",
+            translation_model="q4",
             translator_provider="hymt2",
             tts_provider="omnivoice",
             tts_voice="omnivoice:female",

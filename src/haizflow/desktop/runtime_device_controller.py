@@ -579,6 +579,9 @@ class RuntimeDeviceController:
                 self._apply_live_hardware(event["capabilities"])
             elif kind == "startup":
                 host._hardware_capabilities = event["capabilities"]
+                sync_defaults = getattr(host, "_sync_project_model_defaults", None)
+                if callable(sync_defaults):
+                    sync_defaults()
                 refresh_turbo = getattr(host, "_refresh_whisper_turbo_model_ready", None)
                 if refresh_turbo:
                     refresh_turbo()

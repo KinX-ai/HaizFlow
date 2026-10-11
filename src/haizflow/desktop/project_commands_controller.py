@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 
 from haizflow.core.hardware import runtime_profile
-from haizflow.desktop.localization import QMessageBox
+from haizflow.desktop.localization import QFileDialog, QMessageBox, native_media_dialog_directory
 from haizflow.pipeline.process_registry import cancel_video, pause_video
 from haizflow.schemas.video import SubtitleStyle
 from haizflow.services import project_store, video_store
@@ -23,11 +23,12 @@ def _subtitle_style_items(video) -> tuple[tuple[str, object], ...]:
     return tuple(values.items()) + (("manual", bool(getattr(video, "subtitle_layout_override", False))),)
 
 
-def _batch_values_for_device(values: dict, device: str) -> dict:
+def _batch_values_for_device(values: dict, device: str, *, total_vram_bytes: int | None = None) -> dict:
     from haizflow.core.model_choices import models_for_device
 
     compatible = models_for_device(device, recognition=values["speechRecognitionModel"],
-                                   translation=values["translationModel"], voice=values["ttsProvider"])
+                                   translation=values["translationModel"], voice=values["ttsProvider"],
+                                   total_vram_bytes=total_vram_bytes)
     return {**values, "speechRecognitionModel": compatible["speech_recognition_model"],
             "translationModel": compatible["translation_model"], "ttsProvider": compatible["tts_provider"]}
 
@@ -119,13 +120,64 @@ class ProjectCommandsController:
         self._host = host
         self._create_video = create_video or create_desktop_video
 
+    def export_selected_srt(self) -> bool:
+        from haizflow.services import desktop_settings, subtitle_export
+        from haizflow.services.video_export import export_filename, project_display_name
+
+        host = self._host
+        text = lambda vi, en: vi if host._settings_language == "vi" else en
+        video = host._selected_video()
+        model = getattr(host, "_manual_editor_document", None)
+        document = model.document_object if model and video and model.video_id == video.video_id else None
+        # Text edits can still be publishing when the save picker opens. Take
+        # their latest text, but keep the editor's authoritative timeline.
+        subtitle_model = getattr(host, "_manual_subtitles", None)
+        overrides = ({item["segment_id"]: item["text"] for item in subtitle_model.segments
+                      if subtitle_model._states.get(item["segment_id"]) in {"saving", "error"}}
+                     if subtitle_model is not None and video and subtitle_model.video_id == video.video_id else {})
+        content = subtitle_export.compose_document_srt(document, overrides)
+        if not content:
+            host.appAlertRequested.emit(
+                text("Chưa có phụ đề để xuất", "No subtitles to export"),
+                text("Nhận dạng & dịch hoặc thêm phụ đề trước khi xuất SRT.",
+                     "Recognize and translate, or add subtitles before exporting SRT."), "warning",
+            )
+            return False
+        directory = desktop_settings.load_settings().get("last_export_directory") or native_media_dialog_directory()
+        filename = Path(export_filename(project_display_name(video))).with_suffix(".srt")
+        path, _ = QFileDialog.getSaveFileName(
+            None, text("Xuất SRT", "Export SRT"), str(Path(directory) / filename),
+            "SubRip (*.srt)", "", QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if not path:
+            return False
+        try:
+            target = subtitle_export.validate_srt_destination(path)
+            if target.exists() and QMessageBox.question(
+                None, text("Thay thế tệp SRT?", "Replace SRT file?"), str(target),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return False
+            subtitle_export.save_srt(content, target)
+        except (OSError, ValueError) as exc:
+            host.appAlertRequested.emit(
+                text("Không thể xuất SRT", "SRT export failed"),
+                text("Chọn thư mục ngoài dữ liệu dự án, có quyền ghi và đóng tệp đang mở. ",
+                     "Choose a writable folder outside project data and close any open destination file. ") + str(exc),
+                "warning",
+            )
+            return False
+        host.appAlertRequested.emit(text("Đã xuất SRT", "SRT exported"), str(target), "info")
+        return True
+
     @staticmethod
     def _resources_ready(host, video=None) -> bool:
         return ProjectCommandsController._resources_ready_for_videos(host, [video])
 
     @staticmethod
     def _resources_ready_for_videos(host, videos) -> bool:
-        from haizflow.core.model_choices import gpu_choice_blocked, models_for_device
+        from haizflow.core.model_choices import gpu_choice_blocked, heavy_gpu_choice_blocked, models_for_device, project_translation_choice
 
         if getattr(getattr(host, "_resource_packs", None), "storageMoving", False):
             host.appAlertRequested.emit("Đang chuyển gói tài nguyên", "Hãy chờ chuyển vị trí hoàn tất trước khi xử lý.", "info")
@@ -133,13 +185,18 @@ class ProjectCommandsController:
         if getattr(host, "_device_switching", False):
             host.appAlertRequested.emit("Đang chuyển CPU/GPU", "Chờ chuyển bộ xử lý hoàn tất trước khi xử lý video.", "info")
             return False
+        ensure_hardware = getattr(host, "_ensure_hardware_ready_for_action", None)
+        if callable(ensure_hardware) and not ensure_hardware():
+            return False
         videos = list(videos)
+        capabilities = getattr(host, "_hardware_capabilities", None)
+        vram = getattr(capabilities, "total_vram_bytes", None)
         for index, video in enumerate(videos):
             if video and getattr(video, "status", "") != "processing":
                 compatible = models_for_device(str(getattr(host, "_settings_processing_device", "cpu")),
                     recognition=getattr(video, "speech_recognition_model", "small"),
                     translation=getattr(video, "translation_model", "auto"),
-                    voice=getattr(video, "tts_provider", "omnivoice"))
+                    voice=getattr(video, "tts_provider", "omnivoice"), total_vram_bytes=vram)
                 changes = {key: value for key, value in compatible.items() if getattr(video, key, value) != value}
                 if changes and not host._processing_queue.contains(video.video_id):
                     videos[index] = video_store.update_video(video.video_id, **changes) or video
@@ -151,9 +208,19 @@ class ProjectCommandsController:
                                   voice=getattr(video, "tts_provider", getattr(host, "_tts_provider", "omnivoice"))):
                 host.appAlertRequested.emit("Đang dùng chế độ CPU", "Dự án đang chọn model GPU. Chọn model CPU hoặc chuyển sang GPU trong Cài đặt → Chung.", "warning")
                 return False
-        ensure_hardware = getattr(host, "_ensure_hardware_ready_for_action", None)
-        if callable(ensure_hardware) and not ensure_hardware():
-            return False
+        device = str(getattr(host, "_settings_processing_device", "cpu"))
+        for video in videos:
+            recognition = str(getattr(video, "speech_recognition_model", getattr(host, "_speech_recognition_model", "small")))
+            translation = project_translation_choice(
+                str(getattr(video, "translation_model", getattr(host, "_translation_model", "q4"))),
+                device, total_vram_bytes=vram)
+            if heavy_gpu_choice_blocked(device, capabilities, recognition=recognition, translation=translation):
+                host.appAlertRequested.emit(
+                    "GPU không đủ VRAM",
+                    "Whisper Turbo và HY-MT2 GPU đầy đủ cần ít nhất 5 GiB VRAM. Chọn Whisper Small GPU hoặc HY-MT2 CPU Q4 trước khi xử lý.",
+                    "warning",
+                )
+                return False
         if any(str(getattr(video, "translation_model", "")).startswith("gemini-") for video in videos if video):
             from haizflow.services.gemini_translation import key_configured
 
@@ -236,8 +303,10 @@ class ProjectCommandsController:
             return
         host._batch_running = True
         host._batch_stop_requested = False
+        host._batch_summary_ids = list(pending_ids)
         if not host._enqueue_videos(pending_ids):
             host._batch_running = False
+            host._batch_summary_ids = []
             QMessageBox.information(None, "Batch queue", "These videos are already waiting or processing.")
             return
         host.batchChanged.emit()
@@ -262,6 +331,12 @@ class ProjectCommandsController:
             return
         host._batch_running = True
         host._batch_stop_requested = False
+        exporter = getattr(host, "_video_exports", None)
+        export_owned = {job["videoId"] for job in getattr(exporter, "jobs", [])
+                        if job.get("process") and job["status"] in {"rendering", "paused", "awaiting_review"}}
+        host._batch_summary_ids = list(dict.fromkeys(
+            [*getattr(host, "_batch_summary_ids", []),
+             *(key for key in resumable_ids if key not in export_owned)]))
         queued = host._enqueue_videos(resumable_ids)
         if not queued:
             host._batch_running = False
@@ -284,7 +359,8 @@ class ProjectCommandsController:
                 initial.update({key: getattr(config, field) for key, field in batch_settings.FIELDS.items()})
                 initial.update({key: "" for key in batch_settings.ASSETS})
         values = batch_settings.stable_values(str(getattr(host, "_selected_project_key", "") or ""), initial, videos)
-        return _batch_values_for_device(values, str(getattr(host, "_settings_processing_device", "cpu")))
+        return _batch_values_for_device(values, str(getattr(host, "_settings_processing_device", "cpu")),
+                                        total_vram_bytes=getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None))
 
     def _legacy_batch_settings_values(self) -> dict[str, object]:
         host = self._host
@@ -410,9 +486,32 @@ class ProjectCommandsController:
         for key in host._batch_video_ids:
             video = video_store.get_video(key)
             if video and (changed := batch_settings.differences(_batch_values_for_device(
-                    batch_settings.values_for(video), str(getattr(host, "_settings_processing_device", "cpu"))), expected)):
+                    batch_settings.values_for(video), str(getattr(host, "_settings_processing_device", "cpu")),
+                    total_vram_bytes=getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None)), expected)):
                 result.append({"videoId": key, "fileName": video.original_filename, "differences": changed})
         return result
+
+    def batch_results(self) -> dict:
+        from haizflow.services.batch_feedback import results
+
+        host = self._host
+        identifiers = set(host._batch_video_ids)
+        exporter = getattr(host, "_video_exports", None)
+        jobs = [job for job in getattr(exporter, "jobs", []) if job["videoId"] in identifiers]
+        return results([video_store.get_video(key) for key in host._batch_video_ids], jobs)
+
+    def batch_preview_sources(self) -> list[dict]:
+        from haizflow.desktop.media import thumbnail_source
+
+        sources = []
+        for key in self._host._batch_video_ids:
+            video = video_store.get_video(key)
+            if not video or not os.path.isfile(str(video.files.get("video_input") or "")):
+                continue
+            sources.append({"videoId": key, "fileName": video.original_filename,
+                            "thumbnailSource": thumbnail_source(video.files.get("thumbnail") or ""),
+                            "videoWidth": video.video_width, "videoHeight": video.video_height})
+        return sources
 
     def _legacy_batch_setting_overrides(self) -> list[dict[str, object]]:
         """List videos whose saved configuration differs from the batch default.
@@ -501,9 +600,16 @@ class ProjectCommandsController:
             return False
         old_values = self.batch_settings_values()
         normalized = {**old_values, **values}
+        from haizflow.core.model_choices import project_translation_choice
+
+        normalized["translationModel"] = project_translation_choice(
+            str(normalized.get("translationModel") or "auto"),
+            str(getattr(host, "_settings_processing_device", "cpu")),
+            total_vram_bytes=getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None))
         selected = [video for video in videos if replace_overrides or not batch_settings.differences(
             _batch_values_for_device(batch_settings.values_for(video),
-                                     str(getattr(host, "_settings_processing_device", "cpu"))), old_values)]
+                                     str(getattr(host, "_settings_processing_device", "cpu")),
+                                     total_vram_bytes=getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None)), old_values)]
         before = {}
         try:
             config = batch_settings.config_for(normalized)
@@ -513,6 +619,13 @@ class ProjectCommandsController:
                                   recognition=config.speech_recognition_model,
                                   translation=config.translation_model, voice=config.tts_provider):
                 raise ValueError("Chọn model CPU hoặc chuyển sang GPU trong Cài đặt → Chung.")
+            from haizflow.core.model_choices import heavy_gpu_choice_blocked
+
+            if heavy_gpu_choice_blocked(str(getattr(host, "_settings_processing_device", "cpu")),
+                                        getattr(host, "_hardware_capabilities", None),
+                                        recognition=config.speech_recognition_model,
+                                        translation=config.translation_model):
+                raise ValueError("GPU có dưới 5 GiB VRAM. Chọn Whisper Small GPU và HY-MT2 CPU Q4 trước khi áp dụng.")
             normalized["subtitleStyle"] = {**config.subtitle_style.model_dump(), "manual": config.subtitle_layout_override}
             for key in batch_settings.ASSETS:
                 normalized[key] = batch_settings.stage_asset(project_key, key, str(normalized.get(key) or ""))
@@ -599,6 +712,16 @@ class ProjectCommandsController:
         if selected_translation_model not in {"auto", "q4", "full", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"}:
             return False
         capabilities = getattr(host, "_hardware_capabilities", None)
+        from haizflow.core.model_choices import heavy_gpu_choice_blocked, project_translation_choice
+
+        selected_translation_model = project_translation_choice(
+            selected_translation_model, str(getattr(host, "_settings_processing_device", "cpu")),
+            total_vram_bytes=getattr(capabilities, "total_vram_bytes", None))
+        if heavy_gpu_choice_blocked(str(getattr(host, "_settings_processing_device", "cpu")),
+                                    capabilities, recognition=asr_model,
+                                    translation=selected_translation_model):
+            host._show_app_alert("GPU không đủ VRAM", "GPU có dưới 5 GiB VRAM. Chọn Whisper Small GPU và HY-MT2 CPU Q4 trước khi áp dụng.", "warning")
+            return False
         turbo_gpu_available = bool(
             getattr(host, "_settings_processing_device", "") == "gpu"
             and (

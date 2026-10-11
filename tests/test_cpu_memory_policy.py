@@ -37,7 +37,10 @@ def test_installed_16gb_reserved_memory_passes_cpu_and_gpu_capacity():
     assert hardware.validate_processing_device("cpu", cpu)[0]
     gpu = replace(cpu, cuda_available=True, cuda_name="test", total_vram_bytes=6 * GIB)
     assert hardware.validate_processing_device("gpu", gpu)[0]
-    assert not hardware.validate_processing_device("gpu", replace(gpu, total_vram_bytes=4 * GIB))[0]
+    four_gb = replace(gpu, total_vram_bytes=4 * GIB)
+    assert hardware.validate_processing_device("gpu", four_gb)[0]
+    assert not four_gb.heavy_gpu_models_supported
+    assert not hardware.validate_processing_device("gpu", replace(gpu, total_vram_bytes=3 * GIB))[0]
     profile = hardware.runtime_profile_for(cpu, "cpu")
     assert (profile.key, profile.whisper_batch_size, profile.cpu_threads) == ("cpu_low_memory", 2, 4)
     assert not profile.warm_hymt2_on_startup

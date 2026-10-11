@@ -486,8 +486,8 @@ def test_old_waveform_delivery_cannot_clear_new_project_pending_request():
         model.close()
 
 
-@pytest.mark.parametrize("change_voice", [False, True])
-def test_reordered_multispeaker_clips_reuse_only_matching_voice_configuration(tmp_path, change_voice):
+@pytest.mark.parametrize("change", ["none", "default", "override", "provider"])
+def test_reordered_multispeaker_clips_reuse_only_matching_voice_configuration(tmp_path, change):
     from haizflow.pipeline import manual_tools
     from haizflow.services import manual_artifacts
     video = SimpleNamespace(video_id="reordered", project_type="manual", speaker_mode="multiple",
@@ -507,8 +507,15 @@ def test_reordered_multispeaker_clips_reuse_only_matching_voice_configuration(tm
     with patch.object(manual_tools, "recognition_signature", return_value="same-source"), \
             patch.object(manual_tools, "_voice_cache_version", return_value="stable-version"):
         signatures = manual_tools._voice_clip_signatures(video, original)
-        if change_voice:
+        if change == "default":
             video.tts_voice = "vi-VN-HoaiMyNeural"
+        elif change == "override":
+            video.files["manual_voice_overrides"] = {
+                item["segment_id"]: {"voice": "omnivoice:female"} for item in original
+            }
+        elif change == "provider":
+            video.tts_provider = "omnivoice-gpu"
+        needs_generation = change in {"override", "provider"}
         expected = manual_artifacts.signature(manual_tools._voice_clip_signatures(video, current), "stable-version")
 
         def resolve(_id, kind, signature):
@@ -519,7 +526,7 @@ def test_reordered_multispeaker_clips_reuse_only_matching_voice_configuration(tm
         def publish(*_args, **_kwargs):
             manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
             assert len(manifest["clips"]) == 2
-            if not change_voice:
+            if not needs_generation:
                 assert (stage / "parts/voice_0001.mp3").read_bytes() == audio[1].read_bytes()
                 assert (stage / "parts/voice_0002.mp3").read_bytes() == audio[0].read_bytes()
             return {"resolved_outputs": {"manifest": str(stage / "manifest.json")}}
@@ -543,7 +550,7 @@ def test_reordered_multispeaker_clips_reuse_only_matching_voice_configuration(tm
             patch.object(manual_tools.editor_documents, "mark_voice_clips_ready") as ready,
         ):
             manual_tools._run_voice(video, SimpleNamespace(update=Mock()))
-        if change_voice:
+        if needs_generation:
             assert generate.call_args.kwargs["segment_indices"] == [1, 2]
         else:
             generate.assert_not_called()

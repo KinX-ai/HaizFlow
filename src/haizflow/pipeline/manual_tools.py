@@ -15,6 +15,7 @@ from haizflow.core.hardware import translation_model_signature_parts
 from haizflow.core.model_integrity import DEMUCS_MODEL_SIGNATURE
 from haizflow.core.processing_errors import describe_failure
 from haizflow.pipeline.timing_contract import TIMING_SOURCE
+from haizflow.pipeline.tts import voice_selection_identity
 from haizflow.services import editor_documents, manual_artifacts, result_segments, video_store
 from haizflow.services.video_export import legacy_render_owned, preset_settings
 
@@ -381,8 +382,8 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
     speaker_mode = str(getattr(video, "speaker_mode", "single") or "single")
     files = dict(getattr(video, "files", {}) or {})
     overrides = dict(files.get("manual_voice_overrides") or {})
-    reference = manual_artifacts.file_state(files.get("voice_reference"))
-    reference_text = str(files.get("voice_reference_transcript") or "")
+    reference = manual_artifacts.file_state(files.get("voice_reference")) if speaker_mode != "multiple" else None
+    reference_text = str(files.get("voice_reference_transcript") or "") if speaker_mode != "multiple" else ""
     recognition = recognition_signature(video) if speaker_mode == "multiple" else ""
     signatures = []
     for index, segment in enumerate(segments):
@@ -394,7 +395,7 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
             or getattr(video, "tts_provider", "omnivoice")
             or "omnivoice"
         )
-        voice = str(override.get("voice") or getattr(video, "tts_voice", "") or "")
+        voice = str(override.get("voice") or voice_selection_identity(getattr(video, "tts_voice", ""), speaker_mode))
         signatures.append(
             manual_artifacts.signature(
                 preprocess_text_for_tts(str(segment.get("text") or "")),
@@ -428,7 +429,9 @@ def _voice_generation_groups(video, segments: list[dict[str, Any]]) -> dict[tupl
             or getattr(video, "tts_provider", "omnivoice")
             or "omnivoice"
         )
-        voice = str(override.get("voice") or getattr(video, "tts_voice", "") or "")
+        voice = str(override.get("voice") or voice_selection_identity(
+            getattr(video, "tts_voice", ""), str(getattr(video, "speaker_mode", "single") or "single"),
+        ))
         groups.setdefault((provider, voice), []).append(index)
     return groups
 
@@ -608,6 +611,85 @@ def _voice_manifest_payload(record: dict[str, Any] | None) -> dict[str, Any]:
     return dict(payload) if isinstance(payload, dict) else {}
 
 
+def _audible_manual_voice_sources(video, document, *, range_ms=None) -> dict[str, tuple[str, str]]:
+    """Resolve exactly the enabled editor voice clips before mixing or export.
+
+    A pending inspector voice choice must not replace the already-published
+    sound. The editor asset is the first authority, followed by its published
+    manifest. Missing clips are an error, never an implicit request to export
+    source audio and music without the voice layer.
+    """
+    tracks = {track.track_id: track for track in document.tracks}
+    voice_track = tracks.get("voice")
+    if voice_track is None or not voice_track.visible or voice_track.muted:
+        return {}
+    subtitles = sorted(
+        (clip for clip in document.clips if clip.track_id == "subtitles" and clip.enabled and clip.segment_id),
+        key=lambda clip: (clip.start_ms, clip.clip_id),
+    )
+    voices = {clip.segment_id: clip for clip in document.clips if clip.track_id == "voice" and clip.segment_id}
+    requested = []
+    for index, subtitle in enumerate(subtitles):
+        clip = voices.get(subtitle.segment_id)
+        if clip is None or not clip.enabled or clip.muted:
+            continue
+        if range_ms is not None and (clip.start_ms + clip.duration_ms <= range_ms[0]
+                                     or clip.start_ms >= range_ms[1]):
+            continue
+        requested.append((index, subtitle, clip))
+    if not requested:
+        return {}
+
+    sources = {}
+    unresolved = []
+    for index, subtitle, clip in requested:
+        if clip.metadata.get("state") == "stale" or clip.name != subtitle.name:
+            raise RuntimeError("Giọng đọc trên timeline không khớp phụ đề. Hãy tạo lại giọng trước khi xuất.")
+        asset = editor_documents.asset_by_id(document, clip.asset_id) if clip.asset_id else None
+        if asset and asset.kind == "audio" and manual_artifacts.file_state(asset.path):
+            sources[subtitle.segment_id] = (str(asset.path), "")
+        else:
+            unresolved.append((index, subtitle))
+    if not unresolved:
+        return sources
+
+    # Most edited projects have a valid asset for every audible clip. Only
+    # inspect the published manifest/cache when an asset is actually missing.
+    published = published_voice_record(video, validate=True)
+    published_segments = published_voice_source_segments(video, published, validate=True) if published else []
+    published_by_id = {
+        str(item.get("segment_id") or item.get("id") or ""): index
+        for index, item in enumerate(published_segments, start=1)
+    }
+    published_parts = Path(published["resolved_outputs"]["manifest"]).parent / "parts" if published else None
+    signatures = None
+    for index, subtitle in unresolved:
+        source = ""
+        dependency = ""
+        if published_parts is not None:
+            source_index = published_by_id.get(subtitle.segment_id, 0)
+            candidate = published_parts / f"voice_{source_index:04d}.mp3"
+            if source_index and manual_artifacts.file_state(candidate):
+                source = str(candidate)
+                dependency = str(published.get("artifact_id") or "")
+        if not source:
+            if signatures is None:
+                signatures = _voice_clip_signatures(video, [
+                    {"segment_id": clip.segment_id, "text": clip.name} for clip in subtitles
+                ])
+            record = manual_artifacts.resolve(video.video_id, "tts_clip", signatures[index])
+            candidate = str(((record or {}).get("resolved_outputs") or {}).get("audio") or "")
+            if candidate and manual_artifacts.file_state(candidate):
+                source = candidate
+                dependency = str(record.get("artifact_id") or "")
+        if not source:
+            raise RuntimeError(
+                f"Thiếu âm thanh giọng đọc cho câu {index + 1}. Hãy tạo lại giọng trước khi xuất."
+            )
+        sources[subtitle.segment_id] = (source, dependency)
+    return sources
+
+
 def _current_voice_record(video, *, validate: bool = True) -> dict[str, Any] | None:
     # Rendering and mixing consume the last published state. The Voice tool's
     # readiness check separately compares that state with ``voice_signature``
@@ -652,6 +734,8 @@ def audio_signature(video, *, validate: bool = True) -> str:
             for track in editor_document.tracks
             if track.kind in {"source_audio", "voice", "music"}
         }
+        voice_asset_ids = {clip.asset_id for clip in editor_document.clips
+                           if clip.track_id == "voice" and clip.enabled and clip.asset_id}
         audio_document = {
             "sequence": editor_document.sequence.model_dump(),
             "tracks": audio_tracks,
@@ -666,6 +750,11 @@ def audio_signature(video, *, validate: bool = True) -> str:
                 "attack_ms": editor_document.audio_ducking_attack_ms,
                 "release_ms": editor_document.audio_ducking_release_ms,
             },
+            "voice_assets": [
+                (asset.asset_id, asset.path, asset.fingerprint)
+                for asset in editor_document.assets
+                if asset.asset_id in voice_asset_ids
+            ],
         }
     return manual_artifacts.signature(
         str((voice or {}).get("signature") or "no-voice"),
@@ -678,7 +767,7 @@ def audio_signature(video, *, validate: bool = True) -> str:
         (subtitle or {}).get("signature", "") if voice else "no-subtitle-audio",
         audio_document,
         *_generation_token(video, "audio"),
-        "manual-audio-mix-v6-stereo-48k",
+        "manual-audio-mix-v7-voice-asset-validation",
     )
 
 
@@ -776,7 +865,7 @@ def _voice_ready(video, *, validate: bool = True) -> bool:
             return False
         return str(active.get("config_fingerprint") or "") == manual_artifacts.signature(
             str(getattr(video, "tts_provider", "omnivoice") or "omnivoice"),
-            str(getattr(video, "tts_voice", "") or ""),
+            voice_selection_identity(getattr(video, "tts_voice", ""), getattr(video, "speaker_mode", "single")),
             str(getattr(video, "speaker_mode", "single") or "single"),
         )
     expected = voice_signature(video, validate=validate)
@@ -1021,22 +1110,32 @@ def tool_states(video, *, language: str = "vi") -> list[dict[str, Any]]:
         else:
             published_payload = _voice_manifest_payload(published_voice)
             published_groups = published_payload.get("voice_configs")
-            same_global_voice = (
-                isinstance(published_groups, list)
-                and len(published_groups) == 1
-                and str(published_groups[0].get("provider") or "")
-                == str(getattr(video, "tts_provider", "omnivoice") or "omnivoice")
-                and str(published_groups[0].get("voice") or "")
-                == str(getattr(video, "tts_voice", "") or "")
-                and str(published_payload.get("speaker_mode") or "single")
-                == str(getattr(video, "speaker_mode", "single") or "single")
-                and not dict(getattr(video, "files", {}) or {}).get("manual_voice_overrides")
-            )
-            if same_global_voice:
+            if isinstance(published_groups, list):
+                desired_groups = [
+                    {"provider": provider, "voice": voice, "segments": indices}
+                    for (provider, voice), indices in _voice_generation_groups(
+                        video, _load_segments(video, validate=False)).items()
+                ]
+                same_voice_choice = (
+                    published_groups == desired_groups
+                    and str(published_payload.get("speaker_mode") or "single")
+                    == str(getattr(video, "speaker_mode", "single") or "single")
+                )
+            else:
+                same_voice_choice = (
+                    str(published_voice.get("config_fingerprint") or "")
+                    == manual_artifacts.signature(
+                        str(getattr(video, "tts_provider", "omnivoice") or "omnivoice"),
+                        voice_selection_identity(getattr(video, "tts_voice", ""), getattr(video, "speaker_mode", "single")),
+                        str(getattr(video, "speaker_mode", "single") or "single"),
+                    )
+                    and not dict(getattr(video, "files", {}) or {}).get("manual_voice_overrides")
+                )
+            if same_voice_choice:
                 voice_notice = (
-                    "Giọng cũ vẫn được dùng. Tạo lại để các đoạn có cùng chất giọng."
+                    "Giọng đã tạo vẫn được dùng. Có thể tạo lại để cập nhật."
                     if vi else
-                    "The previous voice remains in use. Regenerate to give all segments the same voice."
+                    "The existing voice remains in use. Regenerate to update it."
                 )
             else:
                 voice_notice = (
@@ -1802,7 +1901,7 @@ def _register_voice_manifest_from_parts(video, parts_dir: Path) -> dict[str, Any
             # validation.  Marking this as merely "legacy-voice" made the
             # lightweight editor state checker reject valid migrated speech.
             config_fingerprint=manual_artifacts.signature(
-                video.tts_provider, video.tts_voice, video.speaker_mode
+                video.tts_provider, voice_selection_identity(video.tts_voice, video.speaker_mode), video.speaker_mode
             ),
         )
     finally:
@@ -1826,7 +1925,6 @@ def _compose_manual_audio(video, output_path: Path, work_dir: Path, reporter=Non
             and not track.muted
         )
 
-    voice = published_voice_record(video, validate=True)
     background, _background_token, input_ids = _audio_background(video)
     segments_path = work_dir / "audio-segments.json"
     voice_parts = work_dir / "editor-voice-parts"
@@ -1876,40 +1974,18 @@ def _compose_manual_audio(video, output_path: Path, work_dir: Path, reporter=Non
 
     segments.sort(key=lambda item: (float(item["start"]), str(item["segment_id"])))
 
-    published_segments = published_voice_source_segments(video, voice, validate=True) if voice else []
-    published_by_id = {
-        str(item.get("segment_id") or item.get("id") or ""): index
-        for index, item in enumerate(published_segments, start=1)
-    }
-    published_parts = (
-        Path(voice["resolved_outputs"]["manifest"]).parent / "parts"
-        if voice else None
-    )
-    clip_signatures = _voice_clip_signatures(video, segments)
-    usable_voice = False
-    for index, (segment, signature) in enumerate(zip(segments, clip_signatures), start=1):
+    voice_sources = _audible_manual_voice_sources(video, document, range_ms=range_ms)
+    for index, segment in enumerate(segments, start=1):
         if not segment.get("_voice_enabled"):
             continue
-        source = ""
-        clip_record = manual_artifacts.resolve(video.video_id, "tts_clip", signature)
-        if clip_record:
-            source = str(clip_record["resolved_outputs"].get("audio") or "")
-            input_ids.append(str(clip_record.get("artifact_id") or ""))
-        if not source and published_parts:
-            source_index = published_by_id.get(str(segment.get("segment_id") or ""), 0)
-            candidate = published_parts / f"voice_{source_index:04d}.mp3"
-            if source_index and candidate.is_file() and candidate.stat().st_size > 0:
-                source = str(candidate)
-                input_ids.append(str(voice.get("artifact_id") or ""))
-        if not source:
-            segment["_voice_enabled"] = False
-            continue
+        source, dependency = voice_sources[segment["segment_id"]]
+        if dependency:
+            input_ids.append(dependency)
         destination = voice_parts / f"voice_{index:04d}.mp3"
         try:
             os.link(source, destination)
         except OSError:
             shutil.copy2(source, destination)
-        usable_voice = True
 
     segments_path.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
 
@@ -1953,7 +2029,7 @@ def _compose_manual_audio(video, output_path: Path, work_dir: Path, reporter=Non
         background_music_path=music_path or None,
         background_music_volume=music_clip.volume_percent if music_clip else video.background_music_volume,
         tts_volume=video.tts_volume,
-        require_voice_parts=usable_voice,
+        require_voice_parts=bool(voice_sources),
         require_background_audio=False,
         fit_voice_to_slots=True,
         background_music_start_ms=music_clip.start_ms if music_clip else 0,
@@ -1973,6 +2049,7 @@ def _compose_manual_audio(video, output_path: Path, work_dir: Path, reporter=Non
 
 
 def _run_audio(video, reporter) -> None:
+    _audible_manual_voice_sources(video, editor_documents.ensure(video))
     expected = audio_signature(video)
     cached = manual_artifacts.resolve(video.video_id, "audio_mix", expected)
     if not cached:
@@ -2029,6 +2106,8 @@ def _run_export(video, reporter) -> None:
     )
 
     reporter.update(0, "manual_export_preparing", "Đang kiểm tra dữ liệu xuất")
+    editor_document = editor_documents.ensure(video)
+    _audible_manual_voice_sources(video, editor_document)
     subtitle = _current_subtitle_record(video)
     export_preset = str(getattr(video, "export_preset", "source") or "source")
     encoding_quality = int(preset_settings(export_preset)["crf"])
@@ -2039,7 +2118,6 @@ def _run_export(video, reporter) -> None:
         staging = manual_artifacts.create_staging_directory(video.video_id, "export")
         try:
             reporter.update(1, "manual_export_preparing", "Đang chuẩn bị phụ đề")
-            editor_document = editor_documents.ensure(video)
             export_srt = staging / "subtitles.srt"
             if write_subtitles(editor_document, export_srt):
                 pass

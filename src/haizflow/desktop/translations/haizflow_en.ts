@@ -862,6 +862,10 @@
 </context>
 <context>
     <name>BatchPage</name>
+    <message><source>%1 video dùng cài đặt riêng. Hàng loạt vẫn xử lý các video này.</source><translation>%1 videos use individual settings. They will still be processed.</translation></message>
+    <message><source>Thành công</source><translation>Succeeded</translation></message>
+    <message><source>Chi tiết</source><translation>Details</translation></message>
+    <message><source>%1 lỗi · Chi tiết</source><translation>%1 failed · Details</translation></message>
     <message>
         <location filename="../qml/BatchPage.qml" line="+59"/>
         <source>Dự án hàng loạt</source>
@@ -987,6 +991,8 @@
 </context>
 <context>
     <name>BatchSettingsDialog</name>
+    <message><source>Video xem trước</source><translation>Preview video</translation></message>
+    <message><source>Chi tiết</source><translation>Details</translation></message>
     <message>
         <location filename="../qml/BatchSettingsDialog.qml" line="+14"/>
         <source>Cài đặt hàng loạt</source>
@@ -2601,6 +2607,10 @@ Author and owner of HaizFlow.</translation>
 </context>
 <context>
     <name>ManualWorkspace</name>
+    <message>
+        <source>Xuất SRT</source>
+        <translation>Export SRT</translation>
+    </message>
     <message>
         <location filename="../qml/ManualWorkspace.qml" line="+102"/>
         <source>Nguồn</source>
@@ -4838,6 +4848,7 @@ Author and owner of HaizFlow.</translation>
 </context>
 <context>
     <name>VideoExportJobsDialog</name>
+    <message><source>%1 thành công · %2 lỗi · %3 đã hủy</source><translation>%1 succeeded · %2 failed · %3 cancelled</translation></message>
     <message>
         <location filename="../qml/VideoExportJobsDialog.qml" line="+10"/>
         <source>Xuất video</source>
@@ -5358,5 +5369,50 @@ Author and owner of HaizFlow.</translation>
     <name>StudioSeekButton</name>
     <message><source>Tua lùi %1 giây</source><translation>Seek backward %1 seconds</translation></message>
     <message><source>Tua tới %1 giây</source><translation>Seek forward %1 seconds</translation></message>
+</context>
+<context>
+    <name>BatchDetailsDialog</name>
+    <message><source>Nội dung watermark</source><translation>Watermark text</translation></message>
+    <message><source>Loại watermark</source><translation>Watermark type</translation></message>
+    <message><source>Ảnh watermark</source><translation>Watermark image</translation></message>
+    <message><source>Video watermark</source><translation>Watermark video</translation></message>
+    <message><source>Kích thước watermark</source><translation>Watermark size</translation></message>
+    <message><source>Độ trong suốt watermark</source><translation>Watermark opacity</translation></message>
+    <message><source>Viền watermark</source><translation>Watermark outline</translation></message>
+    <message><source>Font watermark</source><translation>Watermark font</translation></message>
+    <message><source>Màu watermark</source><translation>Watermark color</translation></message>
+    <message><source>Watermark in đậm</source><translation>Bold watermark</translation></message>
+    <message><source>Watermark in nghiêng</source><translation>Italic watermark</translation></message>
+    <message><source>Cài đặt riêng</source><translation>Individual settings</translation></message>
+    <message><source>Kết quả hàng loạt</source><translation>Batch results</translation></message>
+    <message><source>Các video này vẫn được xử lý với cài đặt riêng</source><translation>These videos will still use their individual settings</translation></message>
+    <message><source>Chi tiết theo từng video</source><translation>Details for each video</translation></message>
+    <message><source>Chế độ xử lý</source><translation>Processing mode</translation></message>
+    <message><source>Ngôn ngữ đích</source><translation>Target language</translation></message>
+    <message><source>Model nhận dạng</source><translation>Recognition model</translation></message>
+    <message><source>Model dịch</source><translation>Translation model</translation></message>
+    <message><source>Model giọng đọc</source><translation>Voice model</translation></message>
+    <message><source>Giọng đọc</source><translation>Voice</translation></message>
+    <message><source>Người nói</source><translation>Speakers</translation></message>
+    <message><source>Tách giọng</source><translation>Audio separation</translation></message>
+    <message><source>Âm lượng nguồn</source><translation>Source volume</translation></message>
+    <message><source>Âm lượng nhạc nền</source><translation>Music volume</translation></message>
+    <message><source>Âm lượng giọng đọc</source><translation>Voice volume</translation></message>
+    <message><source>Nhạc nền</source><translation>Background music</translation></message>
+    <message><source>Lặp nhạc nền</source><translation>Loop background music</translation></message>
+    <message><source>Giảm âm khi có giọng đọc</source><translation>Audio ducking</translation></message>
+    <message><source>Giọng nhân bản</source><translation>Cloned voice</translation></message>
+    <message><source>Che phụ đề</source><translation>Subtitle masking</translation></message>
+    <message><source>Cách che phụ đề</source><translation>Subtitle masking method</translation></message>
+    <message><source>Kiểu và vị trí phụ đề</source><translation>Subtitle style and position</translation></message>
+    <message><source>Watermark</source><translation>Watermark</translation></message>
+    <message><source>Thành công</source><translation>Succeeded</translation></message>
+    <message><source>Lỗi</source><translation>Failed</translation></message>
+    <message><source>Đã hủy</source><translation>Cancelled</translation></message>
+    <message><source>Đã tạm dừng</source><translation>Paused</translation></message>
+    <message><source>Chờ duyệt phụ đề</source><translation>Awaiting subtitle review</translation></message>
+    <message><source>Đang xử lý</source><translation>Processing</translation></message>
+    <message><source>Đang chờ</source><translation>Waiting</translation></message>
+    <message><source>Đóng</source><translation>Close</translation></message>
 </context>
 </TS>

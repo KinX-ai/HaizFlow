@@ -16,7 +16,7 @@ GridLayout {
     readonly property real mediaSpacing: Math.max(6, Math.min(Theme.space16,
         6 + (availableHeight - 500) / 24))
     property string speechRecognitionModel: "small"
-    property string translationModel: "auto"
+    property string translationModel: "q4"
     property var speechRecognitionOptions: []
     property int speechRecognitionIndex: 0
     property string targetLanguage: "vi"

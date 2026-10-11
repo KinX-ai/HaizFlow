@@ -26,6 +26,11 @@ def normalize_voice(voice: str) -> str:
     return "omnivoice:female"
 
 
+def voice_selection_identity(voice: str, speaker_mode: str) -> str:
+    """Keep the single-narrator UI preset out of multi-speaker cache keys."""
+    return "per-speaker" if speaker_mode == "multiple" else str(voice or "")
+
+
 def preprocess_text_for_tts(text: str) -> str:
     """Normalize invisible and punctuation characters without changing words."""
     if not text:
@@ -133,7 +138,7 @@ def generate_voice_parts(
             raise RuntimeError(
                 "Multiple-speaker OmniVoice mode requires the current source speech and timestamped source transcript."
             )
-        from haizflow.pipeline.speaker_identity import prepare_speakers
+        from haizflow.pipeline.speaker_identity import _valid_map, prepare_speakers
 
         speaker_runtime_state = None
 
@@ -149,10 +154,20 @@ def generate_voice_parts(
             if status_callback is not None:
                 status_callback("identifying_speakers", current, total_sources)
 
-        source_segments = prepare_speakers(source_audio_path, source_segments,
-                                          process_registry_id or video_id, report_speakers)
+        identified = prepare_speakers(source_audio_path, source_segments,
+                                      process_registry_id or video_id, report_speakers)
+        # Do not silently fill an incomplete/old engine result with the UI's
+        # narrator preset. Validate before queuing or synthesizing any clip.
+        if not _valid_map(identified, source_segments):
+            raise RuntimeError("Không xác định được giọng từng người nói. Hãy chạy lại nhận diện người nói.")
+        source_segments = identified
         voice_map = dict((s["speaker_id"], s["speaker_voice"]) for s in source_segments)
         log_to_video(video_id, "[SPEAKERS][VOICE_MAP] " + " ".join(f"{key}={value}" for key, value in voice_map.items()))
+        profiles = {s["speaker_id"]: (s.get("speaker_pitch_hz"), bool(s.get("speaker_voice_uncertain")))
+                    for s in source_segments}
+        log_to_video(video_id, "[SPEAKERS][VOICE_PROFILE] " + " ".join(
+            f"{speaker}:f0_hz={pitch},uncertain={uncertain}" for speaker, (pitch, uncertain) in profiles.items()
+        ))
         log_to_video(video_id, f"Identified {len({s['speaker_id'] for s in source_segments})} speakers; "
                      "using stable target-language voices, not per-sentence source clones.")
         uncertain = sum(bool(s.get("speaker_uncertain")) for s in source_segments)
@@ -189,7 +204,7 @@ def generate_voice_parts(
         if not _is_valid_mp3(part_path):
             _remove_file(part_path)
             source_reference = source_reference_for(segment)
-            segment_voice = str(source_reference.get("speaker_voice") or voice)
+            segment_voice = str(source_reference["speaker_voice"]) if speaker_mode == "multiple" else voice
             log_to_video(
                 video_id,
                 f"[TTS][QUEUED] provider={backend} segment={index}/{document_total} voice={segment_voice} "
@@ -227,7 +242,7 @@ def generate_voice_parts(
             worker_options["process_registry_id"] = process_registry_id
         if keep_worker_warm:
             worker_options["keep_worker_warm"] = True
-        if narrator_anchor_text:
+        if narrator_anchor_text and speaker_mode != "multiple":
             worker_options["narrator_anchor_text"] = narrator_anchor_text
         synthesize_batch_to_mp3(
             pending,

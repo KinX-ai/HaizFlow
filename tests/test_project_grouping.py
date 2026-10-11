@@ -828,6 +828,14 @@ class ProjectGroupingTests(unittest.TestCase):
                 }
                 video.manual_target_tool = "translation"
                 video.manual_completed_stages = ["translation", "voice"]
+                video.watermark_text = "OLD WATERMARK"
+                video.files["watermark_image"] = str(old_input.parent / "logo.png")
+                video.files["background_music"] = str(old_input.parent / "music.mp3")
+                video.files["tts_narrator_anchors"] = {"old": "old voice"}
+                video.crop.zoom_percent = 140
+                video.manual_tool_generations = {"voice": 3}
+                video.processing_configuration = {"watermark_text": "OLD WATERMARK"}
+                video.export_history = [{"path": str(old_export)}]
                 video.status = "paused"
                 video.progress = 100
                 video.review_approved = True
@@ -866,6 +874,14 @@ class ProjectGroupingTests(unittest.TestCase):
         self.assertEqual(updated.active_artifacts, {})
         self.assertEqual(updated.manual_target_tool, "")
         self.assertEqual(updated.manual_completed_stages, [])
+        self.assertEqual(updated.watermark_text, "")
+        self.assertEqual(updated.crop.zoom_percent, 100)
+        self.assertEqual(updated.manual_tool_generations, {"source": 1})
+        self.assertEqual(updated.processing_configuration, {})
+        self.assertEqual(updated.export_history, [])
+        self.assertNotIn("watermark_image", updated.files)
+        self.assertNotIn("background_music", updated.files)
+        self.assertNotIn("tts_narrator_anchors", updated.files)
         self.assertFalse(updated.review_approved)
         self.assertFalse(backup_exists)
         self.assertIn("Previous processing data was removed", logs)

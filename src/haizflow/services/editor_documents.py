@@ -768,10 +768,15 @@ def mark_voice_clips_ready(
                     path=audio_path,
                     fingerprint=_fingerprint(audio_path),
                 ))
+                did_change = True
             else:
-                asset.name = clip.name or clip.segment_id
-                asset.path = audio_path
-                asset.fingerprint = _fingerprint(audio_path)
+                fingerprint = _fingerprint(audio_path)
+                if (asset.name != (clip.name or clip.segment_id)
+                        or asset.path != audio_path or asset.fingerprint != fingerprint):
+                    asset.name = clip.name or clip.segment_id
+                    asset.path = audio_path
+                    asset.fingerprint = fingerprint
+                    did_change = True
             if clip.asset_id != asset_id:
                 clip.asset_id = asset_id
                 did_change = True

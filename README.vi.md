@@ -2,7 +2,7 @@
   <img src="src/haizflow/desktop/assets/branding/haizflow-mark.png" width="96" alt="Logo HaizFlow">
   <h1>HaizFlow</h1>
   <p><strong>Ứng dụng miễn phí để tải, dịch, tạo phụ đề và lồng tiếng video trên Windows.</strong></p>
-  <p><a href="https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.9/HaizFlow-0.1.9-Setup.exe">Cài đặt</a> · <a href="docs/user-guide.vi.md">Hướng dẫn sử dụng</a> · <a href="docs/support.vi.md">Trợ giúp</a> · <a href="README.md">English</a></p>
+  <p><a href="https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-Setup.exe">Cài đặt</a> · <a href="docs/user-guide.vi.md">Hướng dẫn sử dụng</a> · <a href="docs/support.vi.md">Trợ giúp</a> · <a href="README.md">English</a></p>
 </div>
 
 ## Giới thiệu
@@ -49,7 +49,7 @@ Chọn model nhận dạng, dịch và giọng đọc; thiết lập che phụ �
 
 ### Trình sửa thủ công
 
-So sánh video nguồn và kết quả, chạy từng bước độc lập, chỉnh thời gian phụ đề và giọng đọc trên timeline.
+So sánh video nguồn và kết quả, chạy từng bước độc lập, chia đoạn trên timeline Kết quả và xuất phụ đề SRT để dùng trong phần mềm khác.
 
 ![Trình sửa thủ công với preview, bảng xử lý và timeline phụ đề, âm thanh](docs/images/screenshots/manual-editor.png)
 
@@ -81,7 +81,7 @@ Gemini, Zernio và các dịch vụ bên ngoài có điều khoản, hạn mức
 
 ## Cài đặt và bắt đầu
 
-**[Tải bộ cài Windows](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.9/HaizFlow-0.1.9-Setup.exe).** Chỉ mở file EXE này; không cần tải hoặc giải nén các tệp Core. Gói tài nguyên được cài trong HaizFlow. [Thông tin phiên bản và cài đặt](https://github.com/MachHongHai/HaizFlow/releases/latest).
+**[Tải bộ cài Windows](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-Setup.exe).** Chỉ mở file EXE này; không cần tải hoặc giải nén các tệp Core. Gói tài nguyên được cài trong HaizFlow. [Thông tin phiên bản và cài đặt](https://github.com/MachHongHai/HaizFlow/releases/latest).
 
 1. Cài và mở HaizFlow. Giao diện mặc định là tiếng Việt.
 2. Chọn CPU hoặc GPU NVIDIA trong **Cài đặt → Chung** và cài các gói cần dùng trong **Gói tài nguyên**.
@@ -90,7 +90,7 @@ Gemini, Zernio và các dịch vụ bên ngoài có điều khoản, hạn mức
 
 Ứng dụng hỗ trợ Windows 10 phiên bản 1809 trở lên và Windows 11 x64, RAM hệ thống từ 16 GB. Không cần cài Python khi dùng bộ cài. Cần thêm dung lượng cho gói tài nguyên, video và tệp xuất; bộ cài và trang Gói tài nguyên hiển thị yêu cầu tương ứng.
 
-Chế độ GPU hỗ trợ card NVIDIA 6 GB trở lên. Với card 6 GB, ưu tiên Demucs, Whisper Small và dịch bằng Gemini hoặc HY-MT2 CPU Q4. Bản chưa ký số có thể bị Windows Smart App Control hoặc chính sách Application Control chặn; xem [hướng dẫn cài đặt](docs/install.vi.md).
+Chế độ GPU hỗ trợ card NVIDIA loại 4 GB (CUDA báo ít nhất 3,5 GiB VRAM riêng). Với card 4 GB, chọn Whisper Small GPU, HY-MT2 CPU Q4 hoặc Gemini và OmniVoice GPU; các bước nặng chạy lần lượt, giọng đọc tạo từng câu. Whisper Turbo và HY-MT2 GPU đầy đủ cần nhiều VRAM hơn. VRAM trống và RAM hệ thống tại lúc chạy vẫn phải đủ. Bản chưa ký số có thể bị Windows Smart App Control hoặc chính sách Application Control chặn; xem [hướng dẫn cài đặt](docs/install.vi.md).
 
 Xem [hướng dẫn cài đặt](docs/install.vi.md) để chọn gói CPU/GPU, thêm API key và chọn vị trí lưu dữ liệu. Xem [hướng dẫn sử dụng](docs/user-guide.vi.md) để tạo dự án, chỉnh phụ đề, lồng tiếng và đăng bài.
 
@@ -102,7 +102,7 @@ HaizFlow miễn phí sử dụng theo [HaizFlow Source-Available 1.0](LICENSE). 
 
 Bạn cần có quyền sử dụng video, nhạc và mẫu giọng được đưa vào ứng dụng. Xem [NOTICE](NOTICE) và [thông báo thành phần bên thứ ba](THIRD_PARTY_NOTICES.md). [Hồ sơ giấy phép](docs/licensing-review.md) và [dự thảo không có hiệu lực](legal/LICENSE-SOURCE-AVAILABLE-DRAFT.md) được lưu riêng.
 
-Ứng dụng dùng Qt/PySide theo LGPL và FFmpeg theo GPL/LGPL, tùy thành phần. [Nguồn thư viện đi kèm](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.9/HaizFlow-0.1.9-ThirdPartySources.zip) và [hướng dẫn thay thư viện](docs/third-party-library-replacement.md) được cung cấp riêng; quyền theo giấy phép của các thư viện vẫn được giữ nguyên.
+Ứng dụng dùng Qt/PySide theo LGPL và FFmpeg theo GPL/LGPL, tùy thành phần. [Nguồn thư viện đi kèm](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-ThirdPartySources.zip) và [hướng dẫn thay thư viện](docs/third-party-library-replacement.md) được cung cấp riêng; quyền theo giấy phép của các thư viện vẫn được giữ nguyên.
 
 ## Hỗ trợ và đóng góp
 

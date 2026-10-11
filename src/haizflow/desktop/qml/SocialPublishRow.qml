@@ -126,19 +126,21 @@ Rectangle {
         }
 
         StudioIconButton {
+            objectName: "socialRemoveButton"
             iconName: "delete"
             toolTipText: qsTr("Xóa khỏi danh sách (không xóa bài trên mạng xã hội)")
             showToolTip: true
-            enabled: !AppController.tiktokPublishBusy && !root.working
+            enabled: !root.working
             onClicked: AppController.removeTikTokPublishItem(root.index)
         }
 
         StudioButton {
+            objectName: "socialPostButton"
             text: root.published ? (root.awaitingUrl ? qsTr("Đang hoàn tất") : qsTr("Mở bài đăng"))
                 : root.publishStatus === "failed" || root.publishStatus === "partial" ? qsTr("Đăng lại") : qsTr("Đăng")
             variant: root.published ? "secondary" : "primary"
             enabled: root.published
-                ? root.platformPostUrlVerified && root.platformPostUrl.length > 0 && !AppController.tiktokPublishBusy
+                ? root.platformPostUrlVerified && root.platformPostUrl.length > 0
                 : root.canPublish
             onClicked: {
                 if (root.published)

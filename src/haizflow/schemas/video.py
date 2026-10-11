@@ -83,7 +83,7 @@ class VideoConfig(BaseModel):
     target_language: str = "vi"
     translator_provider: TranslatorProvider = "hymt2"
     speech_recognition_model: SpeechRecognitionModel = "small"
-    translation_model: TranslationModel = "auto"
+    translation_model: TranslationModel = "q4"
     tts_provider: TTSProvider = "omnivoice"
     tts_voice: str = "omnivoice:female"
     speaker_mode: SpeakerMode = "single"
@@ -134,7 +134,7 @@ class VideoInfo(BaseModel):
     target_language: str
     translator_provider: TranslatorProvider = "hymt2"
     speech_recognition_model: SpeechRecognitionModel = "small"
-    translation_model: TranslationModel = "auto"
+    translation_model: TranslationModel = "q4"
     tts_provider: TTSProvider = "omnivoice"
     tts_voice: str
     speaker_mode: SpeakerMode = "single"

@@ -318,8 +318,10 @@ class SocialPublishControllerTests(unittest.TestCase):
                 "file_path": str(video),
                 "thumbnail_path": str(thumbnail),
                 "zernio_post_id": "remote-1",
+                "status": "published",
             }
             self.host.tiktok_publish_items.set_items([item])
+            self.controller._state["items"] = [item]
             self.controller._project_root = directory
             with (
                 patch.object(self.controller, "_ensure_publish_project", return_value=True),
@@ -331,6 +333,52 @@ class SocialPublishControllerTests(unittest.TestCase):
             remove.assert_called_once_with(directory, "post-1")
             self.assertTrue(video.exists())
             self.assertTrue(thumbnail.exists())
+
+    def test_remove_other_post_during_upload_preserves_queue_consent(self):
+        active = {"id": "active", "file_name": "active.mp4", "status": "uploading"}
+        done = {"id": "done", "file_name": "done.mp4", "status": "published"}
+        self.host.tiktok_publish_items.set_items([active, done])
+        self.controller._state["items"] = [active, done]
+        self.controller._busy = True
+        self.controller._consent_confirmed = True
+        with (patch.object(self.controller, "_ensure_publish_project", return_value=True),
+              patch.object(self.controller, "_reload"),
+              patch("haizflow.desktop.social_publish_controller.QMessageBox.question",
+                    return_value=QMessageBox.StandardButton.Yes) as question,
+              patch("haizflow.desktop.social_publish_controller.tiktok_publish.remove_item",
+                    return_value=done) as remove):
+            self.assertFalse(self.controller.remove_item(0))
+            question.assert_not_called()
+            self.assertTrue(self.controller.remove_item(1))
+            remove.assert_called_once_with(self.controller._project_root, "done")
+        self.assertTrue(self.controller._busy)
+        self.assertTrue(self.controller._consent_confirmed)
+
+    def test_remove_rechecks_identity_after_confirmation_queue_advances(self):
+        item = {"id": "next", "file_name": "next.mp4", "status": "ready"}
+        self.host.tiktok_publish_items.set_items([item])
+        self.controller._state["items"] = [item]
+
+        def confirm(*args):
+            item["status"] = "uploading"
+            return QMessageBox.StandardButton.Yes
+
+        with (patch.object(self.controller, "_ensure_publish_project", return_value=True),
+              patch("haizflow.desktop.social_publish_controller.QMessageBox.question", side_effect=confirm),
+              patch("haizflow.desktop.social_publish_controller.tiktok_publish.remove_item") as remove):
+            self.assertFalse(self.controller.remove_item(0))
+            remove.assert_not_called()
+
+    def test_open_verified_post_during_upload(self):
+        self.controller._busy = True
+        self.host.tiktok_publish_items.set_items([{
+            "id": "done", "status": "published", "target_platform": "tiktok",
+            "platform_post_url": "https://www.tiktok.com/@creator/video/1234567890123456789",
+            "platform_post_url_verified": True,
+        }])
+        with patch("haizflow.desktop.social_publish_controller.open_external_url", return_value=True) as opened:
+            self.assertTrue(self.controller.open_post(0))
+            opened.assert_called_once()
 
     def test_onboarding_links_open_their_dedicated_zernio_pages(self):
         with patch(

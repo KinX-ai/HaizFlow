@@ -2297,8 +2297,10 @@ class SocialPublishController:
 
     def remove_item(self, row: int) -> bool:
         item = self._host.tiktok_publish_items.item_at(row)
-        if not item or not self._ensure_publish_project() or self._busy:
+        if not item or not self._ensure_publish_project() or self._item_in_flight(item):
             return False
+        item_id = item["id"]
+        project_root = self._project_root
         vietnamese = getattr(self._host, "_settings_language", "vi") == "vi"
         title = "Xóa khỏi danh sách" if vietnamese else "Remove from list"
         message = (
@@ -2317,13 +2319,27 @@ class SocialPublishController:
             != QMessageBox.StandardButton.Yes
         ):
             return False
-        removed = tiktok_publish.remove_item(self._project_root, item["id"])
+        # A modal confirmation pumps Qt events: the queue can advance while it
+        # is open. Recheck by immutable ID, never by the now-shifted row index.
+        current = next((entry for entry in self._state.get("items", [])
+                        if entry.get("id") == item_id), None)
+        if self._project_root != project_root or not current or self._item_in_flight(current):
+            return False
+        removed = tiktok_publish.remove_item(project_root, item_id)
         if removed is None:
             return False
-        self._consent_confirmed = False
         self._reload()
         self._host.refreshVideos()
         return True
+
+    @staticmethod
+    def _item_in_flight(item: dict) -> bool:
+        status = str(item.get("status") or "")
+        return status in _POLLABLE_POST_STATUSES or bool(
+            item.get("zernio_post_id") and status not in {
+                "published", "posted", "failed", "partial", "cancelled", "deleted", "draft", "scheduled",
+            }
+        )
 
     def cancel(self) -> None:
         self._auto_continue = False

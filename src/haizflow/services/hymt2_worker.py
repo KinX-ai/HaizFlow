@@ -528,13 +528,23 @@ def _load_model(model_name: str):
     if preference == "full":
         if not profile.cuda_available:
             raise RuntimeError("HY-MT2 GPU cần GPU NVIDIA tương thích. Hãy chọn HY-MT2 CPU trong dự án.")
+        if 0 < profile.total_vram_bytes < 5 * 1024**3:
+            raise RuntimeError("Card 4 GB không đủ VRAM cho HY-MT2 GPU đầy đủ. Hãy chọn HY-MT2 CPU Q4.")
         backend = "transformers"
     elif preference == "q4":
         if importlib.util.find_spec("llama_cpp") is None:
             raise RuntimeError("Thiếu môi trường chạy HY-MT2 CPU. Hãy cài HY-MT2 CPU trong Gói tài nguyên.")
         backend = "llama_cpp"
     cpu_model_path = None
-    if preference == "auto" and profile.key == "cuda_low_memory" and importlib.util.find_spec("llama_cpp") is not None:
+    four_gb_gpu = profile.cuda_available and 0 < getattr(profile, "total_vram_bytes", 0) < 5 * 1024**3
+    if preference == "auto" and four_gb_gpu:
+        # A 4 GB card cannot fall through to the full GPU checkpoint when the
+        # CPU Q4 pack is absent. Keep the error actionable instead of OOM.
+        if importlib.util.find_spec("llama_cpp") is None:
+            raise RuntimeError("Card 4 GB cần gói HY-MT2 CPU Q4 để dịch. Hãy cài gói này trong Gói tài nguyên.")
+        cpu_model_path = _cpu_model_path()
+        backend = "llama_cpp"
+    elif preference == "auto" and profile.key == "cuda_low_memory" and importlib.util.find_spec("llama_cpp") is not None:
         # Prefer the installed Q4 model on 8 GB GPUs. The full GPU model
         # stages a 3.8 GB checkpoint in system RAM before moving it to CUDA;
         # Windows can fail with paging-file error 1455 even with free VRAM.

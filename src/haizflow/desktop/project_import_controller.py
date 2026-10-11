@@ -169,6 +169,9 @@ class ProjectImportController:
                 validate_video_integrity(job["path"])
                 with self._storage_lock:
                     if job["operation"] == "replace":
+                        subtitles = getattr(self._host, "_manual_subtitles", None)
+                        if subtitles is not None:
+                            subtitles.wait_for_saves()
                         video = video_store.replace_video_input(
                             job["video_id"], job["path"], media_source=job.get("media_source")
                         )
@@ -486,16 +489,13 @@ class ProjectImportController:
                     errors.append("Replacement metadata is missing its input-video path.")
                     destination = ""
                 update_open_view = host._selected_video_id == video.video_id
-                if update_open_view and destination:
-                    host._set_video_path(destination, refresh_thumbnail=True)
-                    history = getattr(host, "_manual_edit_history", None)
-                    if history is not None:
-                        history.forget_context(f"video:{video.video_id}")
+                view_reloaded = self._reset_replaced_source_view(video) if destination else False
                 video_store.log_to_video(video.video_id, f"Input video replaced with: {video.original_filename}")
                 if update_open_view:
                     host._replace_logs(host._read_video_logs(video.video_id))
                     host.videoThumbnailChanged.emit()
-                    host.selectedVideoChanged.emit()
+                    if not view_reloaded:
+                        host.selectedVideoChanged.emit()
                     host.logsChanged.emit()
                 host._log_queue.put("__QUEUE_CHANGED__")
         if created_ids:
@@ -1158,7 +1158,11 @@ class ProjectImportController:
         defaults = {
             "_workflow_mode": "A",
             "_target_language": "vi",
-            **project_model_defaults(getattr(host, "_settings_processing_device", "cpu")),
+            **project_model_defaults(
+                getattr(host, "_settings_processing_device", "cpu"),
+                total_vram_bytes=(getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None)
+                                  if getattr(host, "_startup_hardware_resolved", False) else None),
+            ),
             "_tts_voice": "omnivoice:female",
             "_speaker_mode": "single",
             "_enable_audio_separation": True,
@@ -1373,6 +1377,47 @@ class ProjectImportController:
         # selected card, while a new single project receives its first input.
         return self.import_video(paths[0], replace_selected=bool(self._host._selected_video_id))
 
+    def _reset_replaced_source_view(self, video) -> bool:
+        """Discard source-bound UI state even when the video ID did not change."""
+        host = self._host
+        drafts = getattr(host, "_manual_settings_drafts", None)
+        if isinstance(drafts, dict):
+            drafts.pop(video.video_id, None)
+        indexed = getattr(host, "_manual_cache_indexed", None)
+        if isinstance(indexed, set):
+            indexed.discard(video.video_id)
+        history = getattr(host, "_manual_edit_history", None)
+        if history is not None:
+            history.forget_context(f"video:{video.video_id}")
+        from haizflow.services import editor_view_state
+
+        editor_view_state.save(video.video_id, {})
+        if host._selected_video_id != video.video_id:
+            return False
+        for name, value in (("_manual_voice_video_id", ""), ("_manual_voice_refresh_pending", False),
+                            ("_manual_voice_refresh_enabled", False)):
+            if hasattr(host, name):
+                setattr(host, name, value)
+        transforms = getattr(host, "_editor_transform_drafts", None)
+        if isinstance(transforms, dict):
+            transforms.clear()
+        editor = getattr(host, "_manual_editor_document", None)
+        subtitles = getattr(host, "_manual_subtitles", None)
+        if subtitles is not None:
+            subtitles.reset_source(video.video_id)
+        if editor is not None:
+            editor.clear()
+        # Reload facade fields, not just the file path: otherwise delayed
+        # settings saves can resurrect the previous source's watermark.
+        select = getattr(host, "_select_video", None)
+        if callable(select):
+            select(video)
+            if editor is not None and video.project_type == "manual":
+                editor.load(video)
+            return True
+        host._set_video_path(video.files["video_input"], refresh_thumbnail=True)
+        return False
+
     def replace_video(self, video_id: str | None, path: str, media_source=None) -> bool:
         host = self._host
         video = video_store.get_video(video_id) if video_id else None
@@ -1408,13 +1453,13 @@ class ProjectImportController:
             video.files["thumbnail"] = thumbnail
         video_store.save_video(video)
         update_open_view = host._selected_video_id == video.video_id
-        if update_open_view:
-            host._set_video_path(destination, refresh_thumbnail=True)
+        view_reloaded = self._reset_replaced_source_view(video)
         video_store.log_to_video(video.video_id, f"Input video replaced with: {video.original_filename}")
         if update_open_view:
             host._replace_logs(host._read_video_logs(video.video_id))
             host.videoThumbnailChanged.emit()
-            host.selectedVideoChanged.emit()
+            if not view_reloaded:
+                host.selectedVideoChanged.emit()
             host.logsChanged.emit()
         host.refreshVideos()
         host._log_queue.put("__QUEUE_CHANGED__")

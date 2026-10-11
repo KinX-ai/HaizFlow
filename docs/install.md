@@ -4,7 +4,7 @@
 
 ## 1. Before you install
 
-Use Windows 10 version 1809 or later, or Windows 11 x64, with at least 16 GB system RAM. An NVIDIA GPU is optional. GPU mode supports compatible NVIDIA cards with 6 GB dedicated VRAM or more. Shared graphics memory does not count toward this requirement. Internet access is needed to download the app and selected resource packs.
+Use Windows 10 version 1809 or later, or Windows 11 x64, with at least 16 GB system RAM. An NVIDIA GPU is optional. GPU mode supports compatible 4 GB-class NVIDIA cards when CUDA reports at least 3.5 GiB dedicated VRAM. Shared graphics memory does not count toward this requirement. Internet access is needed to download the app and selected resource packs.
 
 The 16 GB minimum means installed RAM (16 GiB DIMM capacity). Windows may reserve some RAM for hardware. HaizFlow measures installed and OS-usable RAM separately: a 16 GB installation is not rejected merely because Windows exposes about 13–14 GiB. If less than 8 GiB is OS-usable, check the hardware reservation before processing.
 
@@ -14,7 +14,7 @@ Allow space for the app, packs, source videos and exports. Setup shows the requi
 
 ## 2. Install the app
 
-**[Download HaizFlow-0.1.8-Setup.exe](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.8/HaizFlow-0.1.8-Setup.exe).** This is the only file you need to install the app. Core files on the [release page](https://github.com/MachHongHai/HaizFlow/releases/latest) are for automatic updates; do not download or extract them for installation.
+**[Download HaizFlow-0.1.10-Setup.exe](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-Setup.exe).** This is the only file you need to install the app. Core files on the [release page](https://github.com/MachHongHai/HaizFlow/releases/latest) are for automatic updates; do not download or extract them for installation.
 
 1. Open **Setup.exe**, select the language and read the terms.
 2. Choose an installation folder on a drive with enough free space.
@@ -33,7 +33,7 @@ Open **Settings → General**:
 
 Choose **Apply** and review the project's models before processing. CPU users do not need a CUDA pack. Installing CUDA Toolkit manually is not necessary for the app's packaged engines.
 
-On a 6 GB GPU, start with Demucs, Whisper Small and Gemini translation. HY-MT2 CPU Q4 is an alternative for local translation; the full GPU model requires more memory. Keep other memory-intensive applications closed while processing.
+On a 4 GB GPU with 16 GB RAM, start with Whisper Small GPU, HY-MT2 CPU Q4 (or Gemini) and OmniVoice GPU. The CUDA recognition and voice stages run sequentially; voice synthesis uses one sentence at a time without changing its checkpoint, FP16 precision or 32 inference steps. Whisper Turbo and full HY-MT2 GPU are unavailable on this profile. Demucs uses shorter GPU segments. Keep other GPU/CPU memory-intensive applications closed, and allow Windows to manage the page file. These settings reduce peak memory but do not guarantee every long project or busy 4 GB machine will fit.
 
 ## 4. Install the tools you need
 

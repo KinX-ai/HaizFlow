@@ -414,6 +414,13 @@ InspectorPanel {
 
     Connections {
         target: AppController
+        function onSourceReplacementRequested(videoId) {
+            if (videoId !== AppController.selectedVideoId)
+                return;
+            settingsSaveTimer.stop();
+            root.pendingSettingsVideoId = "";
+            root.subtitleDrafts = ({});
+        }
         function onSelectedVideoChanged() {
             if (settingsSaveTimer.running && root.pendingSettingsVideoId !== AppController.selectedVideoId) {
                 settingsSaveTimer.stop();

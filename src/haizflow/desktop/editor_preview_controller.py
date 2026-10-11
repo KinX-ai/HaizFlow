@@ -379,11 +379,55 @@ class EditorPreviewController:
             start += cls._VISUAL_CHUNK_SECONDS
         return windows
 
-    def _restore_manual_disk_cache(self, preview_dir: Path, fingerprint: str) -> None:
+    @classmethod
+    def _legacy_primary_ocr_fingerprint(cls, settings: dict) -> str:
+        """Match the pre-layer cache only for an unchanged full-source OCR box."""
+        if not settings.get("independent_manual_preview") or not settings.get("remove_original_subtitles"):
+            return ""
+        region = settings.get("ocr_region") or {}
+        if not isinstance(region, dict):
+            return ""
+        layers = region.get("treatment_layers", [])
+        if (not isinstance(layers, list) or len(layers) != 1
+                or not isinstance(layers[0], dict) or not layers[0].get("primary")):
+            return ""
+        layer = layers[0]
+        sequence = settings.get("editor_sequence") or {}
+        try:
+            window = cls._contiguous_source_window(sequence)
+            if window is None or window[0] != 0:
+                return ""
+            source_end_ms = int(sequence["edit_decisions"][0]["source_end_ms"])
+            if (int(layer.get("start_ms", -1)) != 0
+                    or int(layer.get("duration_ms", 0)) < source_end_ms
+                    or layer.get("mode") != settings.get("removal_mode")):
+                return ""
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return ""
+        # Detection confidence/line height were part of the old key. Preserve
+        # them; compare only the four coordinates used to treat source pixels.
+        legacy_region = {key: value for key, value in region.items() if key != "treatment_layers"}
+        geometry = ("x_percent", "y_percent", "width_percent", "height_percent")
+        try:
+            if any(float(legacy_region[key]) != float(layer["region"][key]) for key in geometry):
+                return ""
+        except (KeyError, TypeError, ValueError):
+            return ""
+        legacy = cls._base_visual_cache_payload({**settings, "ocr_region": legacy_region})
+        return hashlib.sha256(json.dumps(legacy, ensure_ascii=False, sort_keys=True,
+                                        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _restore_manual_disk_cache(self, preview_dir: Path, fingerprint: str, settings: dict | None = None) -> None:
         """Hydrate an exact completed base without FFprobe, encoding or AI work."""
         if fingerprint in self._completed_requests:
             return
         output = preview_dir / f"base-{fingerprint[:20]}" / "preview.mp4"
+        visual_signature = fingerprint[:20]
+        if not output.is_file() and settings:
+            legacy = self._legacy_primary_ocr_fingerprint(settings)
+            if legacy:
+                output = preview_dir / f"base-{legacy[:20]}" / "preview.mp4"
+                visual_signature = legacy[:20]
         try:
             marker = json.loads(output.with_name("preview.complete.json").read_text(encoding="utf-8"))
             duration = float(marker.get("duration", 0))
@@ -392,11 +436,17 @@ class EditorPreviewController:
                     or int(marker.get("size", -1)) != identity.get("size")
                     or not output.is_file() or int(identity.get("size", 0)) <= 0):
                 return
+            if settings and visual_signature != fingerprint[:20]:
+                expected = self._contiguous_source_window(settings.get("editor_sequence") or {})
+                if expected is None or duration < expected[1] - 0.25:
+                    return
         except (OSError, TypeError, ValueError, AttributeError):
             return
         path = str(output.resolve())
-        self._completed_requests[fingerprint] = (path, "", 0, duration, identity, fingerprint[:20])
+        self._completed_requests[fingerprint] = (path, "", 0, duration, identity, visual_signature)
         self._completed_base_sources[fingerprint] = (path, identity)
+        if visual_signature != fingerprint[:20]:
+            logging.getLogger(__name__).info("preview legacy_primary_ocr_cache_reused duration=%.3f", duration)
         while len(self._completed_requests) > 12:
             evicted = next(iter(self._completed_requests))
             self._completed_requests.pop(evicted)
@@ -540,7 +590,7 @@ class EditorPreviewController:
                 if self._stage == "ready" and self._source and self._published_source_is_intact():
                     return True
             if settings.get("independent_manual_preview"):
-                self._restore_manual_disk_cache(preview_dir, request_fingerprint)
+                self._restore_manual_disk_cache(preview_dir, request_fingerprint, settings)
             completed = self._completed_requests.get(request_fingerprint)
             if completed:
                 (
@@ -591,12 +641,19 @@ class EditorPreviewController:
                     if getattr(video, "project_type", "single") == "manual":
                         if self._pinned_video_id and self._pinned_video_id != video.video_id:
                             manual_artifacts.unpin(self._pinned_video_id, self._pin_owner)
-                        manual_artifacts.pin(
-                            video.video_id,
-                            "visual_proxy",
-                            cached_visual_signature,
-                            self._pin_owner,
-                        )
+                        try:
+                            manual_artifacts.pin(
+                                video.video_id,
+                                "visual_proxy",
+                                cached_visual_signature,
+                                self._pin_owner,
+                            )
+                        except FileNotFoundError:
+                            # A completed legacy proxy can live only in temp,
+                            # without a managed-cache registration. Protect its
+                            # workspace without copying/hashing a long video here.
+                            manual_artifacts.pin_workspace(video.video_id, self._pin_owner)
+                            logging.getLogger(__name__).info("preview disk_cache_workspace_pinned")
                         self._pinned_video_id = video.video_id
                     cache_hit = True
             if cache_hit:

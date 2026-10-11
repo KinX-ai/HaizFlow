@@ -2,7 +2,7 @@
   <img src="src/haizflow/desktop/assets/branding/haizflow-mark.png" width="96" alt="HaizFlow logo">
   <h1>HaizFlow</h1>
   <p><strong>A free Windows app for downloading, translating, subtitling and dubbing videos.</strong></p>
-  <p><a href="https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.9/HaizFlow-0.1.9-Setup.exe">Installation</a> · <a href="docs/user-guide.md">User guide</a> · <a href="docs/support.md">Help</a> · <a href="README.vi.md">Tiếng Việt</a></p>
+  <p><a href="https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-Setup.exe">Installation</a> · <a href="docs/user-guide.md">User guide</a> · <a href="docs/support.md">Help</a> · <a href="README.vi.md">Tiếng Việt</a></p>
 </div>
 
 ## About HaizFlow
@@ -49,7 +49,7 @@ Choose recognition, translation and voice models, then configure subtitle covera
 
 ### Manual editor
 
-Review the source and result previews, run individual processing steps and edit subtitle or voice timing on the timeline.
+Review source and result previews, run individual processing steps, split the Result timeline into clips and export subtitles as SRT for other editors.
 
 ![Manual editor with video preview, processing panel and subtitle and audio timeline](docs/images/screenshots/manual-editor.png)
 
@@ -81,7 +81,7 @@ Gemini, Zernio and other external services have their own terms, limits and char
 
 ## Install and get started
 
-**[Download the Windows installer](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.9/HaizFlow-0.1.9-Setup.exe).** Run this EXE only; do not download or extract Core files. Resource packs are installed inside HaizFlow. [Release and installation details](https://github.com/MachHongHai/HaizFlow/releases/latest).
+**[Download the Windows installer](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-Setup.exe).** Run this EXE only; do not download or extract Core files. Resource packs are installed inside HaizFlow. [Release and installation details](https://github.com/MachHongHai/HaizFlow/releases/latest).
 
 1. Install and open HaizFlow. Vietnamese is the default; English is available in Settings.
 2. Choose CPU or NVIDIA GPU in **Settings → General**, then install the resource packs you need.
@@ -90,7 +90,7 @@ Gemini, Zernio and other external services have their own terms, limits and char
 
 Supported systems are Windows 10 version 1809 or later and Windows 11 x64, with at least 16 GB system RAM. Installer users do not need Python. Resource packs, projects and exports need additional storage; Setup and the Resource packs page show their corresponding requirements.
 
-GPU mode supports compatible NVIDIA cards with 6 GB dedicated VRAM or more. On a 6 GB card, start with Demucs, Whisper Small and Gemini or HY-MT2 CPU Q4 translation. Windows Smart App Control or an Application Control policy may block this unsigned build; see the [installation guide](docs/install.md).
+GPU mode supports compatible NVIDIA 4 GB-class cards (at least 3.5 GiB dedicated VRAM reported by CUDA). On 4 GB, use Whisper Small GPU, HY-MT2 CPU Q4 or Gemini, and OmniVoice GPU; these heavy stages run sequentially, with one voice sentence at a time. Whisper Turbo and full HY-MT2 GPU need more VRAM. Available VRAM and system memory still matter at runtime. Windows Smart App Control or an Application Control policy may block this unsigned build; see the [installation guide](docs/install.md).
 
 See [Installation](docs/install.md) for CPU/GPU packs, API keys and storage. See the [User guide](docs/user-guide.md) for projects, captions, dubbing and publishing.
 
@@ -102,7 +102,7 @@ HaizFlow is free to use under [HaizFlow Source-Available 1.0](LICENSE). This is 
 
 You need permission to use imported video, music and voice samples. See [NOTICE](NOTICE) and [third-party notices](THIRD_PARTY_NOTICES.md). The [licensing review](docs/licensing-review.md) and [inactive draft terms](legal/LICENSE-SOURCE-AVAILABLE-DRAFT.md) are retained separately.
 
-HaizFlow uses Qt/PySide under LGPL and FFmpeg under GPL/LGPL, depending on the component. [Bundled library sources](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.9/HaizFlow-0.1.9-ThirdPartySources.zip) and [library replacement instructions](docs/third-party-library-replacement.md) are provided separately. Independent library-license rights remain available.
+HaizFlow uses Qt/PySide under LGPL and FFmpeg under GPL/LGPL, depending on the component. [Bundled library sources](https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-ThirdPartySources.zip) and [library replacement instructions](docs/third-party-library-replacement.md) are provided separately. Independent library-license rights remain available.
 
 ## Support and contributions
 
