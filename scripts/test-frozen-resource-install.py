@@ -30,7 +30,7 @@ def main():
         RUNTIME_DATA_DIR=str(root / "data"), HAIZFLOW_RESOURCE_ROOT=str(root / "resources"),
         MODELS_DIR=str(root / "resources/models"), HAIZFLOW_TMP_DIR=str(root / "tmp"),
         TEMP=str(root), TMP=str(root))
-    from haizflow.core.paths import engines_dir, resource_packages_dir
+    from haizflow.core.paths import engines_dir, resource_packages_dir, resource_storage_pointer_path
     from haizflow.core.resource_archive import ArchivePart
     from haizflow.services.resource_packs import ResourcePackDefinition, ResourcePackManager, ModelBootstrapCancelled
     from haizflow.update.filesystem import atomic_json, no_links, remove_owned, sha256
@@ -112,9 +112,13 @@ def main():
                 sentinel = root / "data/user-data.txt"
                 sentinel.parent.mkdir(parents=True, exist_ok=True)
                 sentinel.write_bytes(b"PRIVATE TEST DATA")
-                moved = manager.move_storage(root / "moved")
+                # Convert the fixture override to the ordinary durable pointer
+                # BEFORE exercising the real user move workflow. Production
+                # correctly rejects moves while an environment owns the root.
+                atomic_json(resource_storage_pointer_path(),dict(version=1,path=str(manager.storage_root)))
                 os.environ.pop("HAIZFLOW_RESOURCE_ROOT", None)
                 os.environ.pop("MODELS_DIR", None)
+                moved = manager.move_storage(root / "moved")
                 assert manager.storage_root == moved
                 assert manager.status(package_id) == "installed"
                 manager.verify_installed(package_id)
