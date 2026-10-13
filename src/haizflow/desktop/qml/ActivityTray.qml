@@ -23,6 +23,7 @@ Rectangle {
     function stateLabel(state) {
         if (state === "failed") return qsTr("Có lỗi");
         if (state === "processing") return qsTr("Đang xử lý");
+        if (state === "exporting") return qsTr("Đang xuất");
         if (state === "paused") return qsTr("Đã tạm dừng");
         if (state === "queued") return qsTr("Đang chờ");
         return qsTr("Sẵn sàng");
@@ -34,7 +35,7 @@ Rectangle {
         anchors.bottom: parent.bottom
         width: 2
         color: root.activityState === "failed" ? Theme.danger
-            : root.activityState === "processing" ? Theme.interactive
+            : root.activityState === "processing" || root.activityState === "exporting" ? Theme.interactive
             : root.activityState === "paused" || root.activityState === "queued"
                 ? Theme.warning : Theme.success
     }
@@ -71,13 +72,15 @@ Rectangle {
             elide: Text.ElideRight
         }
         AppProgressBar {
-            visible: root.activityState === "processing" || root.progress >= 0
+            objectName: "activityProgressBar"
+            visible: root.activityState === "processing" || root.activityState === "exporting" || root.progress >= 0
             Layout.preferredWidth: 140
             value: Math.max(0, root.progress * 100)
             indeterminate: root.progress < 0
-            active: root.activityState === "processing"
+            active: root.activityState === "processing" || root.activityState === "exporting"
         }
         Text {
+            objectName: "activityProgressPercent"
             visible: root.progress >= 0
             Layout.preferredWidth: 38
             text: Math.round(root.progress * 100) + "%"

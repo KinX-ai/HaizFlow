@@ -25,7 +25,7 @@ Control {
         radius: Theme.radius
         color: hoverHandler.hovered ? Theme.surfaceMuted : root.baseColor
         border.width: root.visualFocus ? 2 : 1
-        border.color: root.visualFocus ? Theme.focus : hoverHandler.hovered ? Theme.outlineStrong : root.stateOutline
+        border.color: root.visualFocus ? Theme.controlFocus : hoverHandler.hovered ? Theme.outlineStrong : root.stateOutline
     }
     focusPolicy: Qt.TabFocus
     Accessible.role: Accessible.Button

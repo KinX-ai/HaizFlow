@@ -43,11 +43,15 @@ ApplicationWindow {
     property int routeHistoryIndex: 0
     readonly property bool compactNavigation: width < 1280
     readonly property bool videoProcessing: AppController.isProcessing && !AppController.isSwitchingProcessingDevice
+    readonly property var activeExportJob: AppController.videoExportJobs.find(
+        job => job.status === "exporting" || job.status === "pending") || ({})
+    readonly property bool exportWorking: AppController.videoExportBusy
+        && Boolean(activeExportJob.videoId)
     // qmllint disable stale-property-read
     readonly property var downloader: AppController.mediaDownloader
     // qmllint enable stale-property-read
     readonly property bool selectedTaskFailed: projectWorkspaceVisible
-        && AppController.selectedStatus === "failed"
+        && !root.exportWorking && AppController.selectedStatus === "failed"
     readonly property bool selectedTaskPaused: projectWorkspaceVisible
         && AppController.selectedStatus === "paused"
     readonly property bool selectedTaskQueued: projectWorkspaceVisible
@@ -284,6 +288,7 @@ ApplicationWindow {
         function onAutoProcessingRequested() { videoExportDialogLoader.invoke("openForProcessing", []); }
         function onBatchProcessingRequested(processFirst) { videoExportDialogLoader.invoke("openForBatch", [processFirst]); }
         function onVideoExportStarted() { videoExportJobsDialogLoader.invoke("open", []); }
+        function onVideoExportProgressRequested() { videoExportJobsDialogLoader.invoke("open", []); }
     }
 
     LazyDialogLoader {
@@ -547,19 +552,24 @@ ApplicationWindow {
         }
 
         ActivityTray {
+            objectName: "workspaceActivityTray"
             Layout.fillWidth: true
             showDetails: false
-            activityState: root.selectedTaskFailed ? "failed"
+            activityState: root.exportWorking ? "exporting" : root.selectedTaskFailed ? "failed"
                 : root.videoProcessing ? "processing"
                     : root.selectedTaskPaused ? "paused"
                     : root.selectedTaskQueued ? "queued" : "ready"
             message: root.selectedTaskFailed ? AppController.selectedFailureMessage
+                : root.exportWorking ? (root.activeExportJob.rangeMs
+                    ? qsTr("Đang xuất đoạn video") : qsTr("Đang xuất video"))
                 : root.videoProcessing ? (AppController.isSelectedVideoProcessing
                     ? AppController.selectedStageLabel
                     : qsTr("Đang xử lý video khác"))
                 : root.selectedTaskPaused || root.selectedTaskQueued
                     ? I18n.progressDetail(AppController.selectedProgressDetail) : ""
-            progress: AppController.isSelectedVideoProcessing
+            progress: root.exportWorking ? (root.activeExportJob.status === "exporting"
+                ? Math.max(0, Math.min(1, Number(root.activeExportJob.progress || 0) / 100)) : -1)
+                : AppController.isSelectedVideoProcessing
                 && root.selectedProgressMeasured
                 && AppController.selectedStepId !== "waiting_for_models"
                 && AppController.selectedStepId !== "starting"
@@ -580,6 +590,7 @@ ApplicationWindow {
 
     ToastStack {
         id: toastStack
+        parent: Overlay.overlay
         onDetailsRequested: (title, message, tone) => appAlertDialog.showAlert(title, message, tone)
         anchors.top: parent.top
         anchors.right: parent.right

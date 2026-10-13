@@ -152,10 +152,18 @@ Rectangle {
 
         StudioIconButton {
             id: moreButton
+            objectName: "socialRowMenuButton"
+            property bool menuWasOpenOnPress: false
             visible: true
             iconName: "more"
             toolTipText: qsTr("Tùy chọn")
-            onClicked: actionMenu.popup(this, width, 0)
+            onPressed: menuWasOpenOnPress = actionMenu.visible
+            onClicked: {
+                if (menuWasOpenOnPress || actionMenu.visible)
+                    actionMenu.close();
+                else
+                    actionMenu.popup(this, width, 0);
+            }
         }
     }
 
@@ -179,6 +187,8 @@ Rectangle {
 
     Menu {
         id: actionMenu
+        objectName: "socialRowMenu"
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnReleaseOutside
         width: 200
         AppMenuItem {
             text: qsTr("Chỉnh nội dung")

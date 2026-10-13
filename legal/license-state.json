@@ -10,14 +10,14 @@
     "basis": "Explicit owner approval and request to clarify redistribution and commercial software restrictions",
     "language_precedence": "vi"
   },
-  "effective_release": "0.1.10 reviewed GPU memory, cache, batch and social queue update; publication tracked by GitHub release state",
+  "effective_release": "1.0.0 reviewed editor, audio, speaker and framing update; publication tracked by GitHub release state",
   "public_release_review": {
     "approved_by": "Codex (scoped technical packaging review, not independent legal certification)",
-    "approved_at": "2026-10-11",
-    "source_commit": "e2c7e4b (review baseline; final release commit is bound by BUILD-INFO)",
-    "release_version": "0.1.10",
-    "owner_release_authorization": "Direct owner request to build/publish 0.1.10 and explicit permission to commit and push all tested changes and supplied screenshots. Upgrade verification is scoped to 0.1.8 and 0.1.9.",
-    "publication_condition": "Publish exact corresponding-source asset and rebuilt CPU 12/CUDA 14/vision 7 engines. Verify installer, frozen full/delta upgrades from 0.1.8 and 0.1.9, rollback and public download/hash checks. Do not overwrite immutable release assets. Low-VRAM model lifetime, audio export/source reset, speaker mapping, OCR cache compatibility, timeline, SRT, batch feedback and social queue actions change owned application code. Dependency locks, model checkpoints, media recipes, vendor assets, browser delivery and license terms remain unchanged. Scoped technical packaging review, not independent legal certification; no universal download or all-machine benchmark claim.",
+    "approved_at": "2026-10-13",
+    "source_commit": "ba4f16e (review baseline; final release commit is bound by BUILD-INFO)",
+    "release_version": "1.0.0",
+    "owner_release_authorization": "Direct owner request to push source, build and publish 1.0.0, support updates from 0.1.8 onward, and preserve all old releases.",
+    "publication_condition": "Publish exact corresponding-source asset and rebuilt CPU 13/CUDA 15 engines. Preserve vision 7 at its immutable 0.1.10 URL. Verify installer, frozen Full/Delta upgrades from 0.1.8, 0.1.9 and 0.1.10, rollback and public download/hash checks. Retain existing license restrictions and release assets. New acoustic profile is MIT, checksum pinned, with license notice. Source-only diagnostics are not user annotations or a speaker-accuracy guarantee. Scoped technical packaging review, not independent legal certification; no all-machine benchmark claim.",
     "clearances": {
       "owned-code-and-contributor-scope": {
         "path": "legal/reviews/application-scope-2026-10-06.md",
@@ -28,8 +28,8 @@
         "sha256": "fd3764dcb816168e9ec62737823ecf9eca79655e39999b5073779ac927cd7702"
       },
       "ffmpeg-complete-corresponding-source": {
-        "path": "legal/reviews/media-source-0.1.10.md",
-        "sha256": "c867c8e6bd1f5a1b96843c5f6ca8a9d73e10982c6521c327cb1f40ce616502de"
+        "path": "legal/reviews/media-source-1.0.0.md",
+        "sha256": "a88cd7ff4fac11da0e6c31eced231d0a539db4cd430f6b7d5a579c0c70d9357b"
       },
       "qt-lgpl-module-and-relinking-evidence": {
         "path": "legal/reviews/qt-replacement-2026-10-06.md",

@@ -13,6 +13,8 @@ Rectangle {
     property url inputSource: ""
     property url resultSource: ""
     property url resultBaseSource: ""
+    property string resultOutputFormat: "keep_ratio"
+    property string resultThumbnailOutputFormat: resultOutputFormat
     property url thumbnailSource: ""
     property bool emptySource: false
     property bool previewBusy: false
@@ -835,11 +837,14 @@ Rectangle {
                     if (root.watermarkEditEnabled) root.watermarkEditingDismissed();
                 }
 
-            VideoOutput {
+            OutputFramePreview {
                 id: fullscreenOutput
                 endOfStreamPolicy: VideoOutput.KeepLastFrame
                 anchors.fill: parent
-                fillMode: VideoOutput.PreserveAspectFit
+                outputFormat: root.fullscreenResult ? root.resultOutputFormat : "keep_ratio"
+                thumbnailSource: root.thumbnailSource
+                thumbnailOutputFormat: root.fullscreenResult ? root.resultThumbnailOutputFormat : "keep_ratio"
+                showThumbnail: root.fullscreenResult ? !resultPane.framePresented : !inputPane.framePresented
             }
 
             Rectangle {
@@ -1202,7 +1207,7 @@ Rectangle {
         playbackRate: root.playbackSpeed
         source: root.attachedInputSource
         videoOutput: fullscreenLayer.visible && !root.fullscreenResult
-            ? fullscreenOutput : inputPane.videoOutputItem
+            ? fullscreenOutput.videoOutput : inputPane.videoOutputItem
         audioOutput: DefaultAudioOutput {
             muted: root.inputMuted || root.inputPriming || root.inputSourceSwitching || root.sourceGap
         }
@@ -1250,7 +1255,7 @@ Rectangle {
         playbackRate: root.playbackSpeed
         source: root.attachedResultSource
         videoOutput: fullscreenLayer.visible && root.fullscreenResult
-            ? fullscreenOutput : resultPane.videoOutputItem
+            ? fullscreenOutput.videoOutput : resultPane.videoOutputItem
         audioOutput: DefaultAudioOutput {
             volume: root.controller.manualPreviewAudio.nativeVolume === undefined
                 ? 0 : root.controller.manualPreviewAudio.nativeVolume
@@ -1319,7 +1324,7 @@ Rectangle {
         required property string paneTitle
         required property var player
         required property bool muted
-        readonly property alias videoOutputItem: paneVideoOutput
+        readonly property alias videoOutputItem: paneVideoOutput.videoOutput
         property string mediaKey: ""
         property bool framePresented: false
         property bool busy: false
@@ -1354,12 +1359,15 @@ Rectangle {
                 if (root.watermarkEditEnabled) root.watermarkEditingDismissed();
             }
 
-        VideoOutput {
+        OutputFramePreview {
             id: paneVideoOutput
             objectName: pane === resultPane ? "manualResultVideoOutput" : "manualInputVideoOutput"
             endOfStreamPolicy: VideoOutput.KeepLastFrame
             anchors.fill: parent
-            fillMode: VideoOutput.PreserveAspectFit
+            outputFormat: pane === resultPane ? root.resultOutputFormat : "keep_ratio"
+            thumbnailSource: root.thumbnailSource
+            thumbnailOutputFormat: pane === resultPane ? root.resultThumbnailOutputFormat : "keep_ratio"
+            showThumbnail: !pane.framePresented
         }
 
         Rectangle {
@@ -1485,16 +1493,6 @@ Rectangle {
                 pane.framePresented = true;
                 pane.firstFramePresented();
             }
-        }
-
-        Image {
-            anchors.fill: parent
-            source: root.thumbnailSource
-            sourceSize.width: 960
-            sourceSize.height: 540
-            fillMode: Image.PreserveAspectFit
-            asynchronous: true
-            visible: !pane.framePresented && status === Image.Ready
         }
 
         Rectangle {

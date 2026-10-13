@@ -281,8 +281,11 @@ $ArgsList += @("--hidden-import", "edge_tts")
 $ArgsList += @("--collect-all", "playwright")
 $BundledModelsPath = Join-Path $Root "build\bundled-models\speaker-identification"
 Invoke-PythonChecked -Arguments @((Join-Path $PSScriptRoot "prepare-bundled-speaker-model.py"), "--download") -Label "Bundled speaker model"
+Invoke-PythonChecked -Arguments @((Join-Path $PSScriptRoot "prepare-bundled-voice-profile.py"), "--download") -Label "Bundled voice profile model"
   $BundledSpeakerFile = Join-Path $BundledModelsPath "wespeaker_en_voxceleb_resnet34.onnx"
   $ArgsList += @("--add-data", "$BundledSpeakerFile;models\speaker-identification")
+  $BundledVoiceProfileFile = Join-Path $BundledModelsPath "ecapa_voice_profile_q8.onnx"
+  $ArgsList += @("--add-data", "$BundledVoiceProfileFile;models\speaker-identification")
 $ArgsList += @("--collect-binaries", "onnxruntime")
 $ArgsList += @("--hidden-import", "onnxruntime", "--hidden-import", "haizflow.engine.main")
 $ArgsList += @("--hidden-import", "haizflow.pipeline.speaker_identity", "--hidden-import", "haizflow.pipeline.speaker_runtime")

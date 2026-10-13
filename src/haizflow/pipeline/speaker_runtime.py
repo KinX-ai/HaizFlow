@@ -26,3 +26,30 @@ class SpeakerSession:
 
     def run(self, features):
         return self.session.run(None, {"feats": features})
+
+
+class VoiceProfileSession:
+    """Small q8 ECAPA classifier; bounded CPU inference without Torch or VRAM."""
+
+    def __init__(self, model: Path):
+        import onnxruntime as ort
+
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        options.log_severity_level = 3
+        self.session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+
+    def male_probability(self, pcm):
+        import numpy as np
+
+        # The graph contains its own mel normalization. Input is linear mono
+        # 16kHz float PCM, not standardized samples/WeSpeaker fbank. Separated
+        # float WAVs may exceed nominal full scale: preserve that shape instead
+        # of clipping or applying different gains to neighboring speaker turns.
+        audio = np.asarray(pcm, dtype=np.float32) / 32768.0
+        logits = np.asarray(self.session.run(None, {"input_values": audio[None]})[0]).reshape(-1)
+        if logits.shape != (2,) or not np.isfinite(logits).all():
+            raise RuntimeError("Voice profile model returned invalid logits.")
+        probabilities = np.exp(logits - logits.max())
+        return float(probabilities[0] / probabilities.sum())

@@ -18,6 +18,14 @@ class FakeCudaOom(RuntimeError):
     pass
 
 
+def fake_speech_wave(samples=24000, marker=None):
+    # Broadband finite audio, not DC (DC is now correctly rejected as speech).
+    wave = np.random.default_rng(42).normal(0, .1, samples).astype(np.float32)
+    if marker is not None:
+        wave[0] = marker
+    return wave
+
+
 def fake_torch():
     return SimpleNamespace(
         Tensor=type("Tensor", (), {}), OutOfMemoryError=FakeCudaOom,
@@ -204,12 +212,12 @@ class OmniVoiceBatchTests(unittest.TestCase):
                     settings.append((kwargs["num_step"], kwargs["audio_chunk_duration"]))
                     if oom and len(texts) > 1:
                         raise FakeCudaOom("CUDA out of memory")
-                    return [np.full(480, float(text.split()[0]), dtype=np.float32) for text in texts]
+                    return [fake_speech_wave(marker=ord(text[0]) - ord('A') + 1) for text in texts]
 
                 model = SimpleNamespace(generate=generate, sampling_rate=24000)
                 sf = SimpleNamespace(write=lambda path, audio, rate, **kw: writes.append((Path(path).name, audio[0], rate)))
                 runtime = {"modules": (np, sf, torch, Mock()), "model": model, "model_key": ("model", device)}
-                items = [{"text": f"{index} a short sentence", "voice": "omnivoice:male", "wav_path": str(root / f"{index}.wav")}
+                items = [{"text": f"{chr(ord('A') + index - 1)} a short sentence", "voice": "omnivoice:male", "wav_path": str(root / f"{index}.wav")}
                          for index in range(1, 6)]
                 request = {"site_packages": directory, "model_root": "model", "device": device, "language": "vi",
                            "items": items, "status_path": str(root / "status.json"), "speaker_mode": "multiple",

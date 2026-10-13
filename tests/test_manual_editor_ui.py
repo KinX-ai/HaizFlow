@@ -11,6 +11,61 @@ from PySide6.QtQml import QQmlComponent, QQmlEngine
 QML_DIR = Path(__file__).resolve().parents[1] / "src" / "haizflow" / "desktop" / "qml"
 
 
+def test_fresh_import_hides_unresolved_ocr_timeline_without_deleting_layers():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QGuiApplication.instance() or QGuiApplication([])
+    engine = QQmlEngine()
+    source = (QML_DIR / "ManualWorkspace.qml").read_text(encoding="utf-8")
+    # Evaluate the production bindings with a lightweight model, not copies of
+    # their logic. The same filtered lists are bound to the production timeline.
+    bindings = source.split("    readonly property var unresolvedOcrTrackIds:", 1)[1]
+    bindings = "    readonly property var unresolvedOcrTrackIds:" + bindings.split(
+        "    readonly property string selectedOcrLayerId:", 1,
+    )[0]
+    assert "? root.timelineEditorTracks : root.emptyEditorTracks" in source
+    assert "? root.timelineEditorClips : []" in source
+    component = QQmlComponent(engine)
+    component.setData(('''import QtQuick
+Item { id: root
+    property var editorModel: ({tracks: [], clips: []})
+    property var ocrLayers: []
+''' + bindings + "\n}").encode(), QUrl())
+    assert component.isReady(), "\n".join(error.toString() for error in component.errors())
+    item = component.create()
+    region = {"x_percent": 10, "y_percent": 70, "width_percent": 80, "height_percent": 12}
+    tracks = [{"track_id": track, "kind": kind} for track, kind in (
+        ("result", "result"), ("source-video", "video"), ("subtitles", "subtitle"),
+        ("ocr-source", "ocr"), ("extra", "ocr"), ("voice", "voice"),
+    )]
+    clips = [{"clip_id": track["track_id"], "track_id": track["track_id"]} for track in tracks]
+    try:
+        item.setProperty("editorModel", {"tracks": tracks, "clips": clips})
+        for primary_region, expected_visible in (({}, False), (region, True), ({}, False)):
+            item.setProperty("ocrLayers", [
+                {"track_id": "ocr-source", "primary": True, "region": primary_region},
+                {"track_id": "extra", "primary": False, "region": {}, "pending": True},
+            ])
+            visible_tracks = item.property("timelineEditorTracks").toVariant()
+            visible_clips = item.property("timelineEditorClips").toVariant()
+            assert any(track["track_id"] == "ocr-source" for track in visible_tracks) is expected_visible
+            assert any(clip["track_id"] == "ocr-source" for clip in visible_clips) is expected_visible
+            assert {track["track_id"] for track in visible_tracks} >= {
+                "result", "source-video", "subtitles", "voice", "extra",
+            }
+            assert item.property("editorModel") == {
+                "tracks": tracks, "clips": clips,
+            }
+        # Existing projects: valid detected/overridden region is visible even
+        # when the treatment is disabled; hiding it must not erase saved timing.
+        item.setProperty("ocrLayers", [{"track_id": "ocr-source", "primary": True,
+                                       "region": region, "enabled": False}])
+        assert len(item.property("timelineEditorTracks").toVariant()) == len(tracks)
+    finally:
+        item.deleteLater()
+        engine.deleteLater()
+        app.processEvents()
+
+
 def test_manual_toolbar_loads_and_exposes_compact_actions():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
@@ -118,7 +173,8 @@ def test_manual_layout_has_one_toolbar_and_on_demand_comparison():
     assert 'label: qsTr("Che phụ đề")' in workspace
     assert "EditorDockGroup {" in workspace
     assert 'if (!manualEditorToolbar.exportEnabled)' in workspace
-    assert 'root.selectedStageIndex = 6;' in workspace
+    assert 'root.selectedStageIndex = 6;' not in workspace
+    assert 'AppController.requestVideoExport();' in workspace
     assert 'root.activatePanel("tasks", "right");' in workspace
     assert '"voice": 4, "source-audio": 5, "music": 5' in workspace
     assert "ManualAssetPanel {" not in workspace

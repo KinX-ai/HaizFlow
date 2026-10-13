@@ -102,12 +102,21 @@ AppSurface {
 
         StudioIconButton {
             id: setupMoreButton
+            objectName: "socialSetupMenuButton"
+            property bool menuWasOpenOnPress: false
             iconName: "more"
             toolTipText: qsTr("Thiết lập đăng bài")
-            onClicked: setupMenu.open()
+            onPressed: menuWasOpenOnPress = setupMenu.visible
+            onClicked: {
+                if (menuWasOpenOnPress || setupMenu.visible)
+                    setupMenu.close();
+                else
+                    setupMenu.open();
+            }
 
             Menu {
                 id: setupMenu
+                objectName: "socialSetupMenu"
                 width: 180
                 x: parent.width - width
                 y: parent.height + Theme.space4

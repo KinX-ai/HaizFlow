@@ -67,6 +67,29 @@ class ManualEditorSessionTests(unittest.TestCase):
         rows[0].update(text="b", end=2)
         self.assertEqual(identify_segments("video", rows)[0]["segment_id"], identity)
 
+    def test_publication_notifies_voice_ui_after_document_reconciliation(self):
+        events = []
+        host = SimpleNamespace(
+            _selected_video_id="video",
+            _manual_subtitles=SimpleNamespace(segments=[{"text": "Khôi phục"}]),
+            _refresh_selected_video_snapshot=lambda: events.append("snapshot"),
+            _manual_editor_document=SimpleNamespace(set_document=lambda _doc: events.append("document")),
+            _manual_preview_composition=SimpleNamespace(refresh=lambda: events.append("composition")),
+            manualToolStateChanged=SimpleNamespace(emit=lambda _tool: events.append("tool")),
+            manualSubtitleDocumentChanged=SimpleNamespace(emit=lambda: events.append("subtitle")),
+            previewMediaChanged=SimpleNamespace(emit=lambda: events.append("preview")),
+        )
+        with (
+            patch("haizflow.desktop.qml_controller.video_store.get_video", return_value=object()),
+            patch("haizflow.desktop.qml_controller.editor_documents.sync_subtitle_clips",
+                  side_effect=lambda *_args: events.append("reconcile") or object()),
+        ):
+            HaizFlowController._manual_subtitles_published(host, "video", 2, True)
+        self.assertEqual(events, ["reconcile", "document", "composition", "snapshot", "tool", "subtitle", "preview"])
+        events.clear()
+        HaizFlowController._manual_subtitles_published(host, "other-video", 2, True)
+        self.assertEqual(events, [])
+
     def test_edit_history_is_per_video_and_separate_from_navigation(self):
         history = ManualEditHistory()
         model = ManualSubtitleModel(history=history)

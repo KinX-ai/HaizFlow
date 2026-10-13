@@ -397,6 +397,7 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
         )
         voice = str(override.get("voice") or voice_selection_identity(getattr(video, "tts_voice", ""), speaker_mode))
         from haizflow.pipeline.edge_tts_backend import EDGE_CACHE_VERSION
+        from haizflow.pipeline.tts_quality import voice_text_policy_versions
         signatures.append(
             manual_artifacts.signature(
                 preprocess_text_for_tts(str(segment.get("text") or "")),
@@ -409,9 +410,11 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
                 reference_text,
                 recognition,
                 index if speaker_mode == "multiple" else 0,
+                *((segment.get('start'), segment.get('end')) if speaker_mode == 'multiple' and provider != 'edge' else ()),
                 *_generation_token(video, "voice"),
                 _voice_cache_version(video),
                 *((EDGE_CACHE_VERSION,) if provider == "edge" else ()),
+                *(voice_text_policy_versions(str(segment.get("text") or ""), language) if provider != "edge" else ()),
             )
         )
     return signatures
@@ -581,11 +584,18 @@ def active_voice_record(video, *, validate: bool = False) -> dict[str, Any] | No
         # by stable ID, not the new timestamp or its order on the timeline.
         ids = [str(item.get("segment_id") or item.get("id") or "") for item in rows]
         texts = [" ".join(str(item.get("text") or "").split()) for item in rows]
-        if all(ids) and len(set(ids)) == len(ids):
-            return dict(zip(ids, texts))
-        return texts
+        return ids, texts
 
-    return voice if spoken_rows(current) == spoken_rows(source) else None
+    current_ids, current_texts = spoken_rows(current)
+    source_ids, source_texts = spoken_rows(source)
+    # Legacy voice documents have no IDs. Editing/Undo upgrades the working
+    # document to stable IDs; that metadata change must not silence old audio.
+    if (all(current_ids) and len(set(current_ids)) == len(current_ids)
+            and all(source_ids) and len(set(source_ids)) == len(source_ids)):
+        matches = dict(zip(current_ids, current_texts)) == dict(zip(source_ids, source_texts))
+    else:
+        matches = current_texts == source_texts
+    return voice if matches else None
 
 
 def active_voice_clip_signatures(video, *, validate: bool = False) -> list[str]:
@@ -1729,6 +1739,9 @@ def _run_voice(video, reporter) -> None:
                     if stage in preparing_details:
                         percent = 5 + round(90 * completed_before / max(1, missing_clip_count))
                         status_detail = preparing_details[stage]
+                    elif stage == 'leveling_voice':
+                        percent = 5 + round(90 * (completed_before+current) / max(1,missing_clip_count))
+                        status_detail = 'Đang cân mức các câu cùng người nói'
                     else:
                         overall = completed_before + current
                         percent = 5 + round(90 * overall / max(1, missing_clip_count))
@@ -1771,6 +1784,7 @@ def _run_voice(video, reporter) -> None:
                         target_language=video.target_language,
                         keep_worker_warm=True,
                         segment_indices=group_indices,
+                        level_peer_indices=generation_groups[(provider,voice)],
                         narrator_anchor_text=narrator_anchor,
                         status_callback=report_voice_status if effective == "omnivoice" else None,
                     )

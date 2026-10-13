@@ -58,7 +58,7 @@ Rectangle {
                     radius: Theme.radiusTiny
                     color: optionButton.selected ? Theme.surfaceStrong : optionButton.hovered ? Theme.surfaceMuted : "transparent"
                     border.width: optionButton.visualFocus ? 2 : 0
-                    border.color: Theme.focus
+                    border.color: Theme.controlFocus
                 }
 
                 onClicked: root.activated(optionButton.modelData.value)

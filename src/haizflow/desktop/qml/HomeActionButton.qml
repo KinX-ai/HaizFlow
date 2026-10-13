@@ -57,6 +57,6 @@ Button {
         color: root.down ? Theme.surfaceStrong
             : root.hovered || root.visualFocus ? Theme.surfaceMuted : Theme.surfaceElevated
         border.width: root.visualFocus ? 2 : 1
-        border.color: root.visualFocus ? Theme.focus : Theme.outline
+        border.color: root.visualFocus ? Theme.controlFocus : Theme.outline
     }
 }

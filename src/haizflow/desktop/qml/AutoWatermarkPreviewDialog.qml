@@ -95,7 +95,7 @@ FloatingToolDialog {
                     enabled: root.controller.canEditSelectedVideo
                     maximumLength: 80
                     placeholderText: qsTr("Nội dung watermark")
-                    text: root.controller.watermarkText
+                    sourceText: root.controller.watermarkText
                     onValueCommitted: function(value) {
                         root.controller.watermarkText = value;
                         root.watermarkSettingsEdited();

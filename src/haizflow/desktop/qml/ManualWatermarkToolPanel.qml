@@ -47,7 +47,7 @@ ColumnLayout {
             && imagePane.draftWatermarkKind === imagePane.appliedWatermarkKind
         enabled: imagePane.inspector.editable
         placeholderText: qsTr("Nhập watermark")
-        text: AppController.watermarkText
+        sourceText: AppController.watermarkText
         maximumLength: 80
         onValueCommitted: function(value) {
             AppController.watermarkText = value;

@@ -82,10 +82,11 @@ def _file_state(path):
     return (os.path.abspath(path), stat.st_size, stat.st_mtime_ns)
 
 
-def _voice_checkpoint_signature(video, transcript_state):
+def _voice_checkpoint_signature(video, transcript_state, *, segments=None):
     """Sign only inputs used by synthesis, not a dormant narrator preset."""
     from haizflow.pipeline.speaker_identity import IDENTITY_VERSION
     from haizflow.pipeline.edge_tts_backend import EDGE_CACHE_VERSION
+    from haizflow.pipeline.tts_quality import voice_text_policy_versions
 
     speaker_mode = str(getattr(video, "speaker_mode", "single") or "single")
     provider = str(getattr(video, "tts_provider", "omnivoice") or "omnivoice")
@@ -101,6 +102,9 @@ def _voice_checkpoint_signature(video, transcript_state):
          else "omnivoice-dedicated-short-anchor-or-source-speaker-r5"),
         *((IDENTITY_VERSION,) if speaker_mode == "multiple" else ()),
         *((EDGE_CACHE_VERSION,) if provider == "edge" else ()),
+        *(tuple(dict.fromkeys(version for item in (segments or []) if isinstance(item, dict)
+                             for version in voice_text_policy_versions(str(item.get("text") or ""), language)))
+          if provider != "edge" else ()),
     )
 
 
@@ -876,11 +880,11 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
     target_language = str(getattr(video, "target_language", "vi") or "vi")
     configured_tts_provider = str(getattr(video, "tts_provider", "omnivoice") or "omnivoice")
     effective_tts_provider = resolve_tts_provider(configured_tts_provider, target_language)
-    voice_signature = _voice_checkpoint_signature(video, transcript_state)
     with open(transcript_json, "r", encoding="utf-8") as transcript_file:
         transcript_segments = json.load(transcript_file)
     if not isinstance(transcript_segments, list) or not transcript_segments:
         raise RuntimeError("The translated transcript contains no subtitle segments.")
+    voice_signature = _voice_checkpoint_signature(video, transcript_state, segments=transcript_segments)
     for index, segment in enumerate(transcript_segments, 1):
         if not isinstance(segment, dict) or not str(segment.get("text") or "").strip():
             raise RuntimeError(f"Translated subtitle segment {index} is missing text.")
@@ -922,7 +926,7 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
         def report_voice_status(stage, current, total):
             if stage == "identifying_speakers":
                 reporter.update(65, "creating_voice", f"Identifying speakers {current} of {total}")
-            elif stage in {"synthesizing", "completed"}:
+            elif stage in {"synthesizing", "completed", "leveling_voice"}:
                 report_voice_progress(current, total)
             else:
                 reporter.update(65, "creating_voice", f"Preparing voice: {stage}")

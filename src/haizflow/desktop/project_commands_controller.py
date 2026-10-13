@@ -375,6 +375,7 @@ class ProjectCommandsController:
                 "ttsVoice": host._tts_voice,
                 "speakerMode": getattr(host, "_speaker_mode", "single"),
                 "enableAudioSeparation": host._enable_audio_separation,
+                "outputFormat": getattr(host, "_output_format", "keep_ratio"),
                 "originalVolume": host._original_volume,
                 "backgroundMusicVolume": host._background_music_volume,
                 "ttsVolume": host._tts_volume,
@@ -465,6 +466,7 @@ class ProjectCommandsController:
             "ttsVoice": host._normalized_voice_for_language(target_language, tts_voice, tts_provider),
             "speakerMode": "multiple" if speaker_mode == "multiple" else "single",
             "enableAudioSeparation": bool(audio_separation),
+            "outputFormat": getattr(baseline_video, "output_format", "keep_ratio"),
             "originalVolume": int(original_volume),
             "backgroundMusicVolume": int(background_music_volume),
             "ttsVolume": int(tts_volume),
@@ -926,6 +928,7 @@ class ProjectCommandsController:
         host._tts_voice = values["ttsVoice"]
         host._speaker_mode = values["speakerMode"]
         host._enable_audio_separation = values["enableAudioSeparation"]
+        host._output_format = values.get("outputFormat", "keep_ratio")
         host._original_volume = values["originalVolume"]
         host._background_music_volume = values["backgroundMusicVolume"]
         host._tts_volume = values["ttsVolume"]
@@ -946,6 +949,7 @@ class ProjectCommandsController:
         host.ttsVoiceOptionsChanged.emit()
         host.speakerModeChanged.emit()
         host.enableAudioSeparationChanged.emit()
+        host.outputFormatChanged.emit()
         host.originalVolumeChanged.emit()
         host.backgroundMusicVolumeChanged.emit()
         host.ttsVolumeChanged.emit()

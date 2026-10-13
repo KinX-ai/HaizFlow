@@ -4,6 +4,8 @@ import json
 import os
 import re
 import unicodedata
+import tempfile
+from pathlib import Path
 
 from haizflow.services.video_store import get_video, log_to_video
 
@@ -72,6 +74,144 @@ def _is_valid_mp3(path: str) -> bool:
     return len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0
 
 
+def _speaker_utterance_plan(segment: dict, source: dict) -> list[dict]:
+    """Keep edited subtitle identity matching time-based, including sub-turns."""
+    turns = source.get('speaker_turns') or []
+    if not turns:
+        return [{"text":str(segment['text']),"voice":source.get('speaker_voice'),"speaker_id":source.get('speaker_id'),
+                 "offset_ms":0,"duration_ms":max(1,round((float(segment.get('end',0))-float(segment.get('start',0)))*1000))}]
+    clauses = [part.strip() for part in re.split(r"(?<=[!?。！？])\s*|(?<=\.)\s+(?=[A-ZÀ-Ỹ])",str(segment['text'])) if part.strip()]
+    if len(clauses) != len(turns):
+        raise ValueError("Câu nguồn có nhiều người nói nhưng phụ đề đã mất ranh giới giữa các câu. "
+                         "Hãy tách các câu bằng dấu chấm, chấm hỏi hoặc chấm than trước khi tạo giọng.")
+    duration = max(1,round((float(segment['end'])-float(segment['start']))*1000))
+    source_start,source_end = float(source['start']),float(source['end'])
+    span = max(.001,source_end-source_start)
+    plan = []
+    for text,turn in zip(clauses,turns):
+        left = round((float(turn['start'])-source_start)/span*duration)
+        right = round((float(turn['end'])-source_start)/span*duration)
+        plan.append({'text':text,'voice':turn['speaker_voice'],'speaker_id':turn['speaker_id'],
+                     'offset_ms':max(0,left),'duration_ms':max(1,right-left),
+                     'source_start':turn['start'],'source_end':turn['end'],'source_text':turn['text']})
+    return plan
+
+
+def _compose_speaker_utterances(parts, output_path, video_id):
+    from haizflow.pipeline.audio_timeline import trim_silence,compress_to_fit
+    from haizflow.pipeline.omnivoice_tts import _encode_mp3
+    from haizflow.utils.audio import AudioSegment
+    length = max(item['offset_ms']+item['duration_ms'] for item in parts)
+    result = AudioSegment.silent(duration=length,frame_rate=24000).set_channels(1)
+    for item in parts:
+        audio = trim_silence(AudioSegment.from_file(item['output_path'])).set_frame_rate(24000).set_channels(1)
+        if len(audio) > item['duration_ms']:
+            audio = compress_to_fit(audio,item['duration_ms'],str(Path(output_path).parent),video_id)
+        result = result.overlay(audio,position=item['offset_ms'])
+    with tempfile.TemporaryDirectory(prefix='speaker-mix-',dir=Path(output_path).parent) as work:
+        wav = Path(work)/'voice.wav'
+        result.export(wav,format='wav').close()
+        _encode_mp3(wav,Path(output_path),video_id)
+
+
+def _level_voice_peers(peers, requested, video_id, language):
+    """Level only requested clips against bounded, same-speaker dialogue.
+
+    Existing cache inputs are read-only; atomic path replacement never modifies
+    a hard-linked immutable artifact. No inference/tensors or whole-video decode.
+    """
+    import numpy as np
+    import subprocess
+    from haizflow.pipeline.process_registry import check_cancellation,communicate_process
+    from haizflow.utils.float_pcm import FloatPcmReader
+    from haizflow.utils.ffmpeg import _binary
+    from haizflow.pipeline.tts_quality import (
+        active_speech_rms, is_level_reference_text, match_quiet_speech_level, peer_speech_target,
+    )
+    from haizflow.pipeline.omnivoice_tts import _encode_mp3
+
+    def key(item):
+        return (item.get('voice'), item.get('speaker_id') or 'narrator')
+
+    groups = {}
+    for item in peers:
+        group = groups.setdefault(key(item),[])
+        if (len(group) < 12 and is_level_reference_text(item['text'],language)
+                and _is_valid_mp3(item['output_path'])):
+            group.append(item)
+    groups = {identity:items for identity,items in groups.items() if len(items) >= 3}
+    if not groups:
+        return set()
+    changed = set()
+    measurements = {}
+    def decode(path):
+        check_cancellation(video_id)
+        process = subprocess.Popen(
+            [_binary('ffmpeg'),'-v','error','-i',str(path),'-t','30','-ac','1','-ar','24000','-f','f32le','-'],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        stdout,stderr = communicate_process(video_id,process,label='Voice peer loudness')
+        if process.returncode:
+            raise RuntimeError(f'Could not measure generated speech: {stderr[-500:]}')
+        return np.frombuffer(stdout,dtype='<f4'),24000
+    for identity,items in groups.items():
+        levels = []
+        for item in items:
+            path = item['output_path']
+            if path not in measurements:
+                wave,rate = decode(path)
+                measurements[path] = active_speech_rms(wave,rate)
+            levels.append(measurements[path])
+        groups[identity] = peer_speech_target(levels)
+    for item in requested:
+        target = groups.get(key(item),0)
+        if not target:
+            continue
+        path = Path(item['output_path'])
+        wave,rate = decode(path)
+        corrected = match_quiet_speech_level(wave,rate,target,tolerance_db=1.0)
+        if np.array_equal(wave,corrected):
+            continue
+        # Decoding measurement is bounded; adjust the complete clip with the
+        # same constant gain, without trimming or rewriting any phonemes.
+        gain = float(np.max(abs(corrected)) / max(float(np.max(abs(wave))),1e-20))
+        with tempfile.TemporaryDirectory(prefix='voice-level-',dir=path.parent) as work:
+            pcm = Path(work)/'voice.pcm'
+            process = subprocess.Popen(
+                [_binary('ffmpeg'),'-y','-v','error','-i',str(path),'-ac','1','-ar','24000','-f','f32le',str(pcm)],
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            _,stderr = communicate_process(video_id,process,label='Voice level peak validation')
+            if process.returncode:
+                raise RuntimeError(f'Could not decode generated speech: {stderr[-500:]}')
+            full_peak = 0.0
+            with FloatPcmReader(pcm,24000) as source:
+                while True:
+                    block = source.read(24000)
+                    if not block.size:
+                        break
+                    check_cancellation(video_id)
+                    full_peak = max(full_peak,float(np.max(abs(block))))
+            gain = min(gain,10**(-1/20)/max(full_peak,1e-20))
+            if gain <= 1:
+                continue
+            wav = Path(work)/'voice.wav'
+            process = subprocess.Popen(
+                [_binary('ffmpeg'),'-y','-v','error','-f','f32le','-ar','24000','-ac','1','-i',str(pcm),
+                 '-af',f'volume={gain:.9f}','-c:a','pcm_f32le',str(wav)],
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            _,stderr = communicate_process(video_id,process,label='Voice peer level adjustment')
+            if process.returncode:
+                raise RuntimeError(f'Could not level generated speech: {stderr[-500:]}')
+            check_cancellation(video_id)
+            _encode_mp3(wav,path,video_id)
+        log_to_video(video_id,f"[TTS][LEVEL] speaker={item.get('speaker_id') or 'narrator'} "
+                     f"voice={item.get('voice')} gain_db={20*np.log10(gain):.2f}")
+        changed.add(str(path))
+    return changed
+
+
 def generate_voice_parts(
     segments_json_path: str,
     voice_parts_dir: str,
@@ -86,6 +226,7 @@ def generate_voice_parts(
     segment_indices: list[int] | None = None,
     narrator_anchor_text: str = "",
     status_callback=None,
+    level_peer_indices: list[int] | None = None,
 ):
     backend = resolve_tts_provider(provider, target_language)
     device = "gpu" if provider.endswith("-gpu") else "cpu"
@@ -134,6 +275,9 @@ def generate_voice_parts(
     voice = normalize_voice(voice)
     from haizflow.pipeline.omnivoice_tts import synthesize_batch_to_mp3
     pending = []
+    pending_by_segment = {}
+    composite_segments = {}
+    composition_work = None
     current_video = get_video(video_id)
     current_files = dict((current_video.files if current_video else {}) or {})
     speaker_mode = str(getattr(current_video, "speaker_mode", "single") or "single")
@@ -187,24 +331,39 @@ def generate_voice_parts(
         if not _valid_map(identified, source_segments):
             raise RuntimeError("Không xác định được giọng từng người nói. Hãy chạy lại nhận diện người nói.")
         source_segments = identified
+        diagnostic_turns = [turn for source in source_segments for turn in (source.get('speaker_turns') or [source])]
         log_to_video(video_id, f"[SPEAKERS][POLICY] version={IDENTITY_VERSION}")
-        voice_map = dict((s["speaker_id"], s["speaker_voice"]) for s in source_segments)
+        voice_map = dict((s["speaker_id"], s["speaker_voice"]) for s in diagnostic_turns)
         log_to_video(video_id, "[SPEAKERS][VOICE_MAP] " + " ".join(f"{key}={value}" for key, value in voice_map.items()))
         profiles = {s["speaker_id"]: (s.get("speaker_pitch_hz"), bool(s.get("speaker_voice_uncertain")))
-                    for s in source_segments}
+                    for s in diagnostic_turns}
         log_to_video(video_id, "[SPEAKERS][VOICE_PROFILE] " + " ".join(
             f"{speaker}:f0_hz={pitch},uncertain={uncertain}" for speaker, (pitch, uncertain) in profiles.items()
         ))
-        log_to_video(video_id, f"Identified {len({s['speaker_id'] for s in source_segments})} speakers; "
+        backends = sorted({str(s.get("speaker_profile_backend") or "legacy") for s in diagnostic_turns})
+        fallback_count = sum(bool(s.get("speaker_voice_fallback")) for s in diagnostic_turns)
+        log_to_video(video_id, f"[SPEAKERS][TIMBRE] backend={','.join(backends)} "
+                     f"fallback_turns={fallback_count} fallback_voice=omnivoice:female_gentle")
+        log_to_video(video_id,f"[SPEAKERS][SUBTURNS] source_clips={len(source_segments)} turns={len(diagnostic_turns)} "
+                     f"mixed_clips={sum(bool(s.get('speaker_turns')) for s in source_segments)} "
+                     f"childlike_turns={sum(s.get('speaker_timbre_style')=='child-like' for s in diagnostic_turns)}")
+        log_to_video(video_id, f"Identified {len({s['speaker_id'] for s in diagnostic_turns})} speaker candidates; "
                      "using stable target-language voices, not per-sentence source clones.")
-        uncertain = sum(bool(s.get("speaker_uncertain")) for s in source_segments)
+        uncertain = sum(bool(s.get("speaker_uncertain")) for s in diagnostic_turns)
         if uncertain:
-            log_to_video(video_id, f"[SPEAKERS][LOW_CONFIDENCE] {uncertain}/{len(source_segments)} turns are ambiguous; "
+            log_to_video(video_id, f"[SPEAKERS][LOW_CONFIDENCE] {uncertain}/{len(diagnostic_turns)} turns are ambiguous; "
                          "short, overlapping or distorted source speech may require manual voice correction.")
     if voice == "omnivoice:clone" and (
         not clone_reference or not os.path.isfile(clone_reference)
     ):
         raise RuntimeError("OmniVoice voice cloning requires an authorised reference sample.")
+
+    exact_source_windows = {}
+    for source in source_segments:
+        if isinstance(source,dict):
+            left = float(source.get('start') or 0)
+            right = max(left,float(source.get('end') or left))
+            exact_source_windows.setdefault((left,right),source)
 
     def source_reference_for(segment: dict) -> dict:
         """Match edited subtitles to source speech by time, never by list position."""
@@ -212,6 +371,8 @@ def generate_voice_parts(
             return {}
         start = float(segment.get("start") or 0.0)
         end = max(start, float(segment.get("end") or start))
+        if (start,end) in exact_source_windows:
+            return exact_source_windows[(start,end)]
         midpoint = (start + end) / 2.0
 
         def match_score(source: dict) -> tuple[float, float]:
@@ -222,6 +383,43 @@ def generate_voice_parts(
             return overlap, -distance
 
         return max((item for item in source_segments if isinstance(item, dict)), key=match_score, default={})
+
+    prepared_plans = {}
+    for index, segment in requested_segments:
+        if not isinstance(segment,dict) or not str(segment.get('text') or '').strip():
+            raise RuntimeError(f"Translated subtitle segment {index} is missing text.")
+        source = source_reference_for(segment)
+        prepared_plans[index] = (_speaker_utterance_plan(segment,source) if speaker_mode == 'multiple'
+                                 else [{'text':segment['text'],'voice':voice}])
+
+    peer_indices = list(range(1,len(segments)+1)) if level_peer_indices is None else level_peer_indices
+    if any(index < 1 or index > len(segments) for index in peer_indices):
+        raise ValueError('Voice loudness peer index is outside the subtitle document.')
+    peer_items = []
+    for index in peer_indices:
+        segment = segments[index-1]
+        source = source_reference_for(segment) if speaker_mode == 'multiple' else {}
+        if source.get('speaker_turns'):
+            continue  # Never measure different actors as one speaker.
+        peer_items.append({'text':str(segment.get('text') or ''),
+                           'voice':source.get('speaker_voice') if speaker_mode == 'multiple' else voice,
+                           'speaker_id':source.get('speaker_id') if speaker_mode == 'multiple' else 'narrator',
+                           'output_path':os.path.join(voice_parts_dir,f'voice_{index:04d}.mp3')})
+
+    def level_finished_parts():
+        requested_items = []
+        for index,_segment in requested_segments:
+            if index in pending_by_segment:
+                requested_items.extend(pending_by_segment[index])
+            elif len(prepared_plans[index]) == 1:
+                requested_items.append({**prepared_plans[index][0],
+                                        'output_path':os.path.join(voice_parts_dir,f'voice_{index:04d}.mp3')})
+        if status_callback:
+            status_callback('leveling_voice',total,total)
+        changed = _level_voice_peers(peer_items,requested_items,process_registry_id or video_id,target_language)
+        for index,destination in composite_segments.items():
+            if any(part['output_path'] in changed for part in pending_by_segment[index]):
+                _compose_speaker_utterances(pending_by_segment[index],destination,process_registry_id or video_id)
 
     for index, segment in requested_segments:
         text = str((segment or {}).get("text") or "").strip() if isinstance(segment, dict) else ""
@@ -237,28 +435,56 @@ def generate_voice_parts(
                 f"[TTS][QUEUED] provider={backend} segment={index}/{document_total} voice={segment_voice} "
                 f"speaker={source_reference.get('speaker_id') or 'narrator'}",
             )
-            pending.append({
-                "text": preprocess_text_for_tts(text),
-                "voice": segment_voice,
-                "output_path": part_path,
-                "index": str(index),
-                "reference_path": clone_reference if voice == "omnivoice:clone" else "",
-                "reference_text": clone_transcript if voice == "omnivoice:clone" else "",
-                # Identity came from source audio, but pronunciation always
-                # comes from the target-language preset. Never leak reference
-                # dialogue into generated speech through cross-language cloning.
-                "source_audio_path": "",
-                "speaker_id": str(source_reference.get("speaker_id") or ""),
-                "source_start": str(source_reference.get("start", "")),
-                "source_end": str(source_reference.get("end", "")),
-                "source_text": str(source_reference.get("text", "")),
-            })
-    completed_before_worker = total - len(pending)
+            plan = prepared_plans[index]
+            if len(plan) > 1 and composition_work is None:
+                composition_work = tempfile.TemporaryDirectory(prefix='speaker-phrases-',dir=voice_parts_dir)
+            pieces = []
+            for number,utterance in enumerate(plan):
+                if len(plan)>1:
+                    log_to_video(video_id,f"[TTS][SUBTURN] segment={index}/{document_total} part={number+1}/{len(plan)} "
+                                 f"voice={utterance['voice']} speaker={utterance['speaker_id']} "
+                                 f"offset_ms={utterance['offset_ms']} duration_ms={utterance['duration_ms']}")
+                piece_path = str(Path(composition_work.name)/f'{index}-{number}.mp3') if len(plan)>1 else part_path
+                pending.append({
+                    "text": preprocess_text_for_tts(utterance['text']),
+                    "voice": str(utterance['voice']),
+                    "output_path": piece_path,
+                    "index": str(index),
+                    "reference_path": clone_reference if voice == "omnivoice:clone" else "",
+                    "reference_text": clone_transcript if voice == "omnivoice:clone" else "",
+                    # Identity came from source, pronunciation from the target
+                    # preset. Never leak source dialogue via cross-language cloning.
+                    "source_audio_path": "",
+                    "speaker_id": str(utterance.get('speaker_id') or source_reference.get("speaker_id") or ""),
+                    "source_start": str(utterance.get('source_start',source_reference.get("start", ""))),
+                    "source_end": str(utterance.get('source_end',source_reference.get("end", ""))),
+                    "source_text": str(utterance.get('source_text',source_reference.get("text", ""))),
+                })
+                pieces.append({**utterance,'output_path':piece_path})
+            pending_by_segment[index] = pieces
+            if len(plan)>1:
+                composite_segments[index] = part_path
+    completed_before_worker = total - len(pending_by_segment)
     if progress_callback and completed_before_worker:
         progress_callback(completed_before_worker, total)
     if pending:
+        observed_completed = 0
+        completed_pieces = {}
+        ready_indices = set()
         def report_omnivoice_progress(completed, _pending_total, stage):
-            verified = min(completed_before_worker + completed, total)
+            nonlocal observed_completed
+            while observed_completed < min(completed,len(pending)):
+                entry = pending[observed_completed]
+                if not _is_valid_mp3(entry['output_path']):
+                    break
+                observed_completed += 1
+                index = int(entry['index'])
+                completed_pieces[index] = completed_pieces.get(index,0)+1
+                if completed_pieces[index] == len(pending_by_segment[index]):
+                    if index in composite_segments:
+                        _compose_speaker_utterances(pending_by_segment[index],composite_segments[index],process_registry_id or video_id)
+                    ready_indices.add(index)
+            verified = min(completed_before_worker + len(ready_indices), total)
             if status_callback is not None:
                 status_callback(stage, verified, total)
             elif progress_callback is not None:
@@ -271,14 +497,22 @@ def generate_voice_parts(
             worker_options["keep_worker_warm"] = True
         if narrator_anchor_text and speaker_mode != "multiple":
             worker_options["narrator_anchor_text"] = narrator_anchor_text
-        synthesize_batch_to_mp3(
-            pending,
-            video_id,
-            language_id=target_language,
-            speaker_mode=speaker_mode,
-            progress_callback=report_omnivoice_progress,
-            **worker_options,
-        )
+        try:
+            synthesize_batch_to_mp3(
+                pending,
+                video_id,
+                language_id=target_language,
+                speaker_mode=speaker_mode,
+                progress_callback=report_omnivoice_progress,
+                **worker_options,
+            )
+            level_finished_parts()
+            report_omnivoice_progress(len(pending),len(pending),'completed')
+        finally:
+            if composition_work:
+                composition_work.cleanup()
+    else:
+        level_finished_parts()
     for index, _segment in requested_segments:
         part_path = os.path.join(voice_parts_dir, f"voice_{index:04d}.mp3")
         if not _is_valid_mp3(part_path):

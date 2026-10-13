@@ -39,7 +39,7 @@ RowLayout {
                 color: tab.hovered ? Theme.surface : "transparent"
                 radius: Theme.radiusSmall
                 border.width: tab.visualFocus ? 1 : 0
-                border.color: Theme.focus
+                border.color: Theme.controlFocus
                 Rectangle {
                     anchors.bottom: parent.bottom
                     anchors.left: parent.left

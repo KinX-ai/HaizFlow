@@ -30,7 +30,7 @@ ColumnLayout {
             color: headerArea.containsMouse && root.collapsible ? Theme.surfaceMuted : "transparent"
             radius: Theme.radiusSmall
             border.width: header.visualFocus ? 2 : 0
-            border.color: Theme.focus
+            border.color: Theme.controlFocus
         }
 
         RowLayout {

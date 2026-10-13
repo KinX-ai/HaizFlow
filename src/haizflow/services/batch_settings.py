@@ -12,6 +12,7 @@ from haizflow.core.storage_ownership import owned_path
 
 
 FIELDS = {
+    "outputFormat": "output_format",
     "workflowMode": "mode", "targetLanguage": "target_language",
     "speechRecognitionModel": "speech_recognition_model", "translationModel": "translation_model",
     "ttsProvider": "tts_provider", "ttsVoice": "tts_voice", "speakerMode": "speaker_mode",

@@ -193,13 +193,20 @@ ColumnLayout {
 
                 StudioIconButton {
                     id: moreButton
+                    objectName: "resourcePackMenuButton"
+                    property bool menuWasOpenOnPress: false
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     visible: root.status === "installed"
                     controlSize: 36
                     iconName: "more"
                     toolTipText: qsTr("Tùy chọn gói")
+                    onPressed: menuWasOpenOnPress = maintenanceMenu.visible
                     onClicked: {
+                        if (menuWasOpenOnPress || maintenanceMenu.visible) {
+                            maintenanceMenu.close();
+                            return;
+                        }
                         const point = moreButton.mapToItem(Overlay.overlay, 0, moreButton.height);
                         maintenanceMenu.x = Math.round(point.x - maintenanceMenu.width + moreButton.width);
                         maintenanceMenu.y = Math.round(point.y + Theme.space4);
@@ -219,6 +226,7 @@ ColumnLayout {
 
     TopBarPopupMenu {
         id: maintenanceMenu
+        objectName: "resourcePackMenu"
         parent: Overlay.overlay
         menuContentWidth: Math.max(repairItem.implicitWidth, removeItem.implicitWidth)
 

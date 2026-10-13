@@ -5,7 +5,15 @@ StudioField {
     id: root
     property bool edited: false
     property bool committing: false
+    property string sourceText: ""
     signal valueCommitted(string value)
+
+    function syncSourceText() {
+        if (!activeFocus && !edited && !inputMethodComposing && text !== sourceText)
+            text = sourceText;
+    }
+    onSourceTextChanged: syncSourceText()
+    Component.onCompleted: syncSourceText()
 
     function commitEdits() {
         if (committing)
@@ -13,7 +21,8 @@ StudioField {
         committing = true;
         // Qt exposes QInputMethod as QObject in the static QML type metadata.
         // qmllint disable missing-property
-        Qt.inputMethod.commit();
+        if (activeFocus && inputMethodComposing)
+            Qt.inputMethod.commit();
         // qmllint enable missing-property
         if (edited && !inputMethodComposing) {
             edited = false;

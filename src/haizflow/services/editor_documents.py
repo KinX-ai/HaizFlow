@@ -348,7 +348,9 @@ def _published_voice_sources(video) -> tuple[dict | None, list[dict]]:
     return voice, _artifact_segments(subtitle)
 
 
-def _reconcile_media_assets(video, document: EditorDocument) -> EditorDocument:
+def _reconcile_media_assets(
+    video, document: EditorDocument, *, subtitle_segments: list[dict] | None = None,
+) -> EditorDocument:
     """Reattach persisted music and voice to an existing editor document.
 
     ``editor/document.json`` is intentionally independent from the artifact
@@ -436,7 +438,10 @@ def _reconcile_media_assets(video, document: EditorDocument) -> EditorDocument:
             else 10**9,
         )
     ]
-    current_segments = _legacy_segments(video) if source_segments and clip_outputs else []
+    current_segments = (
+        (subtitle_segments if subtitle_segments is not None else _legacy_segments(video))
+        if source_segments and clip_outputs else []
+    )
     current_by_id = {
         str(item.get("segment_id") or item.get("id") or ""): item
         for item in current_segments
@@ -632,6 +637,7 @@ def sync_subtitle_clips(video, segments: list[dict]) -> EditorDocument:
     ]
     subtitle_clips: list[EditorClip] = []
     voice_clips: list[EditorClip] = []
+    text_changed = False
     for index, raw in enumerate(segments):
         segment_id = str(raw.get("segment_id") or raw.get("id") or f"segment-{index + 1}")
         text = str(raw.get("text") or "")
@@ -671,6 +677,7 @@ def sync_subtitle_clips(video, segments: list[dict]) -> EditorDocument:
                 enabled=False,
             )
         if previous_text != text:
+            text_changed = True
             voice.enabled = False
             voice.asset_id = ""
             voice.metadata["state"] = "stale"
@@ -682,6 +689,11 @@ def sync_subtitle_clips(video, segments: list[dict]) -> EditorDocument:
         voice_clips.append(voice)
 
     changed.clips = retained + subtitle_clips + voice_clips
+    if text_changed and (getattr(video, "active_artifacts", {}) or {}).get("tts_manifest"):
+        # ensure() may reattach an Undo-compatible clip before its subtitle
+        # name is synchronized above. Reconcile after the edit as well, using
+        # the new text (not revisions alone) to revive only matching speech.
+        changed = _reconcile_media_assets(video, changed, subtitle_segments=segments)
     refresh_sequence_duration(changed)
     if changed.model_dump() == document.model_dump():
         return document

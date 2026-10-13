@@ -11,6 +11,7 @@ Rectangle {
     property bool hasVideo: false
     property bool hasOutput: false
     property bool exportEnabled: true
+    property bool exportBusy: false
     property bool hasProject: false
     property bool canUndo: false
     property bool canRedo: false
@@ -19,6 +20,9 @@ Rectangle {
     property bool resultSelected: false
     property bool comparing: false
     property real previewZoomPercent: 100
+    property string outputFormat: "keep_ratio"
+    property bool outputFormatEditable: true
+    readonly property bool compactTools: width < 1000
 
     signal undoRequested()
     signal redoRequested()
@@ -27,7 +31,9 @@ Rectangle {
     signal previewZoomOutRequested()
     signal seekRequested(real offset)
     signal resultSplitRequested()
+    signal outputFormatEdited(string value)
     signal exportRequested()
+    signal exportProgressRequested()
     signal projectFolderRequested()
     signal inputVideoRequested()
     signal videoFolderRequested()
@@ -45,31 +51,50 @@ Rectangle {
         color: Theme.divider
     }
 
-    Text {
+    RowLayout {
+        id: frameGroup
         anchors.left: parent.left
         anchors.leftMargin: Theme.space16
         anchors.verticalCenter: parent.verticalCenter
         width: Math.max(0, historyGroup.x - Theme.space16 * 2)
-        text: root.projectTitle
-        color: Theme.text
-        font.family: Theme.fontFamily
-        font.pixelSize: TypeScale.control
-        font.weight: Font.DemiBold
-        elide: Text.ElideMiddle
-        textFormat: Text.PlainText
-        Accessible.name: root.projectTitle
+        spacing: Theme.space8
+        Text {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.preferredWidth: 0
+            visible: !root.hasVideo || frameGroup.width >= 240
+            text: root.projectTitle
+            color: Theme.text
+            font.family: Theme.fontFamily
+            font.pixelSize: TypeScale.control
+            font.weight: Font.DemiBold
+            elide: Text.ElideMiddle
+            textFormat: Text.PlainText
+            Accessible.name: root.projectTitle
+        }
+        OutputFrameCombo {
+            id: frameCombo
+            objectName: "manualOutputFrameCombo"
+            visible: root.hasVideo
+            Layout.preferredWidth: implicitWidth
+            Layout.maximumWidth: implicitWidth
+            enabled: root.outputFormatEditable
+            outputFormat: root.outputFormat
+            popup.width: Math.max(frameCombo.width, 220)
+            onEdited: function(value) { root.outputFormatEdited(value); }
+        }
     }
 
     RowLayout {
         id: historyGroup
         objectName: "manualHistoryGroup"
         anchors.centerIn: parent
-        spacing: Theme.space8
+        spacing: root.compactTools ? Theme.space4 : Theme.space8
 
         StudioIconButton {
             objectName: "manualUndoButton"
             visible: root.hasVideo
-            controlSize: 40
+            controlSize: root.compactTools ? 32 : 40
             iconName: "undo"
             enabled: root.canUndo
             toolTipText: qsTr("Hoàn tác")
@@ -78,7 +103,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualRedoButton"
             visible: root.hasVideo
-            controlSize: 40
+            controlSize: root.compactTools ? 32 : 40
             iconName: "redo"
             enabled: root.canRedo
             toolTipText: qsTr("Làm lại")
@@ -99,7 +124,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualPreviewZoomOutButton"
             visible: root.hasVideo
-            controlSize: 40
+            controlSize: root.compactTools ? 32 : 40
             iconName: "zoomOut"
             enabled: root.previewZoomPercent > 50
             toolTipText: qsTr("Thu nhỏ preview")
@@ -108,7 +133,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualPreviewZoomInButton"
             visible: root.hasVideo
-            controlSize: 40
+            controlSize: root.compactTools ? 32 : 40
             iconName: "zoomIn"
             enabled: root.previewZoomPercent < 400
             toolTipText: qsTr("Phóng to preview")
@@ -126,6 +151,7 @@ Rectangle {
                 required property int modelData
                 objectName: "manualSeek" + modelData
                 visible: root.hasVideo
+                controlSize: root.compactTools ? 32 : 40
                 offsetSeconds: modelData
                 onClicked: root.seekRequested(modelData)
             }
@@ -133,7 +159,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualSplitResultButton"
             visible: root.hasVideo
-            controlSize: 40
+            controlSize: root.compactTools ? 32 : 40
             iconName: "split"
             toolTipText: qsTr("Chia đoạn tại vị trí phát (S)")
             showToolTip: true
@@ -150,11 +176,16 @@ Rectangle {
         StudioButton {
             objectName: "manualExportButton"
             visible: root.hasVideo
-            enabled: root.exportEnabled
-            text: qsTr("Xuất")
+            enabled: root.exportBusy || root.exportEnabled
+            text: root.exportBusy ? qsTr("Đang xuất") : qsTr("Xuất")
             iconName: "open"
             variant: "primary"
-            onClicked: root.exportRequested()
+            onClicked: {
+                if (root.exportBusy)
+                    root.exportProgressRequested();
+                else
+                    root.exportRequested();
+            }
         }
 
         ProjectHeaderActions {

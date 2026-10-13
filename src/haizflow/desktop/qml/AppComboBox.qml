@@ -64,8 +64,9 @@ ComboBox {
     background: Rectangle {
         radius: Theme.radiusSmall
         color: root.enabled && root.hovered ? Theme.surfaceMuted : Theme.input
-        border.width: root.visualFocus || root.popup.opened ? 2 : 1
-        border.color: root.visualFocus || root.popup.opened ? Theme.focus : Theme.outline
+        border.width: root.visualFocus ? 2 : 1
+        border.color: root.visualFocus ? Theme.controlFocus
+            : root.popup.opened || root.hovered ? Theme.outlineStrong : Theme.outline
     }
 
     popup: Popup {
@@ -76,10 +77,16 @@ ComboBox {
         height: Math.min(292, Math.max(52, voiceList.contentHeight + 12))
         padding: 6
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
-        onOpened: Qt.callLater(function() {
-            if (voiceList.currentIndex >= 0)
-                voiceList.positionViewAtIndex(voiceList.currentIndex, ListView.Contain);
-        })
+        onOpened: {
+            // ComboBox handles Up/Down/Enter itself. Keep focus on the
+            // control, not the generic Popup, including mouse-opened menus.
+            if (!root.activeFocus)
+                root.forceActiveFocus(Qt.PopupFocusReason);
+            Qt.callLater(function() {
+                if (voiceList.currentIndex >= 0)
+                    voiceList.positionViewAtIndex(voiceList.currentIndex, ListView.Contain);
+            });
+        }
 
         enter: Transition {
             NumberAnimation {

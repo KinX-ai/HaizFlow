@@ -27,11 +27,30 @@ Rectangle {
 
     function setEditorText(value) {
         commitTimer.stop();
-        subtitleText.text = String(value || "");
+        const nextText = String(value || "");
+        // Model echoes must not reinstall text: doing so resets cursor/undo
+        // and may discard a live pre-edit word even when text is unchanged.
+        if (subtitleText.text === nextText)
+            return;
+        if (subtitleText.activeFocus && subtitleText.inputMethodComposing) {
+            // qmllint disable missing-property
+            Qt.inputMethod.commit();
+            // qmllint enable missing-property
+        }
+        subtitleText.text = nextText;
     }
 
-    function commitPendingText() {
+    function commitPendingText(finishComposition = true) {
         commitTimer.stop();
+        if (subtitleText.inputMethodComposing) {
+            if (finishComposition && subtitleText.activeFocus) {
+                // qmllint disable missing-property
+                Qt.inputMethod.commit();
+                // qmllint enable missing-property
+            }
+            if (subtitleText.inputMethodComposing)
+                return;
+        }
         if (root.segment && subtitleText.text !== String(root.segment.text || ""))
             root.textCommitted(subtitleText.text);
     }
@@ -100,6 +119,7 @@ Rectangle {
 
         AppTextArea {
             id: subtitleText
+            objectName: "autoSubtitleTextInput"
             Layout.fillWidth: true
             Layout.fillHeight: true
             enabled: root.segment !== null
@@ -116,7 +136,13 @@ Rectangle {
             }
             onEditingFinished: root.commitPendingText()
             onTextChanged: {
-                if (activeFocus && root.segment && text !== String(root.segment.text || ""))
+                if (activeFocus && !inputMethodComposing && root.segment && text !== String(root.segment.text || ""))
+                    commitTimer.restart();
+            }
+            onInputMethodComposingChanged: {
+                if (inputMethodComposing)
+                    commitTimer.stop();
+                else if (activeFocus && root.segment && text !== String(root.segment.text || ""))
                     commitTimer.restart();
             }
         }
@@ -126,6 +152,6 @@ Rectangle {
         id: commitTimer
         interval: 300
         repeat: false
-        onTriggered: root.commitPendingText()
+        onTriggered: root.commitPendingText(false)
     }
 }

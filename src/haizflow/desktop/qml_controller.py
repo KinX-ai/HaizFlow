@@ -178,6 +178,7 @@ class HaizFlowController(QObject):
     watermarkStyleChanged = Signal()
     subtitleSettingsChanged = Signal()
     cropSettingsChanged = Signal()
+    outputFormatChanged = Signal()
     backgroundMusicChanged = Signal()
     backgroundMusicImportChanged = Signal()
     batchBackgroundMusicDraftReady = Signal(str)
@@ -224,6 +225,7 @@ class HaizFlowController(QObject):
     videoExportCompleted = Signal(str, str)
     exportStateChanged = Signal()
     videoExportRequested = Signal()
+    videoExportProgressRequested = Signal()
     autoProcessingRequested = Signal()
     batchProcessingRequested = Signal(bool)
     videoExportStarted = Signal()
@@ -265,6 +267,7 @@ class HaizFlowController(QObject):
         self._tts_voice = "omnivoice:female"
         self._speaker_mode = "single"
         self._enable_audio_separation = True
+        self._output_format = "keep_ratio"
         self._original_volume = 60
         self._background_music_volume = 30
         self._background_music_loop = True
@@ -307,6 +310,7 @@ class HaizFlowController(QObject):
         self.selectedVideoChanged.connect(self.previewMediaChanged.emit)
         self.selectedVideoChanged.connect(self.selectedElapsedChanged.emit)
         self._selected_project_key = ""
+        self._project_session_notices: set[tuple[str, str]] = set()
         self._device_switching = False
         self._pending_processing_device = ""
         self._model_runtime_lock = threading.Lock()
@@ -388,6 +392,11 @@ class HaizFlowController(QObject):
         self.selectedVideoChanged.connect(self.refreshManualPreviewAudio)
         self._manual_subtitles.saved.connect(self.manualSubtitleSaved)
         self._manual_subtitles.saveFailed.connect(self.manualSubtitleSaveFailed)
+        from haizflow.desktop.subtitle_voice_edit_notice import SubtitleVoiceEditNotice
+
+        self._subtitle_voice_edit_notice = SubtitleVoiceEditNotice(self._show_app_alert)
+        self._manual_subtitles.saved.connect(self._subtitle_voice_edit_saved)
+        self._manual_subtitles.saveFailed.connect(self._subtitle_voice_edit_failed)
         self._manual_subtitles.changed.connect(self.manualSubtitleDocumentChanged)
         self.selectedVideoChanged.connect(self.manualSubtitleDocumentChanged)
         self._manual_subtitles.published.connect(self._manual_subtitles_published)
@@ -1521,6 +1530,18 @@ class HaizFlowController(QObject):
     def showAppAlert(self, title: str, message: str, severity: str = "information") -> None:
         self._show_app_alert(title, message, severity)
 
+    @Slot(str, str, str, str, result=bool)
+    def showProjectSessionAlertOnce(self, notice_key: str, title: str, message: str, severity: str) -> bool:
+        if not notice_key:
+            return False
+        context = str(self._selected_project_key or self._selected_video_id or "project-setup")
+        key = (context, notice_key)
+        if key in self._project_session_notices:
+            return False
+        self._project_session_notices.add(key)
+        self._show_app_alert(title, message, severity)
+        return True
+
     @Property(int, notify=ttsProviderOptionsChanged)
     def ttsProviderIndex(self):
         for index, item in enumerate(self.ttsProviderOptions):
@@ -1659,6 +1680,18 @@ class HaizFlowController(QObject):
             if item["voice"] == self._tts_voice:
                 return index
         return 0
+
+    @Property(str, notify=outputFormatChanged)
+    def outputFormat(self):
+        return getattr(self, "_output_format", "keep_ratio")
+
+    @outputFormat.setter
+    def outputFormat(self, value):
+        if value not in {"keep_ratio", "blur_background_9_16", "tiktok_9_16_crop"}:
+            return
+        if self.outputFormat != value:
+            self._output_format = value
+            self.outputFormatChanged.emit()
 
     @Property(bool, notify=enableAudioSeparationChanged)
     def enableAudioSeparation(self):
@@ -2388,7 +2421,7 @@ class HaizFlowController(QObject):
         final_mix_source = rendered_video_source
         use_final_mix = bool(final_mix_source)
         use_separated_background = bool(not use_final_mix and separation_enabled and separated_background_source)
-        from haizflow.pipeline.render import resolve_subtitle_preview_layout
+        from haizflow.pipeline.render import effective_output_format, resolve_subtitle_preview_layout
 
         subtitle_render_layout = resolve_subtitle_preview_layout(
             ocr_region,
@@ -2423,6 +2456,9 @@ class HaizFlowController(QObject):
                 str(getattr(video, "output_format", "keep_ratio") or "keep_ratio"),
                 crop or CropSettings(), subtitle_style or SubtitleStyle(), False),
             "outputFormat": str(getattr(video, "output_format", "keep_ratio") or "keep_ratio"),
+            "liveOutputFormat": effective_output_format(
+                int(getattr(video, "video_width", 0) or 0), int(getattr(video, "video_height", 0) or 0),
+                str(getattr(video, "output_format", "keep_ratio") or "keep_ratio"), crop or CropSettings()),
             "crop": serializable_settings(crop),
             "audioSeparationEnabled": separation_enabled,
             "speakerMode": str(getattr(video, "speaker_mode", "single") or "single"),
@@ -4159,6 +4195,11 @@ class HaizFlowController(QObject):
         if (self.hasSelectedVideo and not self.videoExportBusy
                 and not self.isSelectedVideoProcessing and not self.isSelectedVideoQueued):
             self.videoExportRequested.emit()
+
+    @Slot()
+    def requestVideoExportProgress(self):
+        if self.videoExportBusy:
+            self.videoExportProgressRequested.emit()
 
     @Slot()
     def requestAutoProcessing(self):
@@ -6268,10 +6309,28 @@ class HaizFlowController(QObject):
             # The next per-segment refresh must match the clips that remain.
             ensure_narrator_anchor(video.video_id)
         self._manual_voice_refresh_enabled = self._manual_voice_refresh_enabled or had_voice
+        previous = next((item for item in self._manual_subtitles.segments
+                         if item.get("segment_id") == segment_id), None)
+        notice = self._subtitle_voice_edit_notice
+        if had_voice and previous and str(previous.get("text") or "") != text:
+            notice.prepare(
+                str(self._selected_project_key or getattr(video, "project_key", "")),
+                video.video_id, segment_id, request_id,
+            )
         accepted = self._manual_subtitles.saveText(segment_id, text, expected_revision, request_id)
+        if not accepted:
+            notice.failed(self._manual_subtitles.video_id, segment_id, request_id)
         if accepted and self._manual_voice_refresh_enabled:
             self._manual_voice_refresh_pending = True
         return accepted
+
+    @Slot(str, int, str)
+    def _subtitle_voice_edit_saved(self, segment_id, _revision, request_id):
+        self._subtitle_voice_edit_notice.saved(self._manual_subtitles.video_id, segment_id, request_id)
+
+    @Slot(str, str, str)
+    def _subtitle_voice_edit_failed(self, segment_id, request_id, _message):
+        self._subtitle_voice_edit_notice.failed(self._manual_subtitles.video_id, segment_id, request_id)
 
     @Slot(str, float, float, result=bool)
     def saveManualSubtitleTiming(self, segment_id, start, end):
@@ -6281,9 +6340,6 @@ class HaizFlowController(QObject):
     def _manual_subtitles_published(self, video_id, revision, text_changed):
         if video_id != self._selected_video_id:
             return
-        self._refresh_selected_video_snapshot()
-        self.manualToolStateChanged.emit("subtitle")
-        self.manualSubtitleDocumentChanged.emit()
         video = video_store.get_video(video_id)
         if video:
             try:
@@ -6292,6 +6348,12 @@ class HaizFlowController(QObject):
                 self._manual_preview_composition.refresh()
             except (OSError, RuntimeError, TypeError, ValueError):
                 pass
+        # Publish UI state only after subtitle/voice reconciliation. Undo
+        # creates a new document revision but can restore the recorded words.
+        self._refresh_selected_video_snapshot()
+        self.manualToolStateChanged.emit("subtitle")
+        self.manualSubtitleDocumentChanged.emit()
+        self.previewMediaChanged.emit()
 
     @Slot()
     def _refresh_manual_voice(self):
@@ -6994,7 +7056,7 @@ class HaizFlowController(QObject):
             subtitle_layout_override=manual_subtitle_layout,
             remove_original_subtitles=self._remove_original_subtitles,
             original_subtitle_removal_mode=self._original_subtitle_removal_mode,
-            output_format="keep_ratio",
+            output_format=getattr(self, "_output_format", "keep_ratio"),
             crop=self._crop_settings,
             enable_audio_separation=self._enable_audio_separation,
             original_video_volume=self._original_volume,

@@ -91,8 +91,9 @@ Item {
         background: Rectangle {
             color: displayButton.hovered ? Theme.surfaceMuted : Theme.input
             radius: Theme.radiusSmall
-            border.width: displayButton.visualFocus || languagePopup.opened ? 2 : 1
-            border.color: displayButton.visualFocus || languagePopup.opened ? Theme.focus : Theme.outline
+            border.width: displayButton.visualFocus ? 2 : 1
+            border.color: displayButton.visualFocus ? Theme.controlFocus
+                : languagePopup.opened || displayButton.hovered ? Theme.outlineStrong : Theme.outline
         }
 
         AppIcon {
@@ -111,7 +112,12 @@ Item {
             languageList.forceActiveFocus();
             event.accepted = true;
         }
-        onClicked: root.openPicker(true)
+        onClicked: {
+            if (languagePopup.visible)
+                languagePopup.close();
+            else
+                root.openPicker(true);
+        }
     }
 
     Popup {
@@ -163,7 +169,7 @@ Item {
         contentItem: ColumnLayout {
             spacing: 6
 
-            TextField {
+            AppTextField {
                 id: searchField
                 objectName: "languageSearchInput"
 
@@ -182,8 +188,9 @@ Item {
                 background: Rectangle {
                     color: searchField.hovered ? Theme.surfaceMuted : Theme.input
                     radius: Theme.radiusSmall
-                    border.width: searchField.activeFocus ? 2 : 1
-                    border.color: searchField.activeFocus ? Theme.focus : Theme.outline
+                    border.width: searchField.keyboardFocus ? 2 : 1
+                    border.color: searchField.keyboardFocus ? Theme.controlFocus
+                        : searchField.activeFocus ? Theme.outlineStrong : Theme.outline
                 }
 
                 AppIcon {

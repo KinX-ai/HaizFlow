@@ -48,10 +48,10 @@ class ProjectWorkspaceController:
         if (
             host._processing_queue.active_video_id != video.video_id
             and video.status != "processing"
-            and (video.source_language != "auto" or video.output_format != "keep_ratio")
+            and video.source_language != "auto"
         ):
             video = (
-                video_store.update_video(video.video_id, source_language="auto", output_format="keep_ratio") or video
+                video_store.update_video(video.video_id, source_language="auto") or video
             )
         host._workflow_mode = video.mode
         host._target_language = str(video.target_language or "vi")
@@ -109,6 +109,7 @@ class ProjectWorkspaceController:
                 "Updated incompatible saved TTS settings for the target language.",
             )
         host._enable_audio_separation = video.enable_audio_separation
+        host._output_format = video.output_format
         host._original_volume = video.original_video_volume
         host._background_music_volume = getattr(video, "background_music_volume", 30)
         host._background_music_loop = getattr(video, "background_music_loop", True)
@@ -185,6 +186,7 @@ class ProjectWorkspaceController:
         host.ttsVoiceOptionsChanged.emit()
         host.speakerModeChanged.emit()
         host.enableAudioSeparationChanged.emit()
+        host.outputFormatChanged.emit()
         host.originalVolumeChanged.emit()
         host.backgroundMusicVolumeChanged.emit()
         host.audioMixOptionsChanged.emit()

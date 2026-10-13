@@ -48,6 +48,7 @@ ApplicationWindow {{
     ManualEditorToolbar {{
         objectName: "toolbar"; width: parent.width; hasVideo: true
         exportEnabled: !hostWindow.processing && !hostWindow.queued && !hostWindow.exporting
+        exportBusy: hostWindow.exporting
     }}
 }}'''.encode(), QUrl())
     assert component.isReady(), [error.toString() for error in component.errors()]
@@ -57,9 +58,10 @@ ApplicationWindow {{
         toolbar = window.findChild(QObject, "toolbar")
         button = window.findChild(QObject, "manualExportButton")
         spy = QSignalSpy(toolbar.exportRequested)
+        progress_spy = QSignalSpy(toolbar.exportProgressRequested)
         geometry = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()
         assert button.isEnabled()
-        for busy in ("processing", "queued", "exporting"):
+        for busy in ("processing", "queued"):
             window.setProperty(busy, True)
             app.processEvents()
             assert not button.isEnabled()
@@ -70,8 +72,42 @@ ApplicationWindow {{
             assert button.isEnabled()
         QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, geometry)
         assert spy.count() == 1
+        window.setProperty("exporting", True)
+        window.setProperty("processing", True)
+        QTest.qWait(30)
+        assert button.isEnabled() and button.property("text") == "Đang xuất"
+        geometry = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()
+        for _ in range(2):
+            QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, geometry)
+        assert progress_spy.count() == 2 and spy.count() == 1
+        window.setProperty("exporting", False)
+        app.processEvents()
+        assert not button.isEnabled() and button.property("text") == "Xuất"
+        window.setProperty("processing", False)
+        app.processEvents()
+        assert button.isEnabled()
     finally:
         window.close()
         window.deleteLater()
         engine.deleteLater()
         app.processEvents()
+
+
+def test_export_opens_dialog_without_replacing_the_current_editor_panel():
+    source = (QML_DIR / "ManualWorkspace.qml").read_text(encoding="utf-8")
+    handler = source.split("onExportRequested: {", 1)[1].split("onProjectFolderRequested:", 1)[0]
+    assert "stageInspector.saveNow();" in handler
+    assert "AppController.requestVideoExport();" in handler
+    assert "selectedStageIndex =" not in handler and "activatePanel(" not in handler
+    restore = source.split("function restoreEditorView()", 1)[1].split("function ", 1)[0]
+    assert "Number(view.stage || 0) === 6 ? 0" in restore
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_progress_request_only_opens_existing_export_without_starting_another(busy):
+    host = SimpleNamespace(videoExportBusy=busy, videoExportProgressRequested=Mock(),
+                           videoExportRequested=Mock(), videoExportStarted=Mock())
+    HaizFlowController.requestVideoExportProgress(host)
+    assert host.videoExportProgressRequested.emit.call_count == int(busy)
+    host.videoExportRequested.emit.assert_not_called()
+    host.videoExportStarted.emit.assert_not_called()

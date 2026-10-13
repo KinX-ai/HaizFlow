@@ -34,6 +34,8 @@ Chọn model nhận dạng, model dịch và ngôn ngữ đích trong **Nhận d
 
 Whisper nhận dạng lời nói; HY-MT2 dịch trên máy; Gemini dùng dịch vụ trực tuyến với key của bạn. Chọn model phù hợp CPU/GPU đã áp dụng trong Cài đặt. Cài các gói cần dùng trong **Gói tài nguyên**; thêm Gemini key trong **API Key** khi chọn dịch bằng Gemini.
 
+Thông báo **Chi phí Gemini** chỉ xuất hiện một lần cho mỗi dự án trong một phiên app, dùng chung cho tất cả model Gemini. Đổi model hay mở lại dự án không lặp thông báo; khởi động lại app bắt đầu phiên mới. Cảnh báo thiếu API key và lỗi dịch vẫn được hiển thị khi cần.
+
 Nếu đã tách giọng, xem dòng nguồn nhận dạng để biết công cụ đang dùng track giọng hay âm thanh nguồn. Video có tiếng ồn, tiếng nhạc lớn hoặc lời nói chồng nhau cần được kiểm tra kỹ hơn.
 
 ## Chỉnh phụ đề
@@ -46,11 +48,15 @@ Phụ đề dùng font Bangers đi kèm ứng dụng, thống nhất giữa prev
 
 Xem lại bản dịch và tên riêng. Khi đổi nội dung sau khi đã tạo giọng, tạo lại những đoạn cần thiết để lời và phụ đề khớp nhau.
 
+Sau khi lưu câu đã sửa, ứng dụng nhắc tạo lại giọng một lần cho mỗi dự án trong phiên chạy hiện tại. Mở lại dự án hoặc sửa thêm câu không lặp cảnh báo; tắt rồi mở lại ứng dụng bắt đầu phiên mới. Không có cảnh báo khi chưa tạo giọng, nội dung không đổi hoặc lưu thất bại. Ứng dụng không tự chạy lại tạo giọng.
+
 ## Hình ảnh và phụ đề gốc
 
 Trong **Hình ảnh**, chọn giữ video gốc hoặc che phụ đề gốc. Nếu che, chọn **Làm mờ** hoặc **Vá nền**, kiểm tra vùng phụ đề rồi áp dụng.
 
 OCR tìm vùng chữ để che phụ đề gốc. Xem trước ở vài thời điểm và điều chỉnh vùng che theo video. Preview cập nhật sau khi xử lý để bạn xem kết quả trước khi xuất.
+
+Khi mới nhập video và chưa có vùng OCR hay vùng che đã áp dụng, timeline chưa hiển thị lớp **Vùng nhận diện** mặc định. Lớp sẽ xuất hiện khi có vùng hợp lệ. Các lớp che người dùng chủ động thêm vẫn được hiển thị để chỉnh sửa.
 
 Bấm trực tiếp vào vùng phụ đề gốc trên preview để hiện khung chỉnh. Kéo khung để đổi vị trí, kéo cạnh/góc để đổi kích thước, rồi bấm **Áp dụng**. Việc kéo chưa thay đổi kết quả đã lưu. **Khôi phục vùng nhận diện** trả về vùng OCR đã quét và áp dụng ngay.
 

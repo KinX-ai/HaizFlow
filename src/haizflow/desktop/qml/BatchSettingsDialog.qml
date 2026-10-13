@@ -22,6 +22,7 @@ FloatingToolDialog {
     property string draftTtsVoice: ""
     property string draftSpeakerMode: "single"
     property bool draftEnableAudioSeparation: true
+    property string draftOutputFormat: "keep_ratio"
     property int draftOriginalVolume: 60
     property int draftBackgroundMusicVolume: 30
     property int draftTtsVolume: 100
@@ -143,6 +144,7 @@ FloatingToolDialog {
         draftSpeakerMode = draftTtsProvider.indexOf("omnivoice") === 0 && settings.speakerMode === "multiple"
             ? "multiple" : "single"
         draftEnableAudioSeparation = settings.enableAudioSeparation !== undefined ? Boolean(settings.enableAudioSeparation) : true
+        draftOutputFormat = settings.outputFormat || "keep_ratio"
         draftOriginalVolume = Number(settings.originalVolume !== undefined ? settings.originalVolume : 60)
         draftBackgroundMusicVolume = Number(settings.backgroundMusicVolume !== undefined ? settings.backgroundMusicVolume : 30)
         draftTtsVolume = Number(settings.ttsVolume !== undefined ? settings.ttsVolume : 100)
@@ -174,6 +176,7 @@ FloatingToolDialog {
             "ttsVoice": draftTtsVoice,
             "speakerMode": draftSpeakerMode,
             "enableAudioSeparation": draftEnableAudioSeparation,
+            "outputFormat": draftOutputFormat,
             "originalVolume": draftOriginalVolume,
             "backgroundMusicVolume": draftBackgroundMusicVolume,
             "ttsVolume": draftTtsVolume,
@@ -339,6 +342,8 @@ FloatingToolDialog {
                 removeOriginalSubtitles: root.draftRemoveOriginalSubtitles
                 subtitleRemovalMode: root.draftOriginalSubtitleRemovalMode
                 enableAudioSeparation: root.draftEnableAudioSeparation
+                outputFormat: root.draftOutputFormat
+                onOutputFormatEdited: function(value) { root.draftOutputFormat = value; }
                 backgroundMusicPath: root.draftBackgroundMusicPath
                 backgroundMusicLoop: root.draftBackgroundMusicLoop
                 audioDuckingEnabled: root.draftAudioDuckingEnabled

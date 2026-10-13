@@ -22,7 +22,7 @@ AppComboBox {
         : root.selectedModel === "gemini-3.8-flash" ? 4 : 0
     onActivated: {
         if (String(root.currentValue).indexOf("gemini-") === 0)
-            AppController.showAppAlert(qsTr("Chi phí Gemini"),
+            AppController.showProjectSessionAlertOnce("gemini-cost", qsTr("Chi phí Gemini"),
                 qsTr("Có thể tính phí khi bật thanh toán. Kiểm tra Billing trong AI Studio."), "information");
         root.edited(root.currentValue);
         root.currentIndex = Qt.binding(function() {

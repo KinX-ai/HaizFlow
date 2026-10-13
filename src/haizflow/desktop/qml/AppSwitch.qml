@@ -17,7 +17,7 @@ Switch {
         radius: 10
         color: root.checked ? Theme.interactive : Theme.surfaceStrong
         border.width: root.visualFocus ? 2 : 1
-        border.color: root.visualFocus ? Theme.focus
+        border.color: root.visualFocus ? Theme.controlFocus
             : root.checked ? Theme.interactiveOutline : Theme.outlineStrong
 
         Rectangle {

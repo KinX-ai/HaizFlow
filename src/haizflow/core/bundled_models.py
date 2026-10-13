@@ -24,15 +24,18 @@ def verify_speaker(root: Path) -> Path:
 
 
 def verify_core_models(root: Path, *, required: bool) -> bool:
-    """Allow exactly the integrated speaker model; optional AI stays external."""
+    """Allow pinned integrated speaker assets; retain old Core compatibility."""
     from haizflow.update.filesystem import no_links
+    from haizflow.core.voice_profile_model import MODEL_FILE as PROFILE_FILE, verify_voice_profile
 
     no_links(root)
     files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
-    allowed = {"speaker-identification/" + MODEL_FILE}
+    allowed = {"speaker-identification/" + MODEL_FILE, "speaker-identification/" + PROFILE_FILE}
     if files - allowed:
         raise ModelIntegrityError("Unexpected model payload in Core: " + ", ".join(sorted(files - allowed)))
     if not files and not required:
         return False
     verify_speaker(root / "speaker-identification")
+    if "speaker-identification/" + PROFILE_FILE in files:
+        verify_voice_profile(root / "speaker-identification")
     return True

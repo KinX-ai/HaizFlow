@@ -36,7 +36,8 @@ Item {
     function restoreEditorView() {
         restoringView = true;
         const view = AppController.editorViewState(previewVideoId);
-        selectedStageIndex = Number(view.stage || 0);
+        // Older workspaces persisted the redundant export inspector.
+        selectedStageIndex = Number(view.stage || 0) === 6 ? 0 : Number(view.stage || 0);
         rightActivePanel = String(view.rightActive || "tasks");
         activeMonitor = String(view.monitor || "result");
         restoringView = false;
@@ -132,6 +133,15 @@ Item {
     property var ocrRegionDrafts: ({})
     property var ocrModeDrafts: ({})
     readonly property var ocrLayers: editorModel.ocrLayers || []
+    readonly property var unresolvedOcrTrackIds: ocrLayers.filter(function(layer) {
+        return layer.primary && Object.keys(layer.region || {}).length === 0;
+    }).map(function(layer) { return String(layer.track_id); })
+    readonly property var timelineEditorTracks: (editorModel.tracks || []).filter(function(track) {
+        return root.unresolvedOcrTrackIds.indexOf(String(track.track_id)) < 0;
+    })
+    readonly property var timelineEditorClips: (editorModel.clips || []).filter(function(clip) {
+        return root.unresolvedOcrTrackIds.indexOf(String(clip.track_id)) < 0;
+    })
     readonly property string selectedOcrLayerId: String(selectedEditorClip.kind || "") === "ocr"
         ? String(selectedEditorClip.clip_id) : "ocr-source-region"
     readonly property var selectedOcrLayer: ocrLayers.find(function(layer) {
@@ -635,6 +645,7 @@ Item {
             hasOutput: AppController.hasSelectedOutput
             exportEnabled: !AppController.isSelectedVideoProcessing
                 && !AppController.isSelectedVideoQueued && !AppController.videoExportBusy
+            exportBusy: AppController.videoExportBusy
             hasProject: AppController.hasOpenProject
             canUndo: AppController.canUndoEdit
             canRedo: AppController.canRedoEdit
@@ -642,6 +653,13 @@ Item {
             sourceSelected: root.editorSourceSelected
             comparing: root.comparing
             previewZoomPercent: root.previewZoomPercent
+            outputFormat: AppController.outputFormat
+            outputFormatEditable: stageInspector.editable && !stageInspector.taskQueued
+            onOutputFormatEdited: function(value) {
+                if (!manualEditorToolbar.outputFormatEditable) return;
+                AppController.outputFormat = value;
+                stageInspector.saveNow();
+            }
             onUndoRequested: AppController.undoEdit()
             onRedoRequested: AppController.redoEdit()
             onCompareToggled: root.comparing = !root.comparing
@@ -654,11 +672,10 @@ Item {
             onExportRequested: {
                 if (!manualEditorToolbar.exportEnabled)
                     return;
-                root.selectedStageIndex = 6;
-                root.activatePanel("tasks", "right");
                 stageInspector.saveNow();
                 AppController.requestVideoExport();
             }
+            onExportProgressRequested: AppController.requestVideoExportProgress()
             onProjectFolderRequested: AppController.openProjectFolder()
             onInputVideoRequested: AppController.openInputFile()
             onVideoFolderRequested: AppController.openVideoFolder()
@@ -750,6 +767,10 @@ Item {
                     inputSource: root.sourceReplacementPending ? "" : AppController.selectedInputSource
                     resultSource: root.sourceReplacementPending ? "" : root.currentResultSource
                     resultBaseSource: root.sourceReplacementPending ? "" : AppController.editorPreviewBaseSource
+                    resultOutputFormat: String(AppController.editorPreviewBaseSource).length > 0
+                        || (String(AppController.editorPreviewSource || "").length === 0 && !AppController.hasSelectedOutput)
+                        ? String(root.previewMedia.liveOutputFormat || "keep_ratio") : "keep_ratio"
+                    resultThumbnailOutputFormat: String(root.previewMedia.liveOutputFormat || "keep_ratio")
                     thumbnailSource: AppController.videoThumbnailSource
                     audioPreparationBusy: AppController.manualPreviewAudio.busy
                     previewBusy: AppController.editorPreviewBusy || audioPreparationBusy
@@ -866,9 +887,9 @@ Item {
                 }
                 segments: root.segments
                 editorTracks: AppController.hasSelectedVideo
-                    ? root.editorModel.tracks : root.emptyEditorTracks
+                    ? root.timelineEditorTracks : root.emptyEditorTracks
                 editorClips: AppController.hasSelectedVideo
-                    ? root.editorModel.clips : []
+                    ? root.timelineEditorClips : []
                 selectedClipIds: root.editorModel.selectedClipIds
                 selectedIndex: root.selectedSubtitleIndex
                 duration: Math.max(0.1, comparePreview.durationSeconds)

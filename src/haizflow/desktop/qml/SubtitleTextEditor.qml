@@ -32,7 +32,7 @@ ColumnLayout {
     spacing: 8
 
     function commitCurrentText() {
-        if (!editingId || saveStatus === "saving")
+        if (!editingId || saveStatus === "saving" || editor.inputMethodComposing)
             return;
         if (editor.text === committedText) {
             saveStatus = "saved";
@@ -53,7 +53,8 @@ ColumnLayout {
         // QInputMethod.commit is available at runtime; Qt's QML type
         // metadata exposes inputMethod only as QObject.
         // qmllint disable missing-property
-        Qt.inputMethod.commit();
+        if (editor.activeFocus && editor.inputMethodComposing)
+            Qt.inputMethod.commit();
         // qmllint enable missing-property
         Qt.callLater(root.commitCurrentText);
     }
@@ -84,9 +85,11 @@ ColumnLayout {
     onSegmentIdChanged: Qt.callLater(install)
     onRevisionChanged: if (editingId === segmentId) editingRevision = revision
     onSavedTextChanged: {
-        if (saveStatus === "saved" && editingId === segmentId) {
+        if (saveStatus === "saved" && editingId === segmentId
+                && !editor.inputMethodComposing) {
             installing = true;
-            editor.text = savedText;
+            if (editor.text !== savedText)
+                editor.text = savedText;
             committedText = savedText;
             installing = false;
         }
@@ -100,7 +103,7 @@ ColumnLayout {
         Layout.minimumHeight: root.minimumEditorHeight
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-        TextArea {
+        AppTextArea {
             id: editor
             objectName: "manualSubtitleTextInput"
             enabled: root.segmentId.length > 0
@@ -115,8 +118,9 @@ ColumnLayout {
             background: Rectangle {
                 color: Theme.input
                 radius: 4
-                border.width: 1
-                border.color: editor.activeFocus ? Theme.focus : Theme.outline
+                border.width: editor.keyboardFocus ? 2 : 1
+                border.color: editor.keyboardFocus ? Theme.controlFocus
+                    : editor.activeFocus ? Theme.outlineStrong : Theme.outline
             }
             onTextChanged: {
                 if (!root.installing) {

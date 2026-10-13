@@ -249,17 +249,28 @@ Control {
     background: Rectangle {
         color: root.hovered ? Theme.surfaceMuted : Theme.input
         radius: Theme.radiusSmall
-        border.width: root.visualFocus || voicePopup.opened ? 2 : 1
-        border.color: root.visualFocus || voicePopup.opened ? Theme.focus : Theme.outline
+        border.width: root.visualFocus ? 2 : 1
+        border.color: root.visualFocus ? Theme.controlFocus
+            : voicePopup.opened || root.hovered ? Theme.outlineStrong : Theme.outline
     }
 
-    TapHandler { enabled: root.enabled; onTapped: voicePopup.opened ? voicePopup.close() : voicePopup.open() }
+    TapHandler {
+        enabled: root.enabled
+        property bool popupWasVisibleOnPress: false
+        onPressedChanged: if (pressed) popupWasVisibleOnPress = voicePopup.visible
+        onTapped: {
+            if (popupWasVisibleOnPress || voicePopup.visible)
+                voicePopup.close()
+            else
+                voicePopup.open()
+        }
+    }
     Keys.onReturnPressed: function(event) {
-        voicePopup.opened ? voicePopup.close() : voicePopup.open()
+        voicePopup.visible ? voicePopup.close() : voicePopup.open()
         event.accepted = true
     }
     Keys.onSpacePressed: function(event) {
-        voicePopup.opened ? voicePopup.close() : voicePopup.open()
+        voicePopup.visible ? voicePopup.close() : voicePopup.open()
         event.accepted = true
     }
 
@@ -279,7 +290,8 @@ Control {
         onHeightChanged: if (visible) popupLayoutTimer.restart()
         onWidthChanged: if (visible) popupLayoutTimer.restart()
         padding: Theme.space8
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        // Keep visibility stable until the trigger has handled the release.
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnReleaseOutside
         onClosed: {
             voicePlayer.stop()
             root.requestedVoice = ""
@@ -357,7 +369,7 @@ Control {
                             : specialDelegate.hovered ? Theme.surfaceMuted : "transparent"
                         radius: Theme.radiusSmall
                         border.width: specialDelegate.visualFocus ? 1 : 0
-                        border.color: Theme.interactive
+                        border.color: Theme.controlFocus
                     }
                 }
             }

@@ -441,7 +441,11 @@ class SocialPublishController:
         self._emit_changed()
 
     def _sync_model(self) -> None:
-        self._host.tiktok_publish_items.set_items([self._model_item(item) for item in self._state.get("items") or []])
+        self._host.tiktok_publish_items.set_items([self._model_item(item) for item in self._queue_items()])
+
+    def _queue_items(self) -> list[dict]:
+        # Persistence retains insertion order; only the display is reversed.
+        return list(reversed(self._state.get("items") or []))
 
     def _model_item(self, item: dict) -> dict:
         target_platform = str(item.get("target_platform") or "tiktok")
@@ -1690,8 +1694,10 @@ class SocialPublishController:
         return True
 
     def publish_next(self, *, continue_queue: bool = False) -> bool:
-        for row, item in enumerate(self._state.get("items") or []):
-            if self._waiting_to_publish(item):
+        items = self._queue_items()
+        # Publish oldest first while passing the matching reversed UI row.
+        for row in range(len(items) - 1, -1, -1):
+            if self._waiting_to_publish(items[row]):
                 return self.publish_item(row, continue_queue=continue_queue)
         self._status = "No videos are waiting to be published."
         self._emit_changed()

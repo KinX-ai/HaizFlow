@@ -79,6 +79,7 @@ class QmlMenuTests(unittest.TestCase):
         component = QQmlComponent(engine)
         component.setData(('import QtQuick\nimport "."\nItem { id: root\n'
             'property bool selectedTaskFailed: false;'
+            'property bool exportWorking: false; property var activeExportJob: ({});'
             'property bool videoProcessing: TestController.isProcessing && !TestController.isSwitchingProcessingDevice;'
             'property bool modelStatusBusy: false; property bool selectedTaskPaused: false;'
             'property bool selectedTaskQueued: false; property string currentRoute: "settings";'
@@ -105,6 +106,68 @@ class QmlMenuTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QGuiApplication.instance() or QGuiApplication([])
+
+    def test_status_strip_tracks_independent_segment_export_and_returns_to_ready(self):
+        source = (QML_DIR / "Main.qml").read_text(encoding="utf-8")
+        exports = source.split('    readonly property var activeExportJob:', 1)[1].split(
+            '    // qmllint disable stale-property-read', 1)[0]
+        strip = source.split('        ActivityTray {', 1)[1].split('\n    Loader {', 1)[0]
+        # The trailing brace belongs to Main's layout, not the tray.
+        strip = strip.rsplit('\n    }', 1)[0]
+        engine = QQmlEngine()
+        state = QQmlPropertyMap()
+        for key, value in {
+            "videoExportBusy": False, "videoExportJobs": [], "isSelectedVideoProcessing": False,
+            "selectedStepId": "", "selectedProgress": 0, "selectedStageLabel": "",
+            "selectedFailureMessage": "", "selectedProgressDetail": "",
+        }.items():
+            state.insert(key, value)
+        engine.rootContext().setContextProperty("TestController", state)
+        component = QQmlComponent(engine)
+        component.setData(('import QtQuick\nimport QtQuick.Layouts\nimport "."\nItem { id: root; width: 1000; height: 40;'
+            'readonly property var activeExportJob:' + exports
+            + 'property bool selectedTaskFailed: false; property bool videoProcessing: false;'
+            'property bool selectedTaskPaused: false; property bool selectedTaskQueued: false;'
+            'property bool selectedProgressMeasured: true;'
+            'Item { id: videoExportJobsDialogLoader; function invoke(method, args) {} }'
+            'ActivityTray {' + strip + '}').replace("AppController", "TestController").encode(),
+            QUrl.fromLocalFile(str(QML_DIR / "ExportStripTest.qml")))
+        self.assertTrue(component.isReady(), "\n".join(error.toString() for error in component.errors()))
+        item = component.create()
+        window = QQuickWindow()
+        item.setParentItem(window.contentItem())
+        window.resize(1000, 40)
+        window.show()
+        try:
+            tray = item.findChild(QQuickItem, "workspaceActivityTray")
+            bar = tray.findChild(QQuickItem, "activityProgressBar")
+            percent = tray.findChild(QQuickItem, "activityProgressPercent")
+            state.insert("videoExportBusy", True)
+            for status, progress in (("pending", 0), ("exporting", 1), ("exporting", 35), ("exporting", 85)):
+                state.insert("videoExportJobs", [{"videoId": "long-video", "status": status,
+                    "progress": progress, "rangeMs": [0, 240000]}])
+                self.app.processEvents()
+                self.assertEqual(tray.property("activityState"), "exporting")
+                self.assertEqual(tray.property("message"), "Đang xuất đoạn video")
+                self.assertTrue(bar.property("visible"))
+                self.assertFalse(tray.property("showDetails"))
+                self.assertEqual(bar.property("indeterminate"), status == "pending")
+                if status == "exporting":
+                    self.assertAlmostEqual(tray.property("progress"), progress / 100)
+                    self.assertEqual(percent.property("text"), f"{progress}%")
+            for status in ("done", "cancelled", "failed"):
+                state.insert("videoExportJobs", [{"videoId": "long-video", "status": status, "progress": 100}])
+                state.insert("videoExportBusy", False)
+                self.app.processEvents()
+                self.assertEqual(tray.property("activityState"), "ready")
+                self.assertFalse(bar.property("visible"))
+                self.assertFalse(tray.property("showDetails"))
+        finally:
+            window.close()
+            item.deleteLater()
+            window.deleteLater()
+            engine.deleteLater()
+            self.app.processEvents()
 
     def test_auto_commands_match_initial_running_and_restart_states(self):
         engine = QQmlEngine()
@@ -227,6 +290,12 @@ ApplicationWindow {{
             self.assertEqual(proxy.query, "a")
             QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, center)
             button_center = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()
+            QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, button_center)
+            QTest.qWait(30)
+            self.assertTrue(menu.property("visible"))
+            QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, button_center)
+            QTest.qWait(180)
+            self.assertFalse(menu.property("visible"))
             QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, button_center)
             QTest.qWait(30)
             self.assertTrue(menu.property("visible"))
@@ -1385,7 +1454,8 @@ ApplicationWindow {{
         language_picker = (QML_DIR / "SearchableLanguageCombo.qml").read_text(encoding="utf-8")
         self.assertIn("focusPolicy: Qt.TabFocus", combo)
         self.assertIn("contentItem: ColumnLayout", language_picker)
-        self.assertIn("onClicked: root.openPicker(true)", language_picker)
+        self.assertIn("if (languagePopup.visible)", language_picker)
+        self.assertIn("root.openPicker(true);", language_picker)
         self.assertNotIn("property bool userEditing", language_picker)
 
     def test_processing_projects_can_import_from_download_projects(self):
@@ -1458,7 +1528,7 @@ ApplicationWindow {{
         self.assertIn("property real anchorX", help_popover)
         self.assertIn("parent.width - width - Theme.space8", help_popover)
         self.assertIn("parent.height - Theme.space8", help_popover)
-        self.assertIn("Popup.CloseOnEscape | Popup.CloseOnPressOutside", help_popover)
+        self.assertIn("Popup.CloseOnEscape | Popup.CloseOnReleaseOutside", help_popover)
         self.assertIn('qsTr("Đóng")', help_popover)
         self.assertNotIn("Maximize", help_label)
 

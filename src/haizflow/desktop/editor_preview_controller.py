@@ -550,6 +550,15 @@ class EditorPreviewController:
             # Version the proxy cache when its encoding contract changes.
             "preview_encoding": "layered-full-timeline-sdr-yuv420p-v5",
         }
+        from haizflow.pipeline.render import effective_output_format
+
+        settings["output_format"] = effective_output_format(
+            int(getattr(video, "video_width", 0) or 0), int(getattr(video, "video_height", 0) or 0),
+            settings["output_format"], settings["crop"])
+        if settings["output_format"] == "blur_background_9_16":
+            # Version only portrait pixels. Other visual/audio/OCR caches
+            # must not be rebuilt when the portrait compositor changes.
+            settings["preview_encoding"] += "-portrait-background-v2"
         if getattr(video, "project_type", "single") == "manual":
             from haizflow.services import editor_documents
 
@@ -562,6 +571,9 @@ class EditorPreviewController:
         if getattr(video, "project_type", "single") == "manual" and hasattr(self._host, "manualPreviewAudio"):
             settings["independent_manual_preview"] = True
             settings["preview_encoding"] = "manual-base-pcm-libass-watermark-overlay-v3"
+            # Canvas framing is a live QML layer. Keep the treated source
+            # proxy/cache independent of output aspect, like captions/audio.
+            settings["output_format"] = "keep_ratio"
             fingerprint_settings = self._base_visual_cache_payload(settings)
         if not settings["remove_original_subtitles"]:
             fingerprint_settings.update(

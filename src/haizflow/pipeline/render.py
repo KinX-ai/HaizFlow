@@ -901,6 +901,24 @@ def _crop_geometry(width: int, height: int, crop: CropSettings) -> tuple[float, 
     return (width - cropped_width) * x_factor, (height - cropped_height) * y_factor, cropped_width, cropped_height
 
 
+def effective_output_format(source_width: int, source_height: int, output_format: str,
+                            crop: CropSettings | dict) -> str:
+    """Already-portrait inputs keep their resolution and avoid canvas effects.
+
+    Resolve per video, not per batch: a shared portrait preference must not
+    resize/crop a portrait source or modify the next landscape item's choice.
+    Explicit source crops still apply, and may themselves require reframing.
+    """
+    if output_format not in {"blur_background_9_16", "tiktok_9_16_crop"}:
+        return output_format
+    if source_width <= 0 or source_height <= 0:
+        return output_format
+    if isinstance(crop, dict):
+        crop = CropSettings.model_validate(crop)
+    _x, _y, width, height = _crop_geometry(source_width, source_height, crop)
+    return "keep_ratio" if abs(width * 16 - height * 9) < 0.0001 else output_format
+
+
 def _output_subtitle_region_layout(
     region: dict | None,
     source_width: int,
@@ -959,6 +977,7 @@ def map_subtitle_region_to_output_percent(
     proxy, then burns translated captions into cached chunks. Percentages keep
     the caption box stable across the proxy's uniform resolution reduction.
     """
+    output_format = effective_output_format(source_width, source_height, output_format, crop)
     _crop_x, _crop_y, cropped_width, cropped_height = _crop_geometry(
         source_width,
         source_height,
@@ -1081,6 +1100,7 @@ def resolve_subtitle_preview_layout(
         return {}
     if not isinstance(crop, CropSettings):
         crop = CropSettings(**dict(crop or {}))
+    output_format = effective_output_format(source_width, source_height, output_format, crop)
     if not isinstance(subtitle_style, SubtitleStyle):
         subtitle_style = SubtitleStyle(**dict(subtitle_style or {}))
     else:
@@ -1551,6 +1571,10 @@ def render_video(
         raise RuntimeError("Final render requires a non-empty subtitle file.")
     video_temp_dir = os.path.dirname(os.path.abspath(srt_path))
     source_width, source_height = get_video_dimensions(video_path)
+    requested_format = output_format
+    output_format = effective_output_format(source_width, source_height, output_format, crop)
+    if output_format != requested_format:
+        log_to_video(video_id, f"Source already has 9:16 framing; preserving {source_width}x{source_height} without portrait resize, crop or background.", component="RENDER")
     working_scale = ""
     if (compatibility_preview and preview_source_scale and output_format == "keep_ratio"
             and not watermark_text and not watermark_image_path and not watermark_video_path
@@ -1743,13 +1767,17 @@ def render_video(
             input_label = "[source_without_original]"
         source = f"{input_label}{prefix + ',' if prefix else ''}split[base][fg]"
         vf_filter = (
-            f"{removal_prefix}{source};[base]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=15:3[bg];"
-            f"[fg]scale=1080:1920:force_original_aspect_ratio=decrease[front];[bg][front]overlay=(W-w)/2:(H-h)/2,{ass_filter}"
+            # Blur only a quarter-resolution background, then enlarge it.
+            # The foreground remains full quality and keeps every source edge.
+            f"{removal_prefix}{source};[base]scale=270:480:force_original_aspect_ratio=increase,"
+            f"crop=270:480,setsar=1,boxblur=4:3,scale=1080:1920[bg];"
+            f"[fg]scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"setsar=1[front];[bg][front]overlay=(W-w)/2:(H-h)/2:shortest=1,{ass_filter}"
             f"{',' + watermark_filter if watermark_filter else ''}[outv]"
         )
     else:
         if output_format == "tiktok_9_16_crop":
-            filters.extend(["scale=1080:1920:force_original_aspect_ratio=increase", "crop=1080:1920"])
+            filters.extend(["scale=1080:1920:force_original_aspect_ratio=increase", "crop=1080:1920", "setsar=1"])
         filters.append(ass_filter)
         if watermark_filter:
             filters.append(watermark_filter)

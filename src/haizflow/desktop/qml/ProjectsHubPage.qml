@@ -74,7 +74,7 @@ Item {
                 variant: "primary"
                 text: qsTr("Dự án mới")
                 iconName: "add"
-                onClicked: newProjectMenu.open()
+                onClicked: newProjectMenu.visible ? newProjectMenu.close() : newProjectMenu.open()
 
                 Menu {
                     id: newProjectMenu

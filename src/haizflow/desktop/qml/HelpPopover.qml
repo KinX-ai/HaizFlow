@@ -10,13 +10,20 @@ Button {
 
     property string helpText: ""
     property string accessibleLabel: qsTr("Trợ giúp")
+    property bool popupWasVisibleOnPress: false
 
     implicitWidth: 22
     implicitHeight: 22
     padding: 0
     focusPolicy: Qt.TabFocus
     Accessible.name: accessibleLabel
-    onClicked: root.openHelp()
+    onPressed: popupWasVisibleOnPress = helpPopup.visible
+    onClicked: {
+        if (popupWasVisibleOnPress || helpPopup.visible)
+            helpPopup.close();
+        else
+            root.openHelp();
+    }
 
     function updateHelpAnchor() {
         const overlay = Overlay.overlay;
@@ -47,7 +54,7 @@ Button {
         radius: Theme.radiusSmall
         color: root.hovered || helpPopup.opened ? Theme.surfaceMuted : "transparent"
         border.width: root.visualFocus ? 2 : 1
-        border.color: root.visualFocus ? Theme.focus : Theme.outline
+        border.color: root.visualFocus ? Theme.controlFocus : Theme.outline
     }
 
     Popup {
@@ -73,7 +80,7 @@ Button {
             return Math.max(Theme.space8, anchorY - height - Theme.space4)
         }
         padding: Theme.space12
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnReleaseOutside
         onAboutToShow: root.updateHelpAnchor()
 
         contentItem: ColumnLayout {

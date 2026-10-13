@@ -47,16 +47,25 @@ Rectangle {
         }
 
         StudioIconButton {
+            objectName: "trackMenuButton"
+            property bool menuWasOpenOnPress: false
             visible: root.menuAvailable
             controlSize: 28
             iconName: !root.trackVisible ? "hide"
                 : root.muted || root.secondaryMuted ? "muted" : "more"
-            onClicked: trackMenu.popup()
+            onPressed: menuWasOpenOnPress = trackMenu.visible
+            onClicked: {
+                if (menuWasOpenOnPress || trackMenu.visible)
+                    trackMenu.close();
+                else
+                    trackMenu.popup();
+            }
         }
     }
 
     TopBarPopupMenu {
         id: trackMenu
+        objectName: "trackMenu"
         menuContentWidth: 188
 
         AppMenuItem {

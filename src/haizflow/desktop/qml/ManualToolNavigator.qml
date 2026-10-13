@@ -32,7 +32,7 @@ Item {
             radius: Theme.radiusTiny
             activeFocusOnTab: true
             border.width: activeFocus ? 1 : 0
-            border.color: Theme.focus
+            border.color: Theme.controlFocus
             Accessible.role: Accessible.Button
             Accessible.name: String(row.modelData.label || "")
             Accessible.onPressAction: root.toolSelected(row.stageIndex)

@@ -27,6 +27,7 @@ class InputMethodCommitFilter(QObject):
             QEvent.Type.TabletPress,
             QEvent.Type.TouchBegin,
             QEvent.Type.WindowDeactivate,
+            QEvent.Type.KeyPress,
         }
     )
 
@@ -55,16 +56,43 @@ class InputMethodCommitFilter(QObject):
         # Main.qml startup on Windows.
         if self._committing or event is None or event.type() not in self._COMMIT_EVENTS:
             return False
+        event_type = event.type()
+        pointer_event = event_type in {
+            QEvent.Type.MouseButtonPress, QEvent.Type.TabletPress, QEvent.Type.TouchBegin,
+        }
+        # An application filter sees the same press on the window and again on
+        # its QML recipients. Commit once, at the window, not at every recipient.
+        if pointer_event and not isinstance(watched, QQuickWindow):
+            return False
+        focused = self._focused_editor(watched)
+        if focused is None:
+            return False
+        if event_type == QEvent.Type.KeyPress and event.key() not in {
+            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+            Qt.Key.Key_Home, Qt.Key.Key_End, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+            Qt.Key.Key_Tab, Qt.Key.Key_Backtab, Qt.Key.Key_Return, Qt.Key.Key_Enter,
+        }:
+            return False
         self._committing = True
         try:
-            self._commit_callback()
-            if isinstance(watched, QQuickWindow) and event.type() in {
-                QEvent.Type.MouseButtonPress, QEvent.Type.TabletPress, QEvent.Type.TouchBegin,
-            }:
+            # Ordinary edits/backspaces and clicks on committed text must not
+            # flush the Windows text service. Qt owns that editing transaction.
+            if focused.property("inputMethodComposing"):
+                self._commit_callback()
+            if pointer_event:
                 self._dismiss_input_focus(watched, event)
         finally:
             self._committing = False
         return False
+
+    @staticmethod
+    def _focused_editor(watched: QObject | None) -> QObject | None:
+        focused = watched.activeFocusItem() if isinstance(watched, QQuickWindow) else (
+            QGuiApplication.focusObject() if QGuiApplication.instance() else None
+        )
+        if focused is None or focused.metaObject().indexOfProperty("inputMethodComposing") < 0:
+            return None
+        return focused
 
     @staticmethod
     def _dismiss_input_focus(window: QQuickWindow, event: QEvent) -> None:

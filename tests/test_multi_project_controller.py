@@ -125,7 +125,7 @@ class MultiProjectControllerTests(unittest.TestCase):
             project_directory="D:/projects",
             project_type="single",
             source_language="auto",
-            output_format="keep_ratio",
+            output_format="blur_background_9_16",
             status="pending",
             mode="A",
             target_language="vi",
@@ -148,6 +148,7 @@ class MultiProjectControllerTests(unittest.TestCase):
             ProjectWorkspaceController(host).select_video(video)
 
         self.assertEqual(host._speech_recognition_model, "turbo")
+        self.assertEqual(host._output_format, "blur_background_9_16")
         host.speechRecognitionModelChanged.emit.assert_called_once_with()
 
     def test_whisper_turbo_option_waits_for_async_hardware_probe_before_disabling_gpu(self):
@@ -307,6 +308,7 @@ class MultiProjectControllerTests(unittest.TestCase):
         preview = SimpleNamespace(invalidate=Mock())
         host = SimpleNamespace(
             _workflow_mode="review",
+            _output_format="blur_background_9_16",
             _target_language="en",
             _tts_voice="en-US-GuyNeural",
             _enable_audio_separation=True,
@@ -325,6 +327,7 @@ class MultiProjectControllerTests(unittest.TestCase):
         controller._reset_new_project_setup()
 
         self.assertEqual(host._workflow_mode, "A")
+        self.assertEqual(host._output_format, "keep_ratio")
         self.assertEqual(host._target_language, "vi")
         self.assertEqual(host._tts_provider, "omnivoice")
         self.assertEqual(host._tts_voice, "omnivoice:female")

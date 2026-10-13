@@ -102,6 +102,7 @@ Item {
                     }
 
                     IconButton {
+                        objectName: "toastCloseButton"
                         glyph: "\uE711"
                         toolTipText: qsTr("Đóng")
                         onClicked: toastModel.remove(toast.index)

@@ -34,6 +34,6 @@ Slider {
         radius: width / 2
         color: root.enabled ? Theme.text : Theme.textDisabled
         border.width: root.visualFocus ? 3 : 2
-        border.color: root.visualFocus ? Theme.focus : Theme.interactive
+        border.color: root.visualFocus ? Theme.controlFocus : Theme.interactive
     }
 }

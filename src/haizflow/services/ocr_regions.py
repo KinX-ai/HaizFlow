@@ -35,11 +35,12 @@ def source_frame_in_output(width: int, height: int, output_format: str, crop: Cr
     Keeping the unclipped affine frame lets dragging a box on a cropped preview
     round-trip back to source percentages without changing its hidden edges.
     """
-    from haizflow.pipeline.render import _crop_geometry
+    from haizflow.pipeline.render import _crop_geometry, effective_output_format
 
     if isinstance(crop, dict):
         crop = CropSettings.model_validate(crop)
     width, height = max(1, width), max(1, height)
+    output_format = effective_output_format(width, height, output_format, crop)
     crop_x, crop_y, crop_width, crop_height = _crop_geometry(width, height, crop)
     output_width = max(2, int(crop_width) // 2 * 2)
     output_height = max(2, int(crop_height) // 2 * 2)

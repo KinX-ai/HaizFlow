@@ -569,6 +569,44 @@ def test_existing_document_reattaches_compatible_published_voice(tmp_path):
     assert asset.path == str(audio)
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_subtitle_sync_restores_voice_on_undo_and_marks_redo_stale(tmp_path, legacy):
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"ID3voice")
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps([{
+        **({} if legacy else {"segment_id": "a"}),
+        "text": "Xin chào", "start": 0, "end": 1,
+    }]), encoding="utf-8")
+    video = _video(tmp_path)
+    video.active_artifacts = {"tts_manifest": "voice"}
+    voice_record = {"inputs": ["subtitle_document:original"], "resolved_outputs": {"clip_1": str(audio)}}
+    subtitle_record = {"resolved_outputs": {"segments": str(source)}}
+    document = EditorDocument(video_id=video.video_id, sequence=EditorSequence(duration_ms=1000), clips=[
+        EditorClip(clip_id="subtitle-a", track_id="subtitles", kind="subtitle",
+                   segment_id="a", name="Đã sửa", duration_ms=1000),
+        EditorClip(clip_id="voice-a", track_id="voice", kind="voice",
+                   segment_id="a", name="Đã sửa", duration_ms=1000, enabled=False, metadata={"state": "stale"}),
+    ])
+    undone = [{"segment_id": "a", "text": "Xin chào", "start": 0, "end": 1, "revision": 2}]
+    with (
+        patch.object(editor_documents, "ensure", return_value=document),
+        patch.object(editor_documents, "save", side_effect=lambda _video, doc: doc),
+        patch.object(editor_documents.manual_artifacts, "peek",
+                     side_effect=lambda _id, kind, _sig: voice_record if kind == "tts_manifest" else subtitle_record),
+    ):
+        restored = editor_documents.sync_subtitle_clips(video, undone)
+        clip = next(c for c in restored.clips if c.track_id == "voice")
+        assert clip.enabled and clip.asset_id == "voice-asset-a"
+        assert clip.metadata == {"state": "ready", "text_revision": 2}
+        assert editor_documents.asset_by_id(restored, clip.asset_id).path == str(audio)
+        with patch.object(editor_documents, "ensure", return_value=restored):
+            redo = editor_documents.sync_subtitle_clips(video, [{**undone[0], "text": "Đã sửa", "revision": 3}])
+        clip = next(c for c in redo.clips if c.track_id == "voice")
+        assert not clip.enabled and not clip.asset_id and clip.metadata["state"] == "stale"
+    assert document.clips[0].name == "Đã sửa"  # Do not mutate history snapshots.
+
+
 def test_existing_document_reattaches_idless_voice_without_reviving_edited_text(tmp_path):
     audio = tmp_path / "voice.mp3"
     audio.write_bytes(b"ID3voice")

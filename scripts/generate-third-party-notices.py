@@ -211,8 +211,12 @@ def generate(
                 "| Microsoft Fluent System Icons (curated SVG subset) | Bundled | MIT | "
                 "https://github.com/microsoft/fluentui-system-icons |",
                 "| Bangers typeface | Bundled | SIL Open Font License 1.1 | https://github.com/google/fonts |",
+                "| ECAPA voice-profile classifier, q8 ONNX | Bundled CPU acoustic preset classifier; "
+                "see ECAPA-Voice-Profile-MIT.txt | MIT | "
+                "https://huggingface.co/Alice-Sabrina-Ivy/voice-gender-classifier-onnx-q8 |",
                 "",
-                "AI engines and model files are not part of the Core artifact. Each independently "
+                "Apart from the small integrated speaker/voice-profile models, AI engines and model files "
+                "are not part of the Core artifact. Each independently "
                 "distributed resource pack carries its own inventory and applicable terms.",
                 "",
                 "The release bundles the signed upstream FFmpeg 8.1.2 source archive under "

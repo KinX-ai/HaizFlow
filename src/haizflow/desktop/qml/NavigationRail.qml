@@ -89,7 +89,7 @@ Rectangle {
                     color: root.currentSection === navItem.modelData.key ? Theme.sidebarSelected
                         : navHover.hovered ? Theme.sidebarHover : "transparent"
                     border.width: navItem.visualFocus ? 2 : 0
-                    border.color: Theme.focus
+                    border.color: Theme.controlFocus
                 }
                 Accessible.role: Accessible.Button
                 Accessible.name: modelData.label

@@ -64,6 +64,64 @@ class _Model:
 
 
 class SocialPublishControllerTests(unittest.TestCase):
+    def test_queue_newest_first_without_rewriting_persisted_insertion_order(self):
+        items = [{"id": str(index), "status": "ready"} for index in range(3)]
+        self.controller._state["items"] = items
+        with patch.object(self.controller, "_model_item", side_effect=dict):
+            self.controller._sync_model()
+            self.assertEqual([row["id"] for row in self.host.tiktok_publish_items.items], ["2", "1", "0"])
+            self.assertEqual([row["id"] for row in items], ["0", "1", "2"])
+            # The new row goes above existing/working rows on every reload.
+            items.append({"id": "3", "status": "ready"})
+            self.controller._sync_model()
+            self.assertEqual([row["id"] for row in self.host.tiktok_publish_items.items], ["3", "2", "1", "0"])
+
+    def test_publish_all_oldest_first_with_newest_first_display(self):
+        self.controller._state["items"] = [
+            {"id": "oldest-posted", "status": "published"},
+            {"id": "old", "status": "ready"}, {"id": "new", "status": "ready"},
+            {"id": "newest-posted", "status": "published"},
+        ]
+        with (
+            patch.object(self.controller, "_model_item", side_effect=dict),
+            patch.object(self.controller, "_waiting_to_publish", side_effect=lambda item: item["status"] == "ready"),
+            patch.object(self.controller, "publish_item", return_value=True) as publish,
+        ):
+            self.controller._sync_model()
+            self.assertTrue(self.controller.publish_all())
+            publish.assert_called_once_with(2, continue_queue=True)
+            self.assertEqual(self.host.tiktok_publish_items.item_at(2)["id"], "old")
+            # Automatic continuation still follows age, not the top UI row.
+            self.controller._state["items"][1]["status"] = "published"
+            self.controller._sync_model()
+            publish.reset_mock()
+            self.assertTrue(self.controller.publish_next(continue_queue=True))
+            publish.assert_called_once_with(1, continue_queue=True)
+            self.assertEqual(self.host.tiktok_publish_items.item_at(1)["id"], "new")
+            # A newly added video appears above existing ones but waits its turn.
+            self.controller._state["items"].append({"id": "latest-added", "status": "ready"})
+            self.controller._sync_model()
+            publish.reset_mock()
+            self.assertTrue(self.controller.publish_next(continue_queue=True))
+            publish.assert_called_once_with(2, continue_queue=True)
+            self.assertEqual(self.host.tiktok_publish_items.item_at(2)["id"], "new")
+
+    def test_progress_updates_keep_correct_id_after_queue_reversal(self):
+        self.controller._state["items"] = [
+            {"id": "old", "status": "uploading", "upload_progress": 0},
+            {"id": "new", "status": "ready", "upload_progress": 0},
+        ]
+        updated = {**self.controller._state["items"][0], "upload_progress": 65}
+        with (
+            patch.object(self.controller, "_model_item", side_effect=dict),
+            patch.object(tiktok_publish, "update_item", return_value=updated),
+        ):
+            self.controller._sync_model()
+            self.controller._update_item_state("old", upload_progress=65)
+        self.assertEqual(self.host.tiktok_publish_items.item_at(0)["id"], "new")
+        self.assertEqual(self.host.tiktok_publish_items.item_at(0)["upload_progress"], 0)
+        self.assertEqual(self.host.tiktok_publish_items.item_at(1)["upload_progress"], 65)
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

@@ -40,6 +40,8 @@ QtObject {
     readonly property color interactiveMuted: "#33271D"
     readonly property color interactiveOutline: "#7B5B3C"
     readonly property color focus: "#E2B47F"
+    // Neutral keyboard focus for controls; copper still marks selected content.
+    readonly property color controlFocus: "#B8B1A6"
 
     readonly property color amber: "#C29A57"
     readonly property color amberMuted: "#3B3020"

@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from haizflow.pipeline import process_video
 from haizflow.pipeline.process_video import _checkpoint_valid
+from haizflow.pipeline.tts_quality import SHORT_PHRASE_VERSION,VOICE_AUDIO_VERSION
 from haizflow.desktop.localization import QMessageBox
 from haizflow.desktop.project_commands_controller import ProjectCommandsController
 from haizflow.schemas.video import VideoConfig
@@ -301,6 +302,8 @@ class RestartCheckpointTests(unittest.TestCase):
                 process_video._file_state(""),
                 "",
                 "omnivoice-dedicated-short-anchor-or-source-speaker-r5",
+                VOICE_AUDIO_VERSION,
+                SHORT_PHRASE_VERSION,
             )
             video = SimpleNamespace(
                 video_id="video-1",

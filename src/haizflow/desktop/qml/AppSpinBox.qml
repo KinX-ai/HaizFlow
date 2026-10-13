@@ -63,6 +63,6 @@ SpinBox {
         radius: Theme.radiusSmall
         color: Theme.input
         border.width: root.visualFocus ? 2 : 1
-        border.color: root.visualFocus ? Theme.focus : Theme.outline
+        border.color: root.visualFocus ? Theme.controlFocus : Theme.outline
     }
 }

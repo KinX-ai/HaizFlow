@@ -6,6 +6,8 @@ GridLayout {
     id: root
 
     property bool editable: true
+    property string outputFormat: "keep_ratio"
+    signal outputFormatEdited(string value)
     property bool cpuOnly: false
     property bool hasSource: false
     property bool showCloneAction: false
@@ -13,8 +15,8 @@ GridLayout {
     property real availableHeight: 0
     readonly property real voiceSpacing: Math.max(Theme.space8, Math.min(Theme.space20,
         Theme.space8 + (availableHeight - 500) / 18))
-    readonly property real mediaSpacing: Math.max(6, Math.min(Theme.space16,
-        6 + (availableHeight - 500) / 24))
+    readonly property real mediaSpacing: Math.max(3, Math.min(Theme.space16,
+        3 + (availableHeight - 500) / 24))
     property string speechRecognitionModel: "small"
     property string translationModel: "q4"
     property var speechRecognitionOptions: []
@@ -213,6 +215,14 @@ GridLayout {
             }
 
             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+
+            OutputFrameSettings {
+                Layout.fillWidth: true
+                compact: true
+                editable: root.editable
+                outputFormat: root.outputFormat
+                onEdited: function(value) { root.outputFormatEdited(value); }
+            }
 
             RowLayout {
                 Layout.fillWidth: true

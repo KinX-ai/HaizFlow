@@ -29,9 +29,16 @@ RowLayout {
     }
     StudioIconButton {
         objectName: "ocrLayerMenuButton"
+        property bool menuWasOpenOnPress: false
         iconName: "more"
         enabled: root.editable && root.layers.length > 0
-        onClicked: layerMenu.popup()
+        onPressed: menuWasOpenOnPress = layerMenu.visible
+        onClicked: {
+            if (menuWasOpenOnPress || layerMenu.visible)
+                layerMenu.close();
+            else
+                layerMenu.popup();
+        }
     }
     TopBarPopupMenu {
         id: layerMenu

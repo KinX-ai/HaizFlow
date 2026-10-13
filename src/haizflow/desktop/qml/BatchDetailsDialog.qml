@@ -17,6 +17,7 @@ AppDialog {
     function fieldLabel(key) {
         switch (key) {
         case "workflowMode": case "workflow": return qsTr("Chế độ xử lý");
+        case "outputFormat": return qsTr("Khung hình đầu ra");
         case "targetLanguage": return qsTr("Ngôn ngữ đích");
         case "speechRecognitionModel": return qsTr("Model nhận dạng");
         case "translationModel": return qsTr("Model dịch");

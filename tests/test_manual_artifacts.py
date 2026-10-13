@@ -530,6 +530,32 @@ class ManualArtifactTests(unittest.TestCase):
         self.assertIsNone(manual_tools.active_voice_record(self.video))
         self.assertEqual(manual_tools.published_voice_record(self.video), voice)
 
+    def test_undo_restores_legacy_voice_after_subtitle_ids_are_assigned(self):
+        source = {"resolved_outputs": {"segments": "source"}}
+        current = {"resolved_outputs": {"segments": "current"}}
+        voice = {"inputs": ["subtitle_document:original"]}
+        self.video.active_artifacts = {"subtitle_document": "undo", "tts_manifest": "voice"}
+        original = [{"text": "Xin chào", "start": 0, "end": 1}]
+        undone = [{"segment_id": "stable-a", "text": "Xin chào", "revision": 2}]
+
+        def peek(_video_id, _kind, signature):
+            return source if signature == "original" else current
+
+        with (
+            patch.object(manual_tools, "published_voice_record", return_value=voice),
+            patch.object(manual_artifacts, "peek", side_effect=peek),
+            patch.object(manual_tools, "_record_segments", side_effect=lambda r: original if r is source else undone),
+        ):
+            self.assertEqual(manual_tools.active_voice_record(self.video), voice)
+            undone[0]["text"] = "Đã sửa"
+            self.assertIsNone(manual_tools.active_voice_record(self.video))
+            undone[0]["text"] = " Xin   chào "
+            self.assertEqual(manual_tools.active_voice_record(self.video), voice)
+            # With stable IDs on both sides, identical words on another
+            # speaker's sentence must not revive the wrong voice.
+            original[0]["segment_id"] = "other-speaker"
+            self.assertIsNone(manual_tools.active_voice_record(self.video))
+
     def test_single_speaker_narrator_anchor_is_stable_but_multiple_speakers_skip_it(self):
         self.video.tts_provider = "omnivoice"
         self.video.tts_voice = "omnivoice:male"

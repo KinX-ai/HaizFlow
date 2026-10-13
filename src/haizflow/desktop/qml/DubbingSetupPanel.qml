@@ -48,6 +48,8 @@ InspectorPanel {
             removeOriginalSubtitles: AppController.removeOriginalSubtitles
             subtitleRemovalMode: AppController.originalSubtitleRemovalMode
             enableAudioSeparation: AppController.enableAudioSeparation
+            outputFormat: AppController.outputFormat
+            onOutputFormatEdited: function(value) { AppController.outputFormat = value; root.scheduleVideoSettingsSave(); }
             backgroundMusicPath: AppController.backgroundMusicPath
             watermarkText: AppController.watermarkText
             watermarkKind: AppController.watermarkKind

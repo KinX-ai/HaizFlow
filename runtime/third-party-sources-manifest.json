@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "release_version": "0.1.10",
-  "file": "HaizFlow-0.1.10-ThirdPartySources.zip",
-  "sha256": "7ae88dac6dff975072f55b339e0585de801759d95e599d0689f11d624f28b58f",
-  "size": 831709339,
-  "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v0.1.10/HaizFlow-0.1.10-ThirdPartySources.zip",
+  "release_version": "1.0.0",
+  "file": "HaizFlow-1.0.0-ThirdPartySources.zip",
+  "sha256": "54f0c42690dcde7f1353ea0b0ae0a9da04e511d74e04824e58a0102704adfe94",
+  "size": 831712752,
+  "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v1.0.0/HaizFlow-1.0.0-ThirdPartySources.zip",
   "files": [
     {
       "file": "ffmpeg-cli/build-msys2.sh",
@@ -1735,6 +1735,16 @@
       "file": "licenses/DOUYIN-CHANNEL-IMPORT-NOTICE.md",
       "size": 2804,
       "sha256": "ebf094c86d751dd370e43532165533f281416edba67c17f84cbdf08fb266e264"
+    },
+    {
+      "file": "licenses/ECAPA-Voice-Profile-MIT.txt",
+      "size": 1547,
+      "sha256": "71522b9edd72e799a442beb5cefed114f952928632b7f844466f5d10fea6d783"
+    },
+    {
+      "file": "licenses/EDGE-TTS-NOTICE.md",
+      "size": 1258,
+      "sha256": "028b5d72be4802c755105bd005309e1f6ef9e37195a5dd760e1ada0d3fa5cf7a"
     },
     {
       "file": "licenses/FFmpeg-NOTICE.md",

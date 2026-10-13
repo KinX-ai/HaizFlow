@@ -1333,6 +1333,27 @@ def _encode_voice_reference(model, torch, reference, transcript):
         return model.create_voice_clone_prompt(ref_audio=reference, ref_text=transcript)
 
 
+def _reference_speech_level(runtime, sf, reference, fallback=0.0):
+    """Bounded scalar cache, no retained audio/tensors and no extra VRAM."""
+    from haizflow.pipeline.tts_quality import active_speech_rms
+    try:
+        path = Path(reference)
+        stat = path.stat()
+        key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+        cache = runtime.setdefault("reference_loudness_cache", {})
+        if key not in cache:
+            with sf.SoundFile(str(path)) as source:
+                samples = source.read(frames=source.samplerate * 30, dtype="float32", always_2d=True)
+                cache[key] = active_speech_rms(samples.mean(axis=1), source.samplerate)
+            while len(cache) > 4:
+                cache.pop(next(iter(cache)))
+        return cache[key] or float(fallback or 0.0)
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        # Legacy/missing reference audio must not change to an arbitrary global
+        # level. SDK ref_rms is a safe fallback when a prompt supplies one.
+        return float(fallback or 0.0)
+
+
 def _next_synthesis_batch(items: list[dict[str, Any]], offset: int, ceiling: int) -> list[dict[str, Any]]:
     """Batch adjacent similar short utterances with exactly the same voice.
 
@@ -1647,7 +1668,9 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
     # a later edit regenerates only one segment. The persistent worker retains
     # the prompt; multiple-speaker mode deliberately keeps per-segment voices.
     if speaker_mode != "multiple" and synthesis_items and any(not item.get("reference_path") for item in synthesis_items):
-        anchor_text = str(request.get("narrator_anchor_text") or "").strip()
+        from haizflow.pipeline.tts_quality import spoken_text_for_omnivoice
+        anchor_text = spoken_text_for_omnivoice(str(request.get("narrator_anchor_text") or "").strip(),
+                                               str(request.get("language") or ""))
         anchor_voice = str(synthesis_items[0].get("voice") or "omnivoice:female").strip().lower()
         anchor_instruction = OMNIVOICE_VOICE_INSTRUCTIONS.get(
             anchor_voice,
@@ -1718,6 +1741,11 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
                                           int(request.get("inference_steps") or 32))
         ceiling = _adaptive_batch_size(profile, _gpu_batch_ceiling(torch, device, maximum_batch))
         batch = _next_synthesis_batch(synthesis_items, offset, ceiling)
+        from haizflow.pipeline.tts_quality import short_phrase_generation_options, spoken_text_for_omnivoice
+        language = str(request.get("language") or "")
+        if any(bool(short_phrase_generation_options(str(entry["text"]), language))
+               != bool(short_phrase_generation_options(str(item["text"]), language)) for entry in batch):
+            batch = [item]  # Short edge/duration safeguards never alter normal sentences.
         batch_size = len(batch)
         write_status(offset, "synthesizing", current=completed)
         text = str(item.get("text") or "").strip()
@@ -1775,7 +1803,8 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
             reset_seed(item_seed if speaker_mode == "multiple" else voice_seed)
             synthesis_started = time.monotonic()
 
-            def generate(candidate, *, chunk_duration=10.0, chunk_threshold=8.0):
+            def generate(candidate, *, chunk_duration=10.0, chunk_threshold=8.0,
+                         seed_offset=0, retry_speed=None):
                 last_observation = 0.0
 
                 def observe_forward():
@@ -1786,12 +1815,20 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
                         last_observation = now
                         write_status(offset, "synthesizing", current=completed)
 
-                reset_seed(item_seed if speaker_mode == "multiple" else voice_seed)
+                reset_seed((item_seed if speaker_mode == "multiple" else voice_seed) + seed_offset)
+                policies = [short_phrase_generation_options(str(entry["text"]), str(request.get("language") or ""))
+                            for entry in candidate]
+                short_options = {}
+                if any(policies):
+                    short_options = {"fade_duration": .005, "pad_duration": .06}
+                if retry_speed is not None:
+                    short_options["speed"] = retry_speed
+                spoken = [spoken_text_for_omnivoice(str(entry["text"]).strip(), language) for entry in candidate]
                 with torch.inference_mode(), (
                     _inference_activity(model, observe_forward) if device == "cpu" else nullcontext()
                 ):
                     result = model.generate(
-                        text=[str(entry["text"]).strip() for entry in candidate] if len(candidate) > 1 else text,
+                        text=spoken if len(candidate) > 1 else spoken[0],
                         language=str(request.get("language") or "") or None,
                         instruct=None if voice_clone_prompt is not None else instruction,
                         voice_clone_prompt=voice_clone_prompt,
@@ -1799,6 +1836,7 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
                         normalize_text=False,
                         audio_chunk_duration=chunk_duration,
                         audio_chunk_threshold=chunk_threshold,
+                        **short_options,
                     )
                 # Validate inside the bounded batch operation, not afterwards:
                 # otherwise one invalid pair aborts the complete video.
@@ -1815,6 +1853,31 @@ def _worker_main(request_path: str, runtime: dict[str, Any] | None = None) -> in
             batch_size = len(batch)
             waveforms = generated
             sample_rate = int(getattr(model, "sampling_rate", None) or _SAMPLE_RATE)
+            from haizflow.pipeline.tts_quality import (
+                SpeechQualityError, validate_short_phrase_audio, validate_speech_waveform, match_quiet_speech_level,
+            )
+            for position, (entry, wave) in enumerate(zip(batch, waveforms)):
+                try:
+                    validate_speech_waveform(wave, sample_rate)
+                    validate_short_phrase_audio(wave, str(entry["text"]), str(request.get("language") or ""), sample_rate)
+                except SpeechQualityError as exc:
+                    # One isolated retry with the SAME reference/voice, a new
+                    # latent draw, and more time ONLY for measured truncation.
+                    # Tone failures must not repeat the same random token path.
+                    retry_speed = .85 if "incomplete" in str(exc) else None
+                    write_status(offset, "retrying_short_utterance", current=offset + position + 1)
+                    retry_wave = generate([entry], seed_offset=1, retry_speed=retry_speed)[0]
+                    validate_speech_waveform(retry_wave, sample_rate)
+                    validate_short_phrase_audio(retry_wave, str(entry["text"]), str(request.get("language") or ""), sample_rate)
+                    waveforms[position] = retry_wave
+                # All clearly quiet sentences need the same bounded reference
+                # calibration; the number-only policy missed ordinary short
+                # dialogue. Validation precedes gain/cache publication.
+                level_reference = (reference_path or str(entry.get("preset_reference_path") or "")
+                                   or str(request.get("preset_reference_path") or ""))
+                reference_level = _reference_speech_level(runtime, sf, level_reference,
+                                                          getattr(voice_clone_prompt, "ref_rms", 0.0))
+                waveforms[position] = match_quiet_speech_level(waveforms[position], sample_rate, reference_level)
             synthesis_seconds = time.monotonic() - synthesis_started
             if not retries:
                 _record_batch_performance(profile, len(batch), synthesis_seconds,

@@ -73,15 +73,15 @@ def test_voice_recovery_routes_cpu_and_keeps_original_checkpoint_identity(tmp_pa
     part = temp / "voice_parts" / "voice_0001.mp3"
     part.parent.mkdir()
     part.write_bytes(b"verified-voice")
-    signature = process_video._signature(process_video._file_state(str(transcript)), "omnivoice-gpu",
-        "omnivoice", "vi", "same-voice", "single", None, "",
-        "omnivoice-dedicated-short-anchor-or-source-speaker-r5")
     video = SimpleNamespace(video_id="fixture", files={"video_input": str(source),
         "final_video": str(tmp_path / "final.mp4"), "srt_output": str(temp / "subtitles.srt"),
         "voice_output": str(temp / "voice.wav"), "transcript_json": str(transcript)},
         subtitle_style=SimpleNamespace(max_chars_per_line=24), tts_voice="same-voice",
         tts_provider="omnivoice-gpu", target_language="vi", resume_step="",
-        runtime_recovery_step="creating_voice", checkpoints={"voice" if completed else "voice_partial": signature})
+        runtime_recovery_step="creating_voice", checkpoints={})
+    signature = process_video._voice_checkpoint_signature(video, process_video._file_state(str(transcript)),
+                                                         segments=json.loads(transcript.read_text(encoding="utf-8")))
+    video.checkpoints = {"voice" if completed else "voice_partial": signature}
 
     def generate(*args, **kwargs):
         assert kwargs["provider"] == "omnivoice"
@@ -168,6 +168,7 @@ def test_worker_reports_real_cpu_forwards_without_changing_audio_or_gpu_path(tmp
             mem_get_info=lambda: (0, 0), memory_reserved=lambda: 0, memory_allocated=lambda: 0),
         backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace()), cudnn=SimpleNamespace()))
     callbacks, statuses, audio = [], [], []
+    expected_audio = np.random.default_rng(42).normal(0, .1, 24000).astype(np.float32)
     handle = Mock()
     def register(callback):
         callbacks.append(callback)
@@ -176,7 +177,7 @@ def test_worker_reports_real_cpu_forwards_without_changing_audio_or_gpu_path(tmp
         for _ in range(4):
             for callback in callbacks:
                 callback(None, None, None)
-        return [np.ones(480, dtype=np.float32)]
+        return [expected_audio]
     model = SimpleNamespace(generate=generate, sampling_rate=24000, register_forward_hook=Mock(side_effect=register))
     sf = SimpleNamespace(write=lambda _path, waveform, _rate, **kw: audio.append(waveform))
     runtime = {"modules": (np, sf, torch, Mock()), "model": model, "model_key": ("model", device)}
@@ -188,7 +189,7 @@ def test_worker_reports_real_cpu_forwards_without_changing_audio_or_gpu_path(tmp
     with (patch.object(voice, "_write_status_file", side_effect=lambda _p, payload: statuses.append(payload)),
           patch.object(voice, "_cpu_voice_threads", side_effect=AssertionError("post-load resampling"))):
         assert voice._worker_main(str(path), runtime) == 0
-    assert len(audio) == 1 and np.array_equal(audio[0], np.ones(480, dtype=np.float32))
+    assert len(audio) == 1 and np.array_equal(audio[0], expected_audio)
     assert statuses[-1]["completed"] == 1
     if device == "cpu":
         assert statuses[-1]["inference_forwards"] == 4

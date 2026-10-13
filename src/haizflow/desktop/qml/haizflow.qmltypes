@@ -1709,6 +1709,14 @@ Module {
         Signal { name: "ttsProviderOptionsChanged" }
         Signal { name: "speakerModeChanged" }
         Signal { name: "enableAudioSeparationChanged" }
+        Signal { name: "outputFormatChanged" }
+        Property {
+            name: "outputFormat"
+            type: "QString"
+            read: "outputFormat"
+            write: "outputFormat"
+            notify: "outputFormatChanged"
+        }
         Signal { name: "originalVolumeChanged" }
         Signal { name: "backgroundMusicVolumeChanged" }
         Signal { name: "audioMixOptionsChanged" }
@@ -1822,6 +1830,14 @@ Module {
             Parameter { name: "a1"; type: "QString" }
             Parameter { name: "a2"; type: "QString" }
             Parameter { name: "a3"; type: "QString" }
+        }
+        Method {
+            name: "showProjectSessionAlertOnce"
+            type: "bool"
+            Parameter { name: "notice_key"; type: "QString" }
+            Parameter { name: "title"; type: "QString" }
+            Parameter { name: "message"; type: "QString" }
+            Parameter { name: "severity"; type: "QString" }
         }
         Method {
             name: "voiceOptionsForLanguageAndProvider"
@@ -2294,6 +2310,7 @@ Module {
         Property { name: "videoExportJobs"; type: "QVariantList"; read: "videoExportJobs"; notify: "exportStateChanged"; isReadonly: true }
         Signal { name: "exportStateChanged" }
         Signal { name: "videoExportRequested" }
+        Signal { name: "videoExportProgressRequested" }
         Signal { name: "autoProcessingRequested" }
         Signal { name: "videoExportStarted" }
         Signal { name: "videoExportCompleted"; Parameter { name: "a1"; type: "QString" } Parameter { name: "a2"; type: "QString" } }
@@ -2302,6 +2319,7 @@ Module {
         Method { name: "renameProject"; type: "bool"; Parameter { name: "a1"; type: "QString" } Parameter { name: "a2"; type: "QString" } }
         Method { name: "prepareProjectCreationDirectory" }
         Method { name: "requestVideoExport" }
+        Method { name: "requestVideoExportProgress" }
         Method { name: "requestAutoProcessing" }
         Method { name: "processVideoTo"; type: "bool"; Parameter { name: "a1"; type: "QString" } Parameter { name: "a2"; type: "QString" } Parameter { name: "a3"; type: "QString" } Parameter { name: "a4"; type: "bool" } }
         Method { name: "manualExportSettings"; type: "QVariantMap" }
