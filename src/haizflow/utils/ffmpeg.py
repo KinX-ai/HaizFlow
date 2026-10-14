@@ -78,6 +78,19 @@ def preferred_video_encoder(quality: int = 23) -> tuple[str, list[str]]:
         return encoder, ["-quality", "speed", "-qp_i", quality_value, "-qp_p", quality_value]
     return "libx264", ["-preset", "veryfast", "-crf", quality_value]
 
+
+def preferred_export_encoder(quality: int, *, dimensions: tuple[int, int] | None = None,
+                             duration: float = 0) -> tuple[str, list[str]]:
+    """Avoid hardware setup overhead for small, short finishing/cut passes.
+
+    Full HD, vertical HD and long segments retain hardware acceleration. This
+    does not change the main renderer or the device selected for AI models.
+    """
+    if dimensions and 0 < duration <= 30 and dimensions[0] * dimensions[1] <= 1280 * 720:
+        return "libx264", ["-preset", "veryfast", "-crf", str(max(0, min(51, int(quality))))]
+    return preferred_video_encoder(quality)
+
+
 def is_ffmpeg_available() -> bool:
     """Checks if both ffmpeg and ffprobe are available in the PATH."""
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None

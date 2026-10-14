@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -193,19 +194,40 @@ def destination_identity(destination) -> tuple | None:
 
 
 @contextmanager
-def render_lease(video):
+def render_lease(video, *, verify: bool = True):
     owner = "export-" + uuid.uuid4().hex
     signature = str((getattr(video, "active_artifacts", {}) or {}).get("export") or "")
     if not signature:
         raise FileNotFoundError("Render artifact needs to be rebuilt.")
     manual_artifacts.pin(video.video_id, "export", signature, owner)
     try:
-        record = current_render(video)
+        record = current_render(video, verify=verify)
         if not record:
             raise FileNotFoundError("Render artifact is missing, outdated or corrupted. Rebuild the result before exporting.")
         yield record
     finally:
         manual_artifacts.unpin(video.video_id, owner)
+
+
+def _export_digest(path: Path, cancel: threading.Event, progress=None) -> str:
+    """Verify the written copy without an uninterruptible large-file read."""
+    digest = hashlib.sha256()
+    size = path.stat().st_size
+    done, last = 0, 94
+    with path.open("rb") as stream:
+        while True:
+            if cancel.is_set():
+                raise ExportCancelled("Export cancelled.")
+            block = stream.read(4 * 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            done += len(block)
+            value = min(99, 95 + round(done * 4 / max(1, size)))
+            if progress and value > last:
+                progress(value)
+                last = value
+    return digest.hexdigest()
 
 
 def export_video(video, destination, *, overwrite: bool = False, cancel: threading.Event | None = None,
@@ -224,11 +246,16 @@ def export_video(video, destination, *, overwrite: bool = False, cancel: threadi
         raise FileExistsError("Destination already exists; overwrite confirmation is required.")
     confirmed_target = expected_target if expected_target is not None else destination_identity(target)
     token = cancel or threading.Event()
+    if token.is_set():
+        raise ExportCancelled("Export cancelled.")
     temporary = None
-    with render_lease(video) as record:
+    # A full copy verifies the source against its marker while streaming it.
+    # Range rendering cannot do that, so retains the verified read lease.
+    with render_lease(video, verify=range_ms is not None) as record:
         source = Path(record["resolved_outputs"]["video"])
         marker_path = manual_artifacts.artifact_directory(video.video_id, "export", record["signature"]) / "complete.json"
         expected_digest = json.loads(marker_path.read_text(encoding="utf-8"))["outputs"]["video"]["sha256"]
+        source_identity = destination_identity(source)
         size = source.stat().st_size
         if source.resolve() == target.resolve() or (target.exists() and os.path.samefile(source, target)):
             raise ValueError("Cannot export onto the internal render artifact.")
@@ -240,28 +267,39 @@ def export_video(video, destination, *, overwrite: bool = False, cancel: threadi
                 os.close(handle)
                 _render_range(source, Path(temporary), range_ms, video.export_preset, token, progress)
                 size = Path(temporary).stat().st_size
-                digest_value = manual_artifacts._sha256(Path(temporary))
+                digest_value = _export_digest(Path(temporary), token)
                 copied = size
                 expected_digest = digest_value
                 with open(temporary, "rb+") as outgoing:
                     os.fsync(outgoing.fileno())
             else:
                 digest, copied = hashlib.sha256(), 0
-                with source.open("rb") as incoming, os.fdopen(handle, "wb") as outgoing:
-                    while chunk := incoming.read(1024 * 1024):
+                last = -1
+                with os.fdopen(handle, "wb") as outgoing, source.open("rb") as incoming:
+                    while True:
                         if token.is_set():
                             raise ExportCancelled("Export cancelled.")
+                        chunk = incoming.read(4 * 1024 * 1024)
+                        if not chunk:
+                            break
                         outgoing.write(chunk)
                         digest.update(chunk)
                         copied += len(chunk)
-                        if progress:
-                            progress(min(95, round(copied * 95 / size)))
+                        value = min(95, round(copied * 95 / size))
+                        if progress and value > last:
+                            progress(value)
+                            last = value
                     outgoing.flush()
                     os.fsync(outgoing.fileno())
                 digest_value = digest.hexdigest()
-            if (copied != size or digest_value != expected_digest
-                    or manual_artifacts._sha256(Path(temporary)) != digest_value
-                    or not current_render(video)):
+            if copied != size or digest_value != expected_digest:
+                # Only damaged sources need a second read to invalidate the
+                # manifest through the normal cache-verification path.
+                current_render(video)
+                raise OSError("Export verification failed.")
+            if (_export_digest(Path(temporary), token, progress) != digest_value
+                    or destination_identity(source) != source_identity
+                    or not current_render(video, verify=False)):
                 raise OSError("Export verification failed.")
             if token.is_set():
                 raise ExportCancelled("Export cancelled.")
@@ -342,7 +380,7 @@ def _export_editor_range(video, destination, range_ms, *, overwrite, cancel, pro
             if render_revision(video_store.get_video(video.video_id) or video) != revision:
                 raise RuntimeError("Editor changed during export. Export the updated segment again.")
             size = output.stat().st_size
-            digest = manual_artifacts._sha256(output)
+            digest = _export_digest(output, token)
             with output.open("rb+") as stream:
                 os.fsync(stream.fileno())
             if token.is_set():
@@ -378,7 +416,9 @@ def _export_editor_range(video, destination, range_ms, *, overwrite, cancel, pro
 def _render_range(source, output, range_ms, preset, token, progress):
     """Frame-accurate cut of the immutable composed render; never run AI."""
     from haizflow.pipeline.render import _ffmpeg_progress_fraction
-    from haizflow.utils.ffmpeg import _binary, get_video_duration, validate_video_integrity
+    from haizflow.utils.ffmpeg import (
+        _binary, get_video_dimensions, get_video_duration, preferred_export_encoder, validate_video_integrity,
+    )
 
     start, end = range_ms
     if (not isinstance(start, int) or not isinstance(end, int) or start < 0
@@ -389,32 +429,43 @@ def _render_range(source, output, range_ms, preset, token, progress):
     duration = (end - start) / 1000
     meter = output.with_suffix(".progress")
     process = None
+    encoder, encoder_args = preferred_export_encoder(preset_settings(preset)["crf"],
+        dimensions=get_video_dimensions(str(source)), duration=duration)
+    attempts = [(encoder, encoder_args)]
+    if encoder != "libx264":
+        attempts.append(("libx264", ["-preset", "fast", "-crf", str(preset_settings(preset)["crf"])]))
+    previous = -1
     try:
-        process = subprocess.Popen([
-            _binary("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
-            "-progress", str(meter), "-stats_period", "0.2", "-nostats",
-            "-ss", str(start / 1000), "-i", str(source), "-t", str(duration),
-            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast",
-            "-crf", str(preset_settings(preset)["crf"]), "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output),
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-            errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        previous = -1
-        while True:
+        for encoder, encoder_args in attempts:
             if token.is_set():
                 raise ExportCancelled("Export cancelled.")
-            try:
-                _stdout, error = process.communicate(timeout=0.15)
-                break
-            except subprocess.TimeoutExpired:
+            # A failed hardware pass must not leave stale progress for fallback.
+            meter.unlink(missing_ok=True)
+            process = subprocess.Popen([
+                _binary("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
+                "-progress", str(meter), "-stats_period", "0.2", "-nostats",
+                "-ss", str(start / 1000), "-i", str(source), "-t", str(duration),
+                "-map", "0:v:0", "-map", "0:a:0?", "-c:v", encoder, *encoder_args, "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output),
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            while True:
+                if token.is_set():
+                    raise ExportCancelled("Export cancelled.")
                 try:
-                    fraction = _ffmpeg_progress_fraction(meter.read_text(encoding="utf-8"), duration)
-                except (OSError, UnicodeError):
-                    fraction = None
-                value = min(95, round(max(0, fraction or 0) * 95))
-                if progress and value > previous:
-                    previous = value
-                    progress(value)
+                    _stdout, error = process.communicate(timeout=0.15)
+                    break
+                except subprocess.TimeoutExpired:
+                    try:
+                        fraction = _ffmpeg_progress_fraction(meter.read_text(encoding="utf-8"), duration)
+                    except (OSError, UnicodeError):
+                        fraction = None
+                    value = min(95, round(max(0, fraction or 0) * 95))
+                    if progress and value > previous:
+                        previous = value
+                        progress(value)
+            if process.returncode == 0:
+                break
         if process.returncode:
             raise RuntimeError(f"Could not export result segment: {error[-900:]}")
         validate_video_integrity(str(output))
@@ -443,3 +494,21 @@ def output_dimensions(width: int, height: int, preset: str) -> tuple[int, int]:
         raise ValueError("Cannot determine export dimensions.")
     scale = min(1.0, limit / min(width, height), limit * 16 / 9 / max(width, height)) if limit else 1.0
     return max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
+
+
+def export_transform(width: int, height: int, preset: str, speed: float) -> dict:
+    """Final transform applied AFTER timed captions, watermark and OCR layers."""
+    speed = float(speed)
+    if not math.isfinite(speed) or not 0.25 <= speed <= 3.0:
+        raise ValueError("Output speed must be between 0.25x and 3x.")
+    target = output_dimensions(width, height, preset)
+    filters = []
+    if target != (width, height):
+        filters.append(f"scale={target[0]}:{target[1]}:flags=lanczos")
+    audio = []
+    if speed != 1.0:
+        from haizflow.pipeline.audio_timeline import _atempo_filters
+
+        filters.append(f"setpts=(PTS-STARTPTS)/{speed:.6f}")
+        audio = [f"asetpts=PTS-STARTPTS,{_atempo_filters(speed)}"]
+    return {"video": filters, "audio": audio, "dimensions": target, "speed": speed}

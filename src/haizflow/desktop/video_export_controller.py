@@ -396,7 +396,9 @@ class VideoExportController(QObject):
                 video = video_store.get_video(identifier)
                 if not video:
                     raise FileNotFoundError(identifier)
-                if not job.get("rangeMs") and not current_render(video):
+                # The copier hashes the source as it streams it and verifies
+                # the destination. Do not pre-read an entire large render here.
+                if not job.get("rangeMs") and not current_render(video, verify=False):
                     adopt_legacy_render(video)
                     video = video_store.get_video(identifier)
                 arguments = {"overwrite": job["overwrite"], "cancel": self.cancel,

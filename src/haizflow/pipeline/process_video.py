@@ -1113,14 +1113,9 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
             watermark_bold=getattr(video, "watermark_bold", True),
             watermark_italic=getattr(video, "watermark_italic", True),
             encoding_quality=int(preset_settings(getattr(video, "export_preset", "source"))["crf"]),
+            export_preset=getattr(video, "export_preset", "source"),
+            output_speed=getattr(video, "output_speed", 1.0),
         )
-        if getattr(video, "export_preset", "source") != "source" or getattr(video, "output_speed", 1.0) != 1.0:
-            from haizflow.pipeline.sequence_compiler import finish_export_resolution
-
-            scaled = str(Path(final_video).with_name("render-quality.mp4"))
-            finish_export_resolution(final_video, scaled, video.export_preset, video_id,
-                                     output_speed=getattr(video, "output_speed", 1.0))
-            os.replace(scaled, final_video)
         _mark_checkpoint(video, "render", render_signature)
 
     # Both Auto and Manual use the same immutable artifact infrastructure.

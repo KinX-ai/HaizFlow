@@ -34,6 +34,7 @@ SAMPLE_COUNT = 36
 MIN_CONFIDENCE = 0.68
 DETECTOR_CACHE_VERSION = 24
 OCR_FRAME_MAX_WIDTH = 720
+OCR_SEEK_MIN_DURATION = 300
 
 
 @dataclass(frozen=True)
@@ -430,6 +431,41 @@ def _source_state(video_path: str) -> dict[str, int | str]:
     return {"path": os.path.abspath(video_path), "size": state.st_size, "mtime_ns": state.st_mtime_ns}
 
 
+def _sample_frames(video_path: str, frame_dir: str, video_id: str, *, duration: float,
+                   source_width: int, source_height: int, ocr_width: int, ocr_height: int,
+                   sample_count: int) -> list[Path]:
+    """Sample long HD sources by bounded seeks, not whole-stream decoding."""
+    seek_samples = duration >= OCR_SEEK_MIN_DURATION and source_width * source_height >= 1280 * 720
+    if seek_samples:
+        # Midpoints match the uniform coverage of the existing fps sampler.
+        # Run serially: parallel 4K decoder contexts would waste RAM/VRAM.
+        commands = [
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss",
+             f"{min(duration - .05, (index + .5) * duration / sample_count):.6f}",
+             "-threads", "2", "-i", video_path, "-an", "-vf", f"scale={ocr_width}:{ocr_height}",
+             "-q:v", "4", "-frames:v", "1", str(Path(frame_dir) / f"frame-{index + 1:03d}.jpg")]
+            for index in range(sample_count)
+        ]
+    else:
+        commands = [[
+            "ffmpeg", "-y", "-loglevel", "error", "-i", video_path, "-an", "-vf",
+            f"fps={sample_count / duration:.8f},scale={ocr_width}:{ocr_height}", "-q:v", "4",
+            "-frames:v", str(sample_count), str(Path(frame_dir) / "frame-%03d.jpg"),
+        ]]
+    for command in commands:
+        check_cancellation(video_id)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _stdout, stderr = communicate_process(video_id, process, label="Original subtitle scan", timeout_seconds=600)
+        check_cancellation(video_id)
+        if process.returncode != 0:
+            raise RuntimeError(f"Unable to sample frames for original subtitle detection: {stderr[-500:]}")
+        # Container duration can exceed video duration (e.g. a longer audio
+        # tail). Like the old fps sampler, retain available frames instead of
+        # failing an otherwise valid video on an empty near-EOF seek.
+    return sorted(Path(frame_dir).glob("frame-*.jpg"))
+
+
 def detect_original_subtitle_region(
     video_path: str,
     temp_dir: str,
@@ -467,22 +503,10 @@ def detect_original_subtitle_region(
     if progress_callback:
         progress_callback(0, sample_count)
     with tempfile.TemporaryDirectory(prefix="subtitle-ocr-", dir=temp_dir) as frame_dir:
-        output_pattern = str(Path(frame_dir) / "frame-%03d.jpg")
-        frame_rate = sample_count / duration
-        command = [
-            "ffmpeg", "-y", "-loglevel", "error", "-i", video_path, "-an", "-vf",
-            f"fps={frame_rate:.8f},scale={ocr_width}:{ocr_height}",
-            "-q:v", "4",
-            "-frames:v", str(sample_count), output_pattern,
-        ]
-        check_cancellation(video_id)
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        _stdout, stderr = communicate_process(video_id, process, label="Original subtitle scan", timeout_seconds=600)
-        check_cancellation(video_id)
-        if process.returncode != 0:
-            raise RuntimeError(f"Unable to sample frames for original subtitle detection: {stderr[-500:]}")
+        frame_paths = _sample_frames(video_path, frame_dir, video_id, duration=duration,
+            source_width=source_width, source_height=source_height, ocr_width=ocr_width, ocr_height=ocr_height,
+            sample_count=sample_count)
         candidates: list[TextCandidate] = []
-        frame_paths = sorted(Path(frame_dir).glob("frame-*.jpg"))
         if not frame_paths:
             raise RuntimeError("Original subtitle scan did not produce any video frames.")
         update_interval = max(1, len(frame_paths) // 20)

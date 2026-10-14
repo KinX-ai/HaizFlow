@@ -599,6 +599,7 @@ class ManualWorkflowTests(unittest.TestCase):
             _normalized_tts_provider=lambda _language, provider: provider,
             _normalized_voice_for_language=lambda _language, voice, _provider: voice,
             _manual_subtitles=SimpleNamespace(
+                video_id=video.video_id,
                 segments=[{"segment_id": "segment-a", "text": "Xin chào"}]
             ),
             voiceCloneReferencePath="",

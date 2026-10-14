@@ -1307,8 +1307,8 @@ def _subtitle_patch_prefix(
     overlay_enable = f":enable='{enable_expression}'" if enable_expression else ""
     if static_mask:
         # The feather mask is constant. Evaluate its pixels once and let
-        # framesync repeat that frame, rather than running RGB geq per frame
-        # throughout a long editor proxy. Production export is unchanged.
+        # framesync repeat that frame, rather than running RGB geq per frame.
+        # Source patch pixels still follow the video on every frame.
         return (
             f"[0:v]split=2[source_clean][source_patch];"
             f"[source_patch]crop={width}:{height}:{x}:{patch_y},format=yuva420p[patch_pixels];"
@@ -1555,6 +1555,8 @@ def render_video(
     encoding_quality: int | None = None,
     preview_source_scale: bool = False,
     subtitle_timeline_offset_seconds: float | None = None,
+    export_preset: str = "source",
+    output_speed: float = 1.0,
 ):
     """Render cropped video, positioned subtitles, and dubbed audio with FFmpeg."""
     subtitle_style = SubtitleStyle.model_validate(subtitle_style.model_dump())
@@ -1592,6 +1594,12 @@ def render_video(
     else:
         subtitle_width = max(2, int(cropped_width) // 2 * 2)
         subtitle_height = max(2, int(cropped_height) // 2 * 2)
+
+    from haizflow.services.video_export import export_transform
+
+    transform = export_transform(subtitle_width, subtitle_height, export_preset, output_speed)
+    if compatibility_preview and (export_preset != "source" or transform["speed"] != 1.0):
+        raise ValueError("Export transforms must not change the editor preview clock.")
 
     ass_path = os.path.join(video_temp_dir, "positioned_subtitles.ass")
     region_layout = _output_subtitle_region_layout(
@@ -1743,7 +1751,7 @@ def render_video(
     # Keep blur/patch active for the entire clip, including its first/last frames.
     removal_prefix = _ordered_subtitle_removal_prefix(
         original_subtitle_region, source_width, source_height, removal_mode, source_start_seconds,
-        static_mask=compatibility_preview,
+        static_mask=True,
     )
     if removal_region:
         x, y, width, height = removal_region
@@ -1808,6 +1816,14 @@ def render_video(
         else:
             vf_filter = f"{working_scale},{vf_filter}"
 
+    # Keep every overlay/caption on the original clock, then transform the
+    # completed pixels in this same pass instead of re-encoding an MP4.
+    if transform["video"]:
+        # Match the old finishing encoder's decoder-friendly pixel format.
+        tail = ",".join([*transform["video"], "format=yuv420p"])
+        vf_filter = (f"{vf_filter[:-6]},{tail}[outv]" if vf_filter.endswith("[outv]")
+                     else f"{vf_filter},{tail}")
+
     if compatibility_preview:
         # Qt Multimedia on Windows can decode some AMF preview outputs with an
         # incorrect channel/range interpretation.  Editor proxies prioritize
@@ -1869,8 +1885,12 @@ def render_video(
         cmd_prefix.extend(["-filter_complex", vf_filter, "-map", "[outv]"])
     else:
         cmd_prefix.extend(["-map", "0:v:0", "-vf", vf_filter])
-    cmd_prefix.extend(["-map", "1:a:0", "-t", f"{source_duration:.6f}"])
-    audio_args = ["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2", rel_output]
+    output_duration = source_duration / transform["speed"]
+    cmd_prefix.extend(["-map", "1:a:0", "-t", f"{output_duration:.6f}"])
+    audio_args = (["-af", ",".join(transform["audio"])] if transform["audio"] else [])
+    if transform["video"]:
+        audio_args += ["-movflags", "+faststart"]
+    audio_args += ["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2", rel_output]
 
     def run_render(encoder: str, encoder_args: list[str]):
         progress_handle, progress_path = tempfile.mkstemp(
@@ -1902,7 +1922,7 @@ def render_video(
                     progress_text = Path(progress_path).read_text(encoding="utf-8")
                 except (OSError, UnicodeError):
                     continue
-                fraction = _ffmpeg_progress_fraction(progress_text, source_duration)
+                fraction = _ffmpeg_progress_fraction(progress_text, output_duration)
                 if fraction is not None and fraction - last_reported >= 0.005:
                     last_reported = fraction
                     if progress_callback:

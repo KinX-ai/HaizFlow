@@ -1,14 +1,16 @@
 """Local bounded editor export. No inference, whole render, or cache publication."""
 
+import os
 import subprocess
 import threading
 import uuid
 from fractions import Fraction
+from pathlib import Path
 
 from haizflow.pipeline import manual_tools
 from haizflow.pipeline.process_registry import cancel_video, clean_video, start_video
 from haizflow.pipeline.sequence_compiler import (
-    _run, apply_overlays, finish_export_resolution, resolved_subtitle_style,
+    _active_overlays, _run, apply_overlays, resolved_subtitle_style,
     subtitle_style_overrides, write_subtitles,
 )
 from haizflow.services import manual_artifacts, video_store
@@ -174,6 +176,8 @@ def render_segment(video, document, range_ms, output, token, progress):
         if region:
             region = {**region, "timeline_offset_seconds": start / 1000}
         quality = preset_settings(video.export_preset)["crf"]
+        has_overlays = any(clip.start_ms < end and clip.start_ms + clip.duration_ms > start
+                           for clip in _active_overlays(document))
         base = directory / "base.mp4"
         manual_tools.render_video(source, str(audio_path), str(subtitles), str(base), video.output_format,
             resolved_subtitle_style(cues, video.subtitle_style), video.crop, video.video_id, region, video.watermark_text,
@@ -182,6 +186,8 @@ def render_segment(video, document, range_ms, output, token, progress):
             subtitle_timeline_offset_seconds=start / 1000,
             original_subtitle_removal_mode=video.original_subtitle_removal_mode,
             subtitle_style_overrides=subtitle_style_overrides(cues), encoding_quality=quality,
+            export_preset="source" if has_overlays else video.export_preset,
+            output_speed=1.0 if has_overlays else getattr(video, "output_speed", 1.0),
             **{name: getattr(video, name) for name in (
                 "watermark_scale_percent", "watermark_kind", "watermark_opacity_percent", "watermark_outline_percent",
                 "watermark_font_family", "watermark_text_color", "watermark_bold", "watermark_italic")},
@@ -189,11 +195,13 @@ def render_segment(video, document, range_ms, output, token, progress):
             watermark_video_path=str(video.files.get("watermark_video") or ""),
             progress_callback=lambda value: report(20 + round(65 * value)))
         overlays = directory / "overlays.mp4"
-        apply_overlays(str(base), str(overlays), document, process_id, encoding_quality=quality,
-                       timeline_offset_seconds=start / 1000, progress_callback=lambda value: report(85 + round(7 * value)))
-        finish_export_resolution(str(overlays), str(output), video.export_preset, process_id,
-                                 output_speed=getattr(video, "output_speed", 1.0),
-                                 progress_callback=lambda value: report(92 + round(5 * value)))
+        finished = apply_overlays(str(base), str(overlays), document, process_id, encoding_quality=quality,
+                       passthrough=True,
+                       export_preset=video.export_preset, output_speed=getattr(video, "output_speed", 1.0),
+                       timeline_offset_seconds=start / 1000,
+                       progress_callback=lambda value: report(85 + round(12 * value))) if has_overlays else str(base)
+        if Path(finished) != output:
+            os.replace(finished, output)
         validate_video_integrity(str(output))
         if abs(get_video_duration(str(output)) - duration / getattr(video, "output_speed", 1.0)) > .25:
             raise RuntimeError("Exported result segment duration does not match its timeline.")

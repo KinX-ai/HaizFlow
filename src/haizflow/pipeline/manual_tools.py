@@ -2145,7 +2145,7 @@ def _ocr_region(video) -> dict[str, Any] | None:
 def _run_export(video, reporter) -> None:
     from haizflow.pipeline.sequence_compiler import (
         apply_overlays,
-        finish_export_resolution,
+        _active_overlays,
         map_source_intervals,
         materialize_source_video,
         resolved_subtitle_style,
@@ -2159,6 +2159,7 @@ def _run_export(video, reporter) -> None:
     subtitle = _current_subtitle_record(video)
     export_preset = str(getattr(video, "export_preset", "source") or "source")
     encoding_quality = int(preset_settings(export_preset)["crf"])
+    has_overlays = bool(_active_overlays(editor_document))
     audio = manual_artifacts.resolve(video.video_id, "audio_mix", audio_signature(video))
     expected = export_signature(video)
     cached = manual_artifacts.resolve(video.video_id, "export", expected)
@@ -2249,25 +2250,27 @@ def _run_export(video, reporter) -> None:
                 watermark_italic=getattr(video, "watermark_italic", True),
                 subtitle_style_overrides=subtitle_style_overrides(editor_document),
                 encoding_quality=encoding_quality,
+                export_preset="source" if has_overlays else export_preset,
+                output_speed=1.0 if has_overlays else getattr(video, "output_speed", 1.0),
             )
             reporter.update(91, "manual_export", "Đang ghép các lớp hình ảnh")
-            apply_overlays(
+            finished = apply_overlays(
                 str(staging / "video-base.mp4"),
                 str(staging / "video-overlays.mp4"),
                 editor_document,
                 video.video_id,
                 encoding_quality=encoding_quality,
-                progress_callback=lambda fraction: reporter.update(
-                    91 + round(3 * fraction), "manual_export", "Đang ghép các lớp hình ảnh"),
-            )
-            reporter.update(94, "manual_export", "Đang hoàn thiện video theo chất lượng đã chọn")
-            finish_export_resolution(
-                str(staging / "video-overlays.mp4"), str(staging / "video.mp4"),
-                export_preset, video.video_id,
+                passthrough=True,
+                export_preset=export_preset,
                 output_speed=getattr(video, "output_speed", 1.0),
                 progress_callback=lambda fraction: reporter.update(
-                    94 + round(3 * fraction), "manual_export", "Đang hoàn thiện video theo chất lượng đã chọn"),
-            )
+                    91 + round(3 * fraction), "manual_export", "Đang ghép các lớp hình ảnh"),
+            ) if has_overlays else str(staging / "video-base.mp4")
+            reporter.update(94, "manual_export", "Đang hoàn thiện video theo chất lượng đã chọn")
+            # Both paths are fresh outputs owned by this staging producer;
+            # rename instead of copying the entire MP4 for no-op passes.
+            if Path(finished) != staging / "video.mp4":
+                os.replace(finished, staging / "video.mp4")
             reporter.update(98, "manual_export_preparing", "Đang xác minh và lưu kết quả")
             cached = manual_artifacts.publish(
                 video.video_id,

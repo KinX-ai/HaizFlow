@@ -89,6 +89,35 @@ def _copy_video(input_path, output_path, process_id, progress_callback=None):
     shutil.copystat(input_path, output_path)
 
 
+def _run_video_encode(inputs: list[str], output_args: list[str], *, quality: int,
+                      process_id: str, progress_callback=None, dimensions=None, **kwargs) -> None:
+    """Use the same verified encoder selection as the main render pass."""
+    from haizflow.utils.ffmpeg import preferred_export_encoder
+
+    check_cancellation(process_id)
+    encoder, options = preferred_export_encoder(quality, dimensions=dimensions, duration=kwargs.get("duration", 0))
+    highest = 0.0
+
+    def report(fraction):
+        nonlocal highest
+        highest = max(highest, fraction)
+        if progress_callback:
+            progress_callback(highest)
+
+    def encode(name, arguments):
+        _run([*inputs, "-c:v", name, *arguments, *output_args],
+             process_id=process_id, progress_callback=report if progress_callback else None, **kwargs)
+
+    try:
+        encode(encoder, options)
+    except RuntimeError:
+        # A cancellation is never a reason to start another encoder.
+        check_cancellation(process_id)
+        if encoder == "libx264":
+            raise
+        encode("libx264", ["-preset", "veryfast", "-crf", str(quality)])
+
+
 def has_source_edits(document: EditorDocument | None) -> bool:
     if not document or len(document.sequence.edit_decisions) != 1:
         return bool(document and document.sequence.edit_decisions)
@@ -598,9 +627,26 @@ def apply_overlays(
     encoding_quality: int = 20,
     progress_callback=None,
     timeline_offset_seconds: float | None = None,
+    passthrough: bool = False,
+    export_preset: str | None = None,
+    output_speed: float = 1.0,
 ) -> str:
+    """Return the composed path; opt-in passthrough leaves the input untouched.
+
+    Private staging producers can honor the returned path and rename their
+    own work file, avoiding an unnecessary full-video copy. Other callers
+    retain the original contract of materializing output_path.
+    """
+    check_cancellation(process_id)
     overlays = _active_overlays(document)
     if not overlays:
+        if export_preset is not None:
+            return finish_export_resolution(input_path, output_path, export_preset, process_id,
+                passthrough=passthrough, output_speed=output_speed, progress_callback=progress_callback)
+        if passthrough:
+            if progress_callback:
+                progress_callback(1.0)
+            return input_path
         if os.path.abspath(input_path) != os.path.abspath(output_path):
             _copy_video(input_path, output_path, process_id, progress_callback)
         return output_path
@@ -738,7 +784,14 @@ def apply_overlays(
         stage += 1
 
     if stage == 0:
-        shutil.copy2(input_path, output_path)
+        if export_preset is not None:
+            return finish_export_resolution(input_path, output_path, export_preset, process_id,
+                passthrough=passthrough, output_speed=output_speed, progress_callback=progress_callback)
+        if passthrough:
+            if progress_callback:
+                progress_callback(1.0)
+            return input_path
+        _copy_video(input_path, output_path, process_id, progress_callback)
         return output_path
     if window_duration is not None:
         filters.append(f"[{base}]setpts=PTS-STARTPTS[window_v]")
@@ -755,50 +808,71 @@ def apply_overlays(
         )
         output_audio_map = "[aout]"
         audio_codec = "aac"
-    command = [
+    duration = window_duration if window_duration is not None else (
+        document.sequence.duration_ms / 1000 if document else get_video_duration(input_path))
+    dimensions = (reference_width, reference_height)
+    if export_preset is not None:
+        from haizflow.services.video_export import export_transform
+        from haizflow.utils.ffmpeg import get_video_dimensions
+
+        transform = export_transform(*get_video_dimensions(input_path), export_preset, output_speed)
+        dimensions = transform["dimensions"]
+        if transform["video"]:
+            filters.append(f"[{base}]{','.join(transform['video'])}[export_v]")
+            base = "export_v"
+        if transform["audio"] and (overlay_audio_labels or "audio" in get_media_stream_types(input_path)):
+            audio_input = output_audio_map if overlay_audio_labels else "[0:a]"
+            filters.append(f"{audio_input}{','.join(transform['audio'])}[export_a]")
+            output_audio_map, audio_codec = "[export_a]", "aac"
+        duration /= transform["speed"]
+    encode_inputs = [
         *inputs,
-        *(["-t", str(window_duration)] if window_duration is not None else []),
+        *(["-t", str(duration)] if window_duration is not None or export_preset is not None else []),
         "-filter_complex",
         ";".join(filters),
         "-map",
         f"[{base}]",
         "-map",
         output_audio_map,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        str(encoding_quality),
+    ]
+    output_args = [
         "-c:a",
         audio_codec,
+        *(["-b:a", "256k"] if audio_codec == "aac" else []),
         "-movflags",
         "+faststart",
         os.path.abspath(output_path),
     ]
-    _run(
-        command,
+    _run_video_encode(
+        encode_inputs, output_args, quality=encoding_quality,
+        dimensions=dimensions,
         cwd=str(Path(output_path).resolve().parent),
         process_id=process_id,
         label="Editor overlays",
         progress_callback=progress_callback,
-        duration=window_duration if window_duration is not None else (
-            document.sequence.duration_ms / 1000 if document else get_video_duration(input_path)),
+        duration=duration,
     )
     return output_path
 
 
 def finish_export_resolution(input_path: str, output_path: str, preset: str, process_id: str,
-                             *, progress_callback=None, output_speed: float = 1.0) -> str:
+                             *, progress_callback=None, output_speed: float = 1.0,
+                             passthrough: bool = False) -> str:
+    """Return input on an opted-in no-op, otherwise materialize output_path."""
     from haizflow.services.video_export import output_dimensions, preset_settings
     from haizflow.utils.ffmpeg import get_video_dimensions
 
+    check_cancellation(process_id)
     dimensions = get_video_dimensions(input_path)
     target = output_dimensions(*dimensions, preset)
     speed = float(output_speed)
     if not math.isfinite(speed) or not 0.25 <= speed <= 3.0:
         raise ValueError("Output speed must be between 0.25x and 3x.")
     if target == dimensions and speed == 1.0:
+        if passthrough:
+            if progress_callback:
+                progress_callback(1.0)
+            return input_path
         _copy_video(input_path, output_path, process_id, progress_callback)
         return output_path
     filters = []
@@ -811,12 +885,14 @@ def finish_export_resolution(input_path: str, output_path: str, preset: str, pro
         filters.append(f"setpts=(PTS-STARTPTS)/{speed:.6f}")
         audio_args = ["-af", f"asetpts=PTS-STARTPTS,{_atempo_filters(speed)}",
                       "-c:a", "aac", "-b:a", "256k"]
-    _run([
+    _run_video_encode([
         _binary("ffmpeg"), "-y", "-i", os.path.abspath(input_path),
         "-map", "0:v:0", "-map", "0:a?", "-vf", ",".join(filters),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(preset_settings(preset)["crf"]),
+    ], [
         "-pix_fmt", "yuv420p", *audio_args, "-movflags", "+faststart", os.path.abspath(output_path),
-    ], cwd=str(Path(output_path).resolve().parent), process_id=process_id, label="Export resolution",
+    ], quality=preset_settings(preset)["crf"],
+        dimensions=target,
+        cwd=str(Path(output_path).resolve().parent), process_id=process_id, label="Export resolution",
         progress_callback=progress_callback,
         duration=get_video_duration(input_path) / speed)
     return output_path
