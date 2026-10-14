@@ -55,7 +55,7 @@ def test_vieneu_clone_preview_uses_reference_without_synthesis(tmp_path, provide
     assert preview.voice_sample_path(provider, "vieneu:clone", "vi") == ""
 
 
-def test_auto_clone_action_tracks_provider_and_opens_reference_setup():
+def _check_auto_clone_action_tracks_provider_and_opens_reference_setup():
     import re
 
     from PySide6.QtCore import QObject, QUrl
@@ -95,3 +95,18 @@ def test_auto_clone_action_tracks_provider_and_opens_reference_setup():
     finally:
         root.deleteLater()
         app.processEvents()
+
+
+def test_auto_clone_action_tracks_provider_and_opens_reference_setup():
+    import subprocess
+    import sys
+
+    # A real QML singleton cannot be shared across unrelated test engines.
+    # Exercise Auto's actual form in a fresh Qt process, as the app does.
+    result = subprocess.run([sys.executable, str(Path(__file__).resolve())],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+if __name__ == "__main__":
+    _check_auto_clone_action_tracks_provider_and_opens_reference_setup()
