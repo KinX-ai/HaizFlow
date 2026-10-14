@@ -623,13 +623,13 @@ class TimelineRenderTests(unittest.TestCase):
         self.assertIsNotNone(layout)
         self.assertAlmostEqual(layout.height, 153.6)
         self.assertAlmostEqual(layout.line_height, 59.392)
-        self.assertEqual(style.font_size, 39)
+        self.assertEqual(style.font_size, 49)
 
         much_taller_layout = render.SubtitleRegionLayout(20, 400, 530, 300, 120)
         much_taller_style = render._style_for_original_subtitle_region(
             SubtitleStyle(font_size=20), much_taller_layout, 576, 1024,
         )
-        self.assertEqual(much_taller_style.font_size, 39)
+        self.assertEqual(much_taller_style.font_size, 49)
 
     def test_common_video_formats_use_stable_caption_presets(self):
         style = SubtitleStyle(font_size=12)
@@ -947,7 +947,7 @@ class TimelineRenderTests(unittest.TestCase):
 
         self.assertEqual(layout["outputWidth"], 1080)
         self.assertEqual(layout["outputHeight"], 1920)
-        self.assertEqual(layout["fontSize"], 74)
+        self.assertEqual(layout["fontSize"], 92)
         self.assertEqual(layout["positionXPercent"], 50)
         self.assertEqual(layout["positionYPercent"], 76)
         self.assertEqual(layout["layoutWidth"], 324)

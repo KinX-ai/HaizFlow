@@ -85,6 +85,7 @@ Dialog {
                 }
             }
             IconButton {
+                objectName: "appDialogCloseButton"
                 Layout.preferredWidth: 32
                 Layout.preferredHeight: 32
                 controlSize: 32

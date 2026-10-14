@@ -31,6 +31,7 @@ InspectorPanel {
             cpuOnly: AppController.cpuOnly
             hasSource: AppController.videoPath.length > 0
             showCloneAction: AppController.ttsProvider.indexOf("omnivoice") === 0
+                || AppController.ttsProvider.indexOf("vieneu") === 0
             speechRecognitionModel: AppController.speechRecognitionModel
             translationModel: AppController.translationModel
             speechRecognitionOptions: AppController.speechRecognitionModelOptions

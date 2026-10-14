@@ -75,24 +75,34 @@ Rectangle {
                 onClicked: root.requestReviewTranslation()
             }
 
-            StudioButton {
+            DeferredActionButton {
+                objectName: "autoResumeButton"
                 visible: AppController.selectedStatus === "paused" && !root.selectedQueued
-                text: qsTr("Tiếp tục")
+                readyText: qsTr("Tiếp tục")
                 iconGlyph: "\uE768"
                 variant: "secondary"
-                enabled: !AppController.videoExportBusy
-                onClicked: AppController.resumeSelectedVideo()
+                actionEnabled: !AppController.videoExportBusy
+                actionContext: ({videoId: AppController.selectedVideoId})
+                onExecute: context => {
+                    if (context && context.videoId === AppController.selectedVideoId
+                            && AppController.selectedStatus === "paused" && !root.selectedQueued)
+                        AppController.resumeSelectedVideo();
+                }
             }
 
-            StudioButton {
+            DeferredActionButton {
                 objectName: "autoProcessButton"
                 visible: !root.selectedActive
-                text: ["paused", "done", "failed", "cancelled", "awaiting_review"].indexOf(AppController.selectedStatus) >= 0
+                readyText: ["paused", "done", "failed", "cancelled", "awaiting_review"].indexOf(AppController.selectedStatus) >= 0
                     ? qsTr("Xử lý lại") : qsTr("Xử lý")
                 iconGlyph: "\uE768"
                 variant: "primary"
-                enabled: root.canProcess
-                onClicked: AppController.requestAutoProcessing()
+                actionEnabled: root.canProcess
+                actionContext: ({videoId: AppController.selectedVideoId})
+                onExecute: context => {
+                    if (context && context.videoId === AppController.selectedVideoId && root.canProcess)
+                        AppController.requestAutoProcessing();
+                }
             }
 
             StudioButton {

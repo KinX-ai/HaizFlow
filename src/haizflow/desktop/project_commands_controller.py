@@ -180,6 +180,19 @@ class ProjectCommandsController:
         refresh = getattr(host, "_refresh_selected_video_snapshot", None)
         if callable(refresh):
             refresh()
+        video = video_store.get_video(video_id)
+        if video is not None:
+            voice_values = {"tts_provider": video.tts_provider, "tts_voice": video.tts_voice}
+            for key, value in voice_values.items():
+                if hasattr(host, "_" + key):
+                    setattr(host, "_" + key, value)
+            drafts = getattr(host, "_manual_settings_drafts", {})
+            if video_id in drafts:
+                drafts[video_id] = drafts[video_id].model_copy(update=voice_values)
+            for name in ("ttsProviderChanged", "ttsVoiceChanged", "ttsProviderOptionsChanged", "ttsVoiceOptionsChanged"):
+                signal = getattr(host, name, None)
+                if signal is not None:
+                    signal.emit()
         host.selectedVideoChanged.emit()
         loader = getattr(host, "loadManualSubtitles", None)
         if callable(loader):
@@ -1542,7 +1555,7 @@ class ProjectCommandsController:
             return
         video_store.log_to_video(
             restarted.video_id,
-            f"Restart requested with the latest dubbing setup and runtime: {runtime_profile().summary}.",
+            f"Restart requested with the latest dubbing setup; processing device: {getattr(host, '_settings_processing_device', 'cpu')}.",
         )
         host._enqueue_video(restarted.video_id)
         host.selectedVideoChanged.emit()

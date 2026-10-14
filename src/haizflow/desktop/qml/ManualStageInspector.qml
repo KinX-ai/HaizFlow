@@ -346,16 +346,22 @@ InspectorPanel {
             Layout.fillWidth: true
             spacing: Theme.space8
 
-            StudioButton {
+            DeferredActionButton {
                 objectName: "manualRestartToolButton"
                 Layout.fillWidth: true
                 visible: root.taskPaused && root.taskBelongsToTool
-                text: qsTr("Chạy lại")
+                readyText: qsTr("Chạy lại")
                 variant: "secondary"
-                enabled: !root.taskQueued && !AppController.isSwitchingProcessingDevice
-                onClicked: {
+                actionEnabled: !root.taskQueued && !AppController.isSwitchingProcessingDevice
+                actionContext: ({ videoId: AppController.selectedVideoId, toolId: root.toolId,
+                    targetTool: AppController.manualTargetTool })
+                onExecute: context => {
+                    if (!context || context.videoId !== AppController.selectedVideoId
+                            || context.toolId !== root.toolId || context.targetTool !== AppController.manualTargetTool
+                            || !root.taskPaused || !root.taskBelongsToTool)
+                        return;
                     root.saveNow();
-                    AppController.restartManualTool(AppController.manualTargetTool);
+                    AppController.restartManualTool(context.targetTool);
                 }
             }
 

@@ -82,6 +82,48 @@ def test_chinese_translation_falls_back_only_after_successful_publication(provid
     assert values["files"]["manual_voice_overrides"] == {"edge": {"provider": "edge"}}
 
 
+@pytest.mark.parametrize("provider,fallback", [("vieneu", "omnivoice"), ("vieneu-gpu", "omnivoice-gpu")])
+@pytest.mark.parametrize("stored", ["zh", ""])
+def test_existing_chinese_import_dialog_projects_compatible_voice_without_mutation(provider, fallback, stored):
+    video = video_for(tts_provider=provider, tts_voice="vieneu:Hải Đăng", subtitle_language=stored,
+                      target_language="vi", files={"imported_source_srt": {"name": "legacy.srt"}})
+    original = video.model_dump()
+    host = SimpleNamespace(_project_type="manual", _selected_video=lambda: video,
+                           _manual_subtitles=SimpleNamespace(video_id=video.video_id, segments=[{"text": "你好世界"}]))
+    with patch.object(manual_tools, "published_voice_record", return_value=None):
+        configuration = HaizFlowController.manualVoiceConfiguration(host, "")
+    assert configuration["globalProvider"] == fallback and configuration["provider"] == fallback
+    assert configuration["globalVoice"] == "omnivoice:female_gentle"
+    assert video.model_dump() == original
+
+
+def test_chinese_dialog_keeps_edge_but_repairs_unsupported_segment_override():
+    video = video_for(tts_provider="edge", tts_voice="zh-CN-XiaoxiaoNeural", subtitle_language="zh",
+                     files={"manual_voice_overrides": {"cue": {"provider": "vieneu-gpu", "voice": "vieneu:Hải Đăng"}}})
+    host = SimpleNamespace(_project_type="manual", _selected_video=lambda: video)
+    with patch.object(manual_tools, "published_voice_record", return_value=None):
+        configuration = HaizFlowController.manualVoiceConfiguration(host, "cue")
+    assert configuration["globalProvider"] == "edge" and configuration["globalVoice"] == "zh-CN-XiaoxiaoNeural"
+    assert configuration["provider"] == "omnivoice-gpu"
+
+
+def test_confirming_full_manual_voice_requests_fresh_generation():
+    video = video_for(tts_provider="vieneu-gpu", tts_voice="vieneu:Hải Đăng", subtitle_language="vi")
+    host = SimpleNamespace(_project_type="manual", _selected_video=lambda: video,
+        _processing_queue=SimpleNamespace(contains=lambda _: False),
+        _normalized_tts_provider=HaizFlowController._normalized_tts_provider,
+        _normalized_voice_for_language=lambda _lang, value, _provider: value,
+        _manual_subtitles=SimpleNamespace(video_id=video.video_id, segments=[{"segment_id": "cue", "text": "Xin chào"}]),
+        voiceCloneReferencePath="", appAlertRequested=Mock(), ttsProviderChanged=Mock(), ttsVoiceChanged=Mock(),
+        ttsProviderOptionsChanged=Mock(), ttsVoiceOptionsChanged=Mock(), _apply_setup_to_video=Mock(),
+        speakerModeChanged=Mock(), _manual_voice_configuration_snapshot=HaizFlowController._manual_voice_configuration_snapshot,
+        _record_manual_voice_configuration_change=Mock(), runManualTool=Mock(return_value=True))
+    with (patch("haizflow.desktop.qml_controller.video_store.update_video"),
+          patch("haizflow.desktop.qml_controller.video_store.log_to_video")):
+        assert HaizFlowController.configureAndRunManualVoice(host, "vieneu-gpu", "vieneu:Hải Đăng", "all", "", "multiple")
+    host.runManualTool.assert_called_once_with("voice", True)
+
+
 def test_manual_speed_save_does_not_touch_preview_or_other_drafts():
     video = video_for(output_speed=1, active_artifacts={"export": "old-export", "ocr_region": "ocr", "tts_manifest": "voice"})
     current = [video]

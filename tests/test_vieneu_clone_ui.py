@@ -53,3 +53,45 @@ def test_vieneu_clone_preview_uses_reference_without_synthesis(tmp_path, provide
     with patch("haizflow.desktop.audio_preview_controller.video_store.get_video", return_value=video):
         assert Path(preview.voice_sample_path(provider, "vieneu:clone", "vi", selected_video_id="video")) == sample
     assert preview.voice_sample_path(provider, "vieneu:clone", "vi") == ""
+
+
+def test_auto_clone_action_tracks_provider_and_opens_reference_setup():
+    import re
+
+    from PySide6.QtCore import QObject, QUrl
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtQml import QQmlComponent, QQmlEngine
+    from PySide6.QtTest import QSignalSpy
+
+    app = QGuiApplication.instance() or QGuiApplication([])
+    qml_dir = Path(__file__).resolve().parents[1] / "src/haizflow/desktop/qml"
+    setup = (qml_dir / "DubbingSetupPanel.qml").read_text(encoding="utf-8")
+    expression = re.search(r"showCloneAction: (.*?)\s+speechRecognitionModel:", setup, re.S).group(1)
+    assert 'onCloneVoiceRequested: voiceCloneDialogLoader.invoke("openForSelectedVideo", [])' in setup
+    engine = QQmlEngine()
+    component = QQmlComponent(engine)
+    component.setData(('import QtQuick\nimport "."\nItem {\n'
+        'property string provider: "vieneu-gpu"\n'
+        'property var AppController: ({ttsProvider: provider})\n'
+        f'ProcessingSettingsForm {{ id: form; objectName: "form"; showCloneAction: {expression}; '
+        'ttsProvider: parent.provider; ttsVoiceOptions: [{voice: "vieneu:clone", available: true}] }\n'
+        '}').replace('AppController', 'testController').encode(),
+        QUrl.fromLocalFile(str(qml_dir / "AutoCloneRegression.qml")))
+    assert component.isReady(), "\n".join(error.toString() for error in component.errors())
+    root = component.create()
+    assert root is not None
+    try:
+        form = root.findChild(QObject, "form")
+        picker = next(child for child in form.findChildren(QObject) if child.metaObject().indexOfSignal("cloneRequested()") >= 0)
+        spy = QSignalSpy(form.cloneVoiceRequested)
+        for provider, allowed in (("vieneu-gpu", True), ("vieneu", True), ("omnivoice-gpu", True),
+                                  ("omnivoice", True), ("edge", False), ("vieneu-gpu", True)):
+            root.setProperty("provider", provider)
+            app.processEvents()
+            assert form.property("showCloneAction") == allowed
+            assert picker.property("allowVoiceClone") == allowed
+        picker.chooseOption({"voice": "vieneu:clone"})
+        assert spy.count() == 1
+    finally:
+        root.deleteLater()
+        app.processEvents()

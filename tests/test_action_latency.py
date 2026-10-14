@@ -148,3 +148,96 @@ def test_document_read_batch_reuses_only_within_one_calculation_and_detects_edit
     assert editor_documents.load("video-a") is not first
     path.unlink()
     assert editor_documents.load("video-a") is None
+
+
+def test_resume_restart_controls_share_immediate_acknowledgement_and_identity_guards():
+    for filename, names in {
+        "ManualStageInspector.qml": ["manualRestartToolButton", "manualResumeToolButton"],
+        "VideoCommandBar.qml": ["autoResumeButton", "autoProcessButton"],
+        "BatchPage.qml": ["batchResumeButton", "batchProcessButton"],
+        "ResourcePackRow.qml": ["resourceInstallResumeButton"],
+    }.items():
+        source = (QML_DIR / filename).read_text(encoding="utf-8")
+        for name in names:
+            index = source.index(f'objectName: "{name}"')
+            assert source[source.rfind("{", 0, index) - 30:index].strip().endswith("DeferredActionButton {")
+            next_button = source.find("\n            }", index)
+            body = source[index:next_button if next_button > index else len(source)]
+            assert "actionContext:" in body and "onExecute:" in body
+    manual = (QML_DIR / "ManualStageInspector.qml").read_text(encoding="utf-8")
+    assert "targetTool: AppController.manualTargetTool" in manual
+    assert "AppController.restartManualTool(context.targetTool)" in manual
+
+
+def test_restart_click_does_not_probe_the_hardware_runtime(monkeypatch):
+    from haizflow.desktop.project_commands_controller import ProjectCommandsController, QMessageBox
+    video = SimpleNamespace(video_id="restart", status="paused")
+    host = SimpleNamespace(_selected_video_id=video.video_id, _settings_owner_video_id=video.video_id,
+        _processing_queue=SimpleNamespace(contains=lambda _: False), _device_switching=False,
+        _apply_setup_to_video=Mock(), _enqueue_video=Mock(), selectedVideoChanged=SimpleNamespace(emit=Mock()))
+    controller = ProjectCommandsController(host)
+    monkeypatch.setattr(controller, "_resources_ready", lambda *_: True)
+    monkeypatch.setattr("haizflow.desktop.project_commands_controller.video_store.get_video", lambda _: video)
+    monkeypatch.setattr("haizflow.desktop.project_commands_controller.QMessageBox.question", lambda *_: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr("haizflow.desktop.project_commands_controller.video_store.prepare_video_restart", lambda _: video)
+    monkeypatch.setattr("haizflow.desktop.project_commands_controller.video_store.log_to_video", Mock())
+    monkeypatch.setattr("haizflow.desktop.project_commands_controller.runtime_profile", Mock(side_effect=AssertionError("GUI hardware probe")))
+    controller.restart_selected_video()
+    host._enqueue_video.assert_called_once_with(video.video_id)
+
+
+def test_actual_auto_resume_and_restart_buttons_acknowledge_and_drop_stale_selection():
+    from PySide6.QtCore import QObject
+    global _APP
+    _APP = QGuiApplication.instance() or QGuiApplication([])
+    engine = QQmlEngine()
+    body = (QML_DIR / "VideoCommandBar.qml").read_text(encoding="utf-8")
+    body = "\n".join(line for line in body.splitlines() if not line.startswith("import "))
+    body = body.replace("AppController", "testController")
+    component = QQmlComponent(engine)
+    component.setData((f'''import QtQuick
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import "{QML_DIR.as_uri()}"
+ApplicationWindow {{ width: 800; height: 200; visible: true
+    QtObject {{
+        id: testController; objectName: "testController"
+        property bool hasSelectedOutput: false
+        property bool hasOpenProject: true
+        property bool isSelectedVideoProcessing: false
+        property bool isSelectedVideoQueued: false
+        property bool hasSelectedVideo: true
+        property bool videoExportBusy: false
+        property string selectedVideoId: "video-a"
+        property string selectedStatus: "paused"
+        property string selectedElapsed: ""
+        property string selectedFailureTitle: ""
+        property string selectedStageLabel: ""
+        property int calls: 0
+        function resumeSelectedVideo() {{ calls++; }}
+        function requestAutoProcessing() {{ calls++; }}
+    }}
+''' + body + "\n}").encode(), QUrl())
+    assert component.isReady(), [error.toString() for error in component.errors()]
+    window = component.create()
+    assert window is not None
+    try:
+        control = window.findChild(QObject, "testController")
+        for name in ("autoResumeButton", "autoProcessButton"):
+            action = window.findChild(QObject, name)
+            before = control.property("calls")
+            QMetaObject.invokeMethod(action, "clicked", Qt.DirectConnection)
+            assert action.property("preparing") and not action.property("enabled")
+            assert control.property("calls") == before
+            QMetaObject.invokeMethod(action, "clicked", Qt.DirectConnection)
+            QTest.qWait(80)
+            assert control.property("calls") == before + 1 and not action.property("preparing")
+            QMetaObject.invokeMethod(action, "clicked", Qt.DirectConnection)
+            control.setProperty("selectedVideoId", "video-b" if control.property("selectedVideoId") == "video-a" else "video-a")
+            QTest.qWait(80)
+            assert control.property("calls") == before + 1 and not action.property("preparing")
+    finally:
+        window.close()
+        window.deleteLater()
+        engine.deleteLater()
+        _APP.processEvents()

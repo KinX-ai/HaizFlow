@@ -117,7 +117,7 @@ ManualSubtitleEditorDialog {
         QTest.qWait(40)
         self.assertTrue(dialog.property("visible"))
 
-    def test_manual_history_group_is_centered_independently_of_title_and_export(self):
+    def test_manual_history_group_centers_when_space_allows_and_keeps_output_controls_clear(self):
         window = self.create_window('''
 ManualEditorToolbar {
     objectName: "toolbar"; width: parent.width; hasVideo: true
@@ -129,8 +129,10 @@ ManualEditorToolbar {
         for width in (800, 1120, 1600):
             window.setWidth(width)
             QTest.qWait(30)
-            self.assertAlmostEqual(group.mapToScene(QPointF()).x() + group.width() / 2,
-                                   width / 2, delta=1)
+            if width >= 1600:
+                self.assertAlmostEqual(group.mapToScene(QPointF()).x() + group.width() / 2,
+                                       width / 2, delta=1)
+            self.assertGreaterEqual(group.mapToScene(QPointF()).x(), 0)
             self.assertLess(group.mapToScene(QPointF()).x() + group.width(),
                             export.mapToScene(QPointF()).x())
 

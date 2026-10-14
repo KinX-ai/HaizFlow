@@ -113,12 +113,12 @@ def test_segment_export_is_frame_accurate_atomic_and_keeps_render(composed_sourc
     record = {"signature": "render", "resolved_outputs": {"video": str(source)}}
 
     @contextmanager
-    def lease(_video):
+    def lease(_video, *, verify=True):
         yield record
 
     monkeypatch.setattr(video_export, "render_lease", lease)
     monkeypatch.setattr(video_export, "validate_export_destination", lambda value: tmp_path / str(value))
-    monkeypatch.setattr(video_export, "current_render", lambda _video: record)
+    monkeypatch.setattr(video_export, "current_render", lambda _video, **_kwargs: record)
     monkeypatch.setattr(video_export.manual_artifacts, "artifact_directory", lambda *_args: tmp_path)
     updates = Mock()
     monkeypatch.setattr(video_export.video_store, "update_video", updates)

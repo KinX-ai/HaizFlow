@@ -86,6 +86,8 @@ class NativeMediaDialogTests(unittest.TestCase):
         try:
             with (
                 patch("haizflow.desktop.project_import_controller.validate_video_url", return_value=("https://youtu.be/demo", "YouTube")),
+                patch("haizflow.desktop.project_import_controller.video_store.get_video",
+                      return_value=SimpleNamespace(video_id="video-1", manual_tool_generations={}, created_at="fixture")),
                 patch.object(controller, "_run_background_music_download") as run_download,
             ):
                 self.assertTrue(controller.import_background_music_link("https://youtu.be/demo"))

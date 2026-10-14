@@ -561,6 +561,45 @@ def published_voice_source_segments(
     return _record_segments(resolver(video.video_id, "subtitle_document", source_signature_value))
 
 
+def incremental_voice_refresh(video) -> bool:
+    """Text/timeline edits reuse speech only under its original voice setup.
+
+    Compare the published clip keys against the old subtitle revision using
+    the *requested* configuration. This also covers per-segment overrides,
+    voice reference, generation, provider, language and speaker-mode changes.
+    Inspect metadata only; audio verification remains in the worker.
+    """
+    published = published_voice_record(video, validate=False)
+    if not published:
+        # One missing audio output makes peek reject the whole manifest. Its
+        # small immutable metadata can still identify the old subtitle setup;
+        # worker-side resolve checks each audio file before it can be reused.
+        signature = _active_signature(video, "tts_manifest")
+        candidate = manual_artifacts.load_manifest(video.video_id)["artifacts"].get(
+            manual_artifacts.artifact_id("tts_manifest", signature)) if signature else None
+        if (isinstance(candidate, dict) and candidate.get("kind") == "tts_manifest"
+                and candidate.get("signature") == signature and candidate.get("status") in {"complete", "invalid"}):
+            published = candidate
+    source = published_voice_source_segments(video, published, validate=False) if published else []
+    if not source:
+        return False
+    current = _load_segments(video, validate=False)
+    if not current:
+        return False
+    requested_keys = _voice_clip_signatures(video, source)
+    expected_source = manual_artifacts.signature(requested_keys, _voice_cache_version(video, manifest=True))
+    if expected_source != str(published.get("signature") or ""):
+        return False
+
+    def rows(segments):
+        return [(str(item.get("segment_id") or item.get("id") or ""),
+                 " ".join(str(item.get("text") or "").split()),
+                 round(float(item.get("start") or 0), 3), round(float(item.get("end") or 0), 3))
+                for item in segments]
+
+    return rows(source) != rows(current)
+
+
 def active_voice_record(video, *, validate: bool = False) -> dict[str, Any] | None:
     """Return the published voice manifest that is still safe to play.
 
@@ -1489,8 +1528,10 @@ def _replace_subtitles_from_translation(video_id: str, translated_segments: str)
     language = str(getattr(video, "target_language", "vi") or "vi")
     changes = {"files": files, "subtitle_language": language}
     if language == "zh" and str(getattr(video, "tts_provider", "")).startswith("vieneu"):
-        changes.update(tts_provider="omnivoice-gpu" if video.tts_provider.endswith("-gpu") else "omnivoice",
-                       tts_voice="omnivoice:female_gentle")
+        from haizflow.services.subtitle_language import compatible_manual_voice
+
+        provider, voice = compatible_manual_voice(language, video.tts_provider, video.tts_voice)
+        changes.update(tts_provider=provider, tts_voice=voice)
         files["manual_voice_overrides"] = {
             key: value for key, value in dict(files.get("manual_voice_overrides") or {}).items()
             if isinstance(value, dict) and not str(value.get("provider", "")).startswith("vieneu")
@@ -1760,7 +1801,7 @@ def _run_voice(video, reporter) -> None:
 
     providers = {str(getattr(video, "tts_provider", "omnivoice"))}
     providers.update(str(value.get("provider") or video.tts_provider)
-                     for value in dict((video.files or {}).get("manual_voice_overrides") or {}).values() if isinstance(value, dict))
+                     for value in dict((getattr(video, "files", {}) or {}).get("manual_voice_overrides") or {}).values() if isinstance(value, dict))
     for provider in providers:
         notice = voice_notice(video, provider, segments)
         if notice:
@@ -2445,6 +2486,11 @@ def prepare_manual_rerun(video_id: str, tool_id: str, *, force: bool = False) ->
     if not video or video.project_type != "manual":
         return False
     try:
+        if tool_id == "voice" and not force and incremental_voice_refresh(video):
+            # An edited document can itself have a historical manifest hit.
+            # Do not let that hit advance the global generation and invalidate
+            # every unchanged sentence when the request is incremental.
+            return False
         cached = force
         if not force:
             kind, expected = _requested_artifact(video, tool_id, validate=False)

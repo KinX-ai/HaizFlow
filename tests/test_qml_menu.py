@@ -148,7 +148,7 @@ class QmlMenuTests(unittest.TestCase):
                     "progress": progress, "rangeMs": [0, 240000]}])
                 self.app.processEvents()
                 self.assertEqual(tray.property("activityState"), "exporting")
-                self.assertEqual(tray.property("message"), "Đang xuất đoạn video")
+                self.assertEqual(tray.property("message"), "Đang chuẩn bị xuất" if status == "pending" else "Đang hoàn thiện và lưu video")
                 self.assertTrue(bar.property("visible"))
                 self.assertFalse(tray.property("showDetails"))
                 self.assertEqual(bar.property("indeterminate"), status == "pending")
@@ -506,7 +506,7 @@ ApplicationWindow {{
                 preview.save(str(ROOT / "build" / "auto-export-preview.png"))
             center = confirm.mapToScene(QPointF(confirm.width() / 2, confirm.height() / 2))
             QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, QPoint(round(center.x()), round(center.y())))
-            self.app.processEvents()
+            QTest.qWait(90)  # Acknowledge first, then dispatch the captured export action.
             self.assertEqual(fake.property("operation"), "process")
             self.assertEqual(fake.property("chosenPreset"), "720p")
         finally:

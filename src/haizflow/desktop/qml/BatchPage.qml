@@ -153,22 +153,33 @@ Item {
                 onClicked: root.requestBatchSettings()
             }
 
-            StudioButton {
+            DeferredActionButton {
+                objectName: "batchProcessButton"
                 visible: !AppController.isBatchRunning
-                text: qsTr("Xử lý")
+                readyText: qsTr("Xử lý")
                 iconGlyph: "\uE768"
                 variant: "primary"
-                enabled: AppController.batchCount > 0 && !AppController.videoExportBusy
-                onClicked: AppController.requestBatchProcessing()
+                actionEnabled: AppController.batchCount > 0 && !AppController.videoExportBusy
+                actionContext: ({projectKey: AppController.projectKey})
+                onExecute: context => {
+                    if (context && context.projectKey === AppController.projectKey && !AppController.isBatchRunning)
+                        AppController.requestBatchProcessing();
+                }
             }
 
-            StudioButton {
+            DeferredActionButton {
+                objectName: "batchResumeButton"
                 visible: !AppController.isBatchRunning && AppController.batchPausedCount > 0
-                text: qsTr("Tiếp tục")
+                readyText: qsTr("Tiếp tục")
                 iconGlyph: "\uE768"
                 variant: "secondary"
-                enabled: !AppController.videoExportBusy
-                onClicked: AppController.resumeBatch()
+                actionEnabled: !AppController.videoExportBusy
+                actionContext: ({projectKey: AppController.projectKey})
+                onExecute: context => {
+                    if (context && context.projectKey === AppController.projectKey
+                            && !AppController.isBatchRunning && AppController.batchPausedCount > 0)
+                        AppController.resumeBatch();
+                }
             }
 
             StudioButton {

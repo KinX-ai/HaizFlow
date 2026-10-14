@@ -1022,7 +1022,9 @@ def _style_for_original_subtitle_region(
     # This keeps TikTok/Reels/Shorts consistent while retaining a slightly
     # calmer size for landscape YouTube-style video.
     reference_size = 74 if aspect_ratio >= 1.2 else 64 if aspect_ratio <= (1 / 1.2) else 66
-    font_size = max(28, min(148, round(reference_size * short_side / 1080)))
+    if region_layout:
+        reference_size = round(reference_size * 1.25)
+    font_size = max(28, min(185, round(reference_size * short_side / 1080)))
     outline = _karaoke_outline(font_size, subtitle_style.outline)
     if region_layout:
         x_percent = round(max(0, min(100, (region_layout.x + region_layout.width / 2) * 100 / output_width)))
@@ -1048,6 +1050,17 @@ def _style_for_original_subtitle_region(
             outline=outline,
         )
     )
+
+
+def _readable_auto_subtitle_layout(
+    layout: SubtitleRegionLayout, style: SubtitleStyle, output_height: int,
+) -> SubtitleRegionLayout:
+    """Let translated text outgrow a thin OCR box without enlarging its cover."""
+    row_height = min(output_height, style.font_size * 1.45 + style.outline * 2)
+    height = min(output_height, max(layout.height, row_height))
+    center_y = layout.y + layout.height / 2
+    return replace(layout, y=max(0, min(output_height - height, center_y - height / 2)),
+                   height=height, line_height=max(layout.line_height or 0, row_height))
 
 
 def _default_subtitle_layout(
@@ -1137,7 +1150,8 @@ def resolve_subtitle_preview_layout(
     layout = (
         _manual_subtitle_layout(effective_style, output_width, output_height)
         if subtitle_layout_override
-        else region_layout or _default_subtitle_layout(effective_style, output_width, output_height)
+        else (_readable_auto_subtitle_layout(region_layout, effective_style, output_height)
+              if region_layout else _default_subtitle_layout(effective_style, output_width, output_height))
     )
     return {
         "outputWidth": output_width,
@@ -1627,7 +1641,8 @@ def render_video(
     ass_layout = (
         _manual_subtitle_layout(effective_style, subtitle_width, subtitle_height)
         if subtitle_layout_override
-        else region_layout or _default_subtitle_layout(effective_style, subtitle_width, subtitle_height)
+        else (_readable_auto_subtitle_layout(region_layout, effective_style, subtitle_height)
+              if region_layout else _default_subtitle_layout(effective_style, subtitle_width, subtitle_height))
     )
     cue_styles: dict[int, tuple[SubtitleStyle, SubtitleRegionLayout]] = {}
     for index, raw in (subtitle_style_overrides or {}).items():

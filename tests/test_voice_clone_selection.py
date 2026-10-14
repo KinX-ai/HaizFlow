@@ -26,7 +26,8 @@ class VoiceCloneSelectionTests(unittest.TestCase):
             sample.write_bytes(b"reference")
             for project_type in ("manual", "single"):
                 with self.subTest(project_type=project_type):
-                    video = SimpleNamespace(video_id="v1", files={"voice_reference": str(sample)}, project_type=project_type)
+                    video = SimpleNamespace(video_id="v1", files={"voice_reference": str(sample)},
+                                            project_type=project_type, target_language="vi")
                     host = SimpleNamespace(_selected_video_id="v1", _tts_provider="omnivoice-gpu", _tts_voice="omnivoice:female",
                                            _processing_queue=SimpleNamespace(contains=lambda _: False),
                                            persistVideoSettingsFor=Mock(return_value=True),

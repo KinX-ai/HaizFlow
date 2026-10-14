@@ -45,13 +45,13 @@ Tìm dự án gần đây, lọc theo loại và tạo dự án mới.
 
 Chọn model nhận dạng, dịch và giọng đọc; thiết lập che phụ đề, âm thanh, nhạc nền và watermark.
 
-![Trang xử lý tự động với video nguồn và các thiết lập ngôn ngữ, giọng đọc](docs/images/screenshots/automatic.png)
+![Trang xử lý tự động với video nguồn và các thiết lập ngôn ngữ, giọng đọc](docs/images/screenshots/automatic-2026-10-14.png)
 
 ### Trình sửa thủ công
 
-So sánh video nguồn và kết quả, chạy từng bước độc lập, chia đoạn trên timeline Kết quả và xuất phụ đề SRT để dùng trong phần mềm khác.
+So sánh video nguồn và kết quả, chạy từng bước độc lập, chia đoạn trên timeline Kết quả, nhập SRT và xuất phụ đề gốc hoặc đã dịch để dùng trong phần mềm khác.
 
-![Trình sửa thủ công với preview, bảng xử lý và timeline phụ đề, âm thanh](docs/images/screenshots/manual-editor-2026-10-11.png)
+![Trình sửa thủ công với preview, bảng xử lý và timeline phụ đề, âm thanh](docs/images/screenshots/manual-editor-2026-10-14.png)
 
 ### Tải xuống
 

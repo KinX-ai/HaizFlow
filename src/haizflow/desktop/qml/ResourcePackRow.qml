@@ -180,15 +180,21 @@ ColumnLayout {
                     onClicked: AppController.cancelResourcePackOperation(root.packId)
                 }
 
-                StudioButton {
+                DeferredActionButton {
+                    objectName: "resourceInstallResumeButton"
                     anchors.fill: parent
                     visible: ["missing", "paused", "failed"].indexOf(root.status) >= 0
-                    text: root.status === "paused" ? qsTr("Tiếp tục")
+                    readyText: root.status === "paused" ? qsTr("Tiếp tục")
                         : root.status === "failed" ? qsTr("Thử lại") : qsTr("Cài đặt")
                     iconName: "download"
                     variant: "primary"
-                    enabled: root.canInstall
-                    onClicked: AppController.installResourcePacks([root.packId])
+                    actionEnabled: root.canInstall
+                    actionContext: ({packId: root.packId})
+                    onExecute: context => {
+                        if (context && context.packId === root.packId
+                                && ["missing", "paused", "failed"].indexOf(root.status) >= 0)
+                            AppController.installResourcePacks([context.packId]);
+                    }
                 }
 
                 StudioIconButton {

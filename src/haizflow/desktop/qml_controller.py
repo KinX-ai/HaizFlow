@@ -1571,7 +1571,10 @@ class HaizFlowController(QObject):
 
     @Slot(bool)
     def respondToAppConfirmation(self, accepted: bool) -> None:
+        if self._confirmation_loop is None or getattr(self, "_confirmation_responded", False):
+            return
         self._confirmation_accepted = bool(accepted)
+        self._confirmation_responded = True
         if self._confirmation_loop is not None and self._confirmation_loop.isRunning():
             self._confirmation_loop.quit()
 
@@ -4455,7 +4458,8 @@ class HaizFlowController(QObject):
         return True
 
     @Slot(str, result=bool)
-    def runManualTool(self, tool_id):
+    @Slot(str, bool, result=bool)
+    def runManualTool(self, tool_id, force_rerun=False):
         if getattr(getattr(self, "_resource_packs", None), "storageMoving", False):
             self.appAlertRequested.emit("Đang chuyển gói tài nguyên", "Hãy chờ chuyển vị trí hoàn tất trước khi xử lý.", "info")
             return False
@@ -4615,6 +4619,10 @@ class HaizFlowController(QObject):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return False
+            selected = self._selected_video()
+            if (not selected or selected.video_id != video.video_id
+                    or self._processing_queue.contains(video.video_id)):
+                return False
         if tool_id == "translation":
             timer = getattr(self, "_manual_voice_refresh_timer", None)
             if timer is not None:
@@ -4634,7 +4642,7 @@ class HaizFlowController(QObject):
 
             clear_manual_progress(video.video_id)
         if tool_id != "export" or restarting_paused_tool:
-            if restarting_paused_tool:
+            if restarting_paused_tool or force_rerun:
                 prepare_manual_rerun(video.video_id, tool_id, force=True)
             else:
                 prepare_manual_rerun(video.video_id, tool_id)
@@ -4658,6 +4666,7 @@ class HaizFlowController(QObject):
     def manualVoiceConfiguration(self, segment_id: str):
         """Describe the effective voice for one segment without changing state."""
         from haizflow.pipeline.manual_tools import published_voice_record
+        from haizflow.services.subtitle_language import compatible_manual_voice
 
         video = self._selected_video()
         if not video or video.project_type != "manual":
@@ -4666,11 +4675,15 @@ class HaizFlowController(QObject):
         overrides = dict((video.files or {}).get("manual_voice_overrides") or {})
         override = overrides.get(segment_key)
         override = override if isinstance(override, dict) else {}
+        language = HaizFlowController._selected_voice_language(self)
+        global_provider, global_voice = compatible_manual_voice(language, video.tts_provider, video.tts_voice)
+        provider, voice = compatible_manual_voice(language, override.get("provider") or global_provider,
+                                                  override.get("voice") or global_voice)
         return {
-            "provider": str(override.get("provider") or video.tts_provider or "omnivoice"),
-            "voice": str(override.get("voice") or video.tts_voice or ""),
-            "globalProvider": str(video.tts_provider or "omnivoice"),
-            "globalVoice": str(video.tts_voice or ""),
+            "provider": provider,
+            "voice": voice,
+            "globalProvider": global_provider,
+            "globalVoice": global_voice,
             "speakerMode": str(video.speaker_mode or "single"),
             "segmentOverride": bool(override),
             "hasPublishedVoice": bool(published_voice_record(video, validate=False)),
@@ -4689,6 +4702,11 @@ class HaizFlowController(QObject):
             "Bỏ tiến độ đang tạm dừng và chạy lại công cụ với cài đặt hiện tại? Kết quả đã hoàn tất trước đó được giữ nguyên cho đến khi có kết quả mới." if vi else
             "Discard the paused progress and run this tool again with the current settings? Previously completed results remain until the new result is ready.",
         ) != QMessageBox.StandardButton.Yes:
+            return False
+        current = self._selected_video()
+        if (not current or current.video_id != video.video_id or current.status != "paused"
+                or str(current.manual_target_tool or "") != str(tool_id or "")
+                or self._processing_queue.contains(current.video_id)):
             return False
         return self.runManualTool(tool_id)
 
@@ -4793,6 +4811,13 @@ class HaizFlowController(QObject):
             before,
             self._manual_voice_configuration_snapshot(video),
         )
+        if selected_scope == "all":
+            from haizflow.pipeline.manual_tools import incremental_voice_refresh
+
+            # Edited subtitles are an incremental update, not a request to
+            # replace correct speech for every other sentence. An unchanged
+            # document or changed voice setup is an explicit fresh rerun.
+            return self.runManualTool("voice", not incremental_voice_refresh(video))
         return self.runManualTool("voice")
 
     @Slot(str, result=bool)
@@ -7630,11 +7655,21 @@ class HaizFlowController(QObject):
         if self._confirmation_loop is not None:
             return QMessageBox.StandardButton.Cancel
         self._confirmation_accepted = False
+        self._confirmation_responded = False
         loop = QEventLoop(self)
         self._confirmation_loop = loop
-        self.appConfirmationRequested.emit(str(title or "HaizFlow"), str(message or ""))
-        loop.exec()
-        self._confirmation_loop = None
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(loop.quit)
+        try:
+            self.appConfirmationRequested.emit(str(title or "HaizFlow"), str(message or ""))
+            if not self._confirmation_responded:
+                loop.exec()
+        finally:
+            if app is not None:
+                app.aboutToQuit.disconnect(loop.quit)
+            self._confirmation_loop = None
+            loop.deleteLater()
         return QMessageBox.StandardButton.Yes if self._confirmation_accepted else QMessageBox.StandardButton.Cancel
 
     def _voice_options_for_language(self, language_code, provider="omnivoice"):

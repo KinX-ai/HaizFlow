@@ -340,14 +340,21 @@ ApplicationWindow {
 
     ConfirmDialog {
         id: appConfirmationDialog
+        objectName: "appConfirmationDialog"
         property bool responseSent: false
         confirmText: qsTr("Xác nhận")
-        onOpened: responseSent = false
+        onAboutToShow: responseSent = false
         onConfirmed: {
             responseSent = true;
             AppController.respondToAppConfirmation(true);
         }
         onRejected: {
+            if (!responseSent) {
+                responseSent = true;
+                AppController.respondToAppConfirmation(false);
+            }
+        }
+        onClosed: {
             if (!responseSent) {
                 responseSent = true;
                 AppController.respondToAppConfirmation(false);

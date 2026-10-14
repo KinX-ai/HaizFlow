@@ -45,13 +45,13 @@ Find recent projects, filter by project type and create a new project.
 
 Choose recognition, translation and voice models, then configure subtitle coverage, audio, background music and watermark settings.
 
-![Automatic processing page with source preview, language and voice settings](docs/images/screenshots/automatic.png)
+![Automatic processing page with source preview, language and voice settings](docs/images/screenshots/automatic-2026-10-14.png)
 
 ### Manual editor
 
-Review source and result previews, run individual processing steps, split the Result timeline into clips and export subtitles as SRT for other editors.
+Review source and result previews, run individual processing steps, split the Result timeline into clips, import SRT captions and export original or translated SRT for other editors.
 
-![Manual editor with video preview, processing panel and subtitle and audio timeline](docs/images/screenshots/manual-editor-2026-10-11.png)
+![Manual editor with video preview, processing panel and subtitle and audio timeline](docs/images/screenshots/manual-editor-2026-10-14.png)
 
 ### Downloads
 

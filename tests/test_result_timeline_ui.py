@@ -88,6 +88,7 @@ ApplicationWindow {{
         dialog.setProperty("destination", str(tmp_path / "out.mp4"))
         button = window.findChild(QObject, "confirmVideoExport")
         assert QMetaObject.invokeMethod(button, "clicked", Qt.DirectConnection)
+        QTest.qWait(90)
         assert backend.calls[-1][-1] == "second"
         assert QMetaObject.invokeMethod(dialog, "openForSelection", Qt.DirectConnection, Q_ARG("QVariant", False))
         QTest.qWait(100)

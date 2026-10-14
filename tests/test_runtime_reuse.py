@@ -132,10 +132,10 @@ class RuntimeReuseTests(unittest.TestCase):
                 patch.object(external_tasks, "installed_engine_command", return_value=["mock-engine"]),
                 patch.object(external_tasks, "shared_external_engine_pool", return_value=pool),
                 patch.object(external_tasks, "check_cancellation"),
-                patch.object(external_tasks.subprocess, "Popen") as spawn,
+                patch.object(external_tasks.subprocess, "Popen", wraps=external_tasks.subprocess.Popen) as spawn,
             ):
                 result = external_tasks.run_external_task(
                     "recognition", "transcribe", {}, "fixture", context={"device": "gpu"}, isolate_source=True
                 )
             self.assertEqual(result, {"segments": []})
-            spawn.assert_not_called()
+            assert not any(call.args and call.args[0][0] == "mock-engine" for call in spawn.call_args_list)

@@ -189,6 +189,12 @@ def import_srt(video_id: str, path: str, *, duration_ms: int = 0, language: str 
     language = language or detect_language(segments)
     if language not in {"vi", "en", "zh", "und", "ja", "ko", "ar", "ru", "th", "hi"}:
         raise ValueError("Ngôn ngữ SRT không hợp lệ.")
+    # Distinct Chinese text must not inherit the next translation's language.
+    if detect_language(segments) == "zh":
+        han = sum(len(re.findall(r"[\u3400-\u9fff]", str(item.get("text") or ""))) for item in segments)
+        letters = sum(char.isalpha() for item in segments for char in str(item.get("text") or ""))
+        if han / max(1, letters) >= .5:
+            language = "zh"
     for item in segments:
         item["language"] = language if language != "und" else "auto"
     current = video_store.get_video(video_id)
@@ -197,6 +203,7 @@ def import_srt(video_id: str, path: str, *, duration_ms: int = 0, language: str 
     video = current
     from haizflow.services import editor_documents
     from haizflow.pipeline.manual_tools import publish_edited_subtitles
+    from haizflow.services.subtitle_language import compatible_manual_voice
 
     document = editor_documents.load(video_id)
     original = video.model_copy(deep=True)
@@ -219,7 +226,9 @@ def import_srt(video_id: str, path: str, *, duration_ms: int = 0, language: str 
                                        "language": language}
         files["source_segments"] = str(destination)
         active = {key: value for key, value in video.active_artifacts.items() if key not in TEXT_KINDS}
+        provider, voice = compatible_manual_voice(language, video.tts_provider, video.tts_voice)
         if not video_store.update_video(video_id, files=files, active_artifacts=active, subtitle_language=language,
+                                         tts_provider=provider, tts_voice=voice,
                                          **_reset_text_branch(video)):
             raise ValueError("Dự án không còn khả dụng.")
         if document:

@@ -59,9 +59,10 @@ AppDialog {
 
     function selectCloneReference() {
         draftSpeakerMode = "single";
-        draftProvider = AppController.ttsProvider;
+        const configuration = AppController.manualVoiceConfiguration("");
+        draftProvider = String(configuration.globalProvider || AppController.ttsProvider);
         globalProvider = draftProvider;
-        globalVoice = AppController.ttsVoice;
+        globalVoice = String(configuration.globalVoice || AppController.ttsVoice);
         refreshVoices(globalVoice);
     }
 

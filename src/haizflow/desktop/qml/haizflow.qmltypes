@@ -2060,6 +2060,12 @@ Module {
             Parameter { name: "tool_id"; type: "QString" }
         }
         Method {
+            name: "runManualTool"
+            type: "bool"
+            Parameter { name: "tool_id"; type: "QString" }
+            Parameter { name: "force_rerun"; type: "bool" }
+        }
+        Method {
             name: "restartManualTool"
             type: "bool"
             Parameter { name: "tool_id"; type: "QString" }

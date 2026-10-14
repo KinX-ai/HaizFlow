@@ -421,3 +421,59 @@ def test_remove_action_workspace_order_and_not_a_pipeline_stage():
     assert qml.index('label: qsTr("Nhập SRT")') < qml.index('label: qsTr("Xóa SRT")') < qml.index('label: qsTr("Xuất SRT")')
     assert 'else if (index === 10)' in qml and 'AppController.removeSelectedSrt(AppController.selectedVideoId)' in qml
     assert 'qsTr("Xóa SRT")' not in Path("src/haizflow/desktop/qml/SrtImportDialog.qml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("provider,fallback", [("vieneu", "omnivoice"), ("vieneu-gpu", "omnivoice-gpu")])
+@pytest.mark.parametrize("declared", ["zh", "en", "und", ""])
+def test_chinese_srt_import_selects_compatible_voice_before_dialog(project, provider, fallback, declared):
+    video, path = project
+    video.tts_provider = provider
+    video.tts_voice = "vieneu:Hải Đăng"
+    path.write_text("1\n00:00:01,000 --> 00:00:02,000\n你好世界\n", encoding="utf-8")
+    subtitle_import.import_srt(video.video_id, str(path), language=declared)
+    assert video.subtitle_language == "zh"
+    assert video.tts_provider == fallback and video.tts_voice == "omnivoice:female_gentle"
+    assert video.target_language == "vi"
+
+
+@pytest.mark.parametrize("language,text", [("vi", "Xin chào"), ("en", "Hello")])
+def test_supported_import_does_not_change_vieneu_choice(project, language, text):
+    video, path = project
+    video.tts_provider = "vieneu-gpu"
+    video.tts_voice = "vieneu:Hải Đăng"
+    path.write_text(f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
+    subtitle_import.import_srt(video.video_id, str(path), language=language)
+    assert video.tts_provider == "vieneu-gpu" and video.tts_voice == "vieneu:Hải Đăng"
+
+
+def test_srt_refresh_synchronizes_fallback_voice_without_discarding_other_drafts(project):
+    video, path = project
+    video.tts_provider = "omnivoice-gpu"
+    video.tts_voice = "omnivoice:female_gentle"
+    host = SimpleNamespace(_tts_provider="vieneu-gpu", _tts_voice="vieneu:Hải Đăng",
+        _manual_settings_drafts={video.video_id: VideoConfig(watermark_text="pending watermark", output_speed=1.5)},
+        selectedVideoChanged=Mock(), refreshVideos=Mock(), ttsProviderChanged=Mock(), ttsVoiceChanged=Mock(),
+        ttsProviderOptionsChanged=Mock(), ttsVoiceOptionsChanged=Mock())
+    ProjectCommandsController(host)._refresh_srt_workspace(video.video_id)
+    assert host._tts_provider == "omnivoice-gpu" and host._tts_voice == "omnivoice:female_gentle"
+    draft = host._manual_settings_drafts[video.video_id]
+    assert draft.tts_provider == "omnivoice-gpu" and draft.watermark_text == "pending watermark" and draft.output_speed == 1.5
+
+
+def test_force_full_voice_rerun_bypasses_old_sentence_cache_even_without_manifest(project, monkeypatch):
+    video, path = project
+    path.write_text("1\n00:00:01,000 --> 00:00:02,000\nXin chào\n", encoding="utf-8")
+    subtitle_import.import_srt(video.video_id, str(path), language="vi")
+    video.speaker_mode = "multiple"
+    before = manual_tools._voice_clip_signatures(video, manual_tools._load_segments(video))
+    staging = manual_artifacts.create_staging_directory(video.video_id, "tts_clip")
+    (staging / "voice.mp3").write_bytes(b"historical audio")
+    cached = manual_artifacts.publish(video.video_id, "tts_clip", before[0], staging, {"audio": "voice.mp3"}, activate_artifact=False)
+    unrelated = dict(video.active_artifacts)
+    assert "tts_manifest" not in video.active_artifacts
+    monkeypatch.setattr(manual_tools, "_requested_artifact", Mock(side_effect=AssertionError("Forced action must not require a manifest hit")))
+    assert manual_tools.prepare_manual_rerun(video.video_id, "voice", force=True)
+    after = manual_tools._voice_clip_signatures(video, manual_tools._load_segments(video))
+    assert after != before and manual_artifacts.resolve(video.video_id, "tts_clip", after[0]) is None
+    assert Path(cached["resolved_outputs"]["audio"]).read_bytes() == b"historical audio"
+    assert video.active_artifacts == unrelated
