@@ -6,7 +6,7 @@ from haizflow.desktop.catalog import (
     POPULAR_TARGET_LANGUAGES,
     OMNIVOICE_TTS_VOICES,
 )
-from haizflow.desktop.models import VideoListModel
+from haizflow.desktop.models import VideoListModel, presentation_video_status
 from haizflow.services import project_store
 
 
@@ -106,7 +106,7 @@ def build_project_summaries(videos, persisted_projects=None):
                 }
             )
             continue
-        statuses = {video.status for video in project_videos}
+        statuses = {presentation_video_status(video) for video in project_videos}
         if "processing" in statuses:
             status = "processing"
         elif "awaiting_review" in statuses:
@@ -115,14 +115,14 @@ def build_project_summaries(videos, persisted_projects=None):
             status = "paused"
         elif "pending" in statuses:
             status = "pending"
-        elif all(video.status == "done" for video in project_videos):
+        elif statuses == {"done"}:
             status = "done"
         elif "failed" in statuses:
             status = "failed"
         elif "cancelled" in statuses:
             status = "cancelled"
         else:
-            status = project_videos[0].status
+            status = presentation_video_status(project_videos[0])
         thumbnail_source = ""
         for video in project_videos:
             thumbnail_source = VideoListModel._thumbnail_source(video)

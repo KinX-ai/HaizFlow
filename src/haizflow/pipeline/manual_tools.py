@@ -289,6 +289,14 @@ def separation_signature(video) -> str:
 
 
 def recognition_signature(video) -> str:
+    from haizflow.services.subtitle_import import has_import
+
+    if has_import(video):
+        return manual_artifacts.signature(
+            (video.files or {}).get("imported_source_srt"),
+            manual_artifacts.file_state(_video_input(video)),
+            *_generation_token(video, "recognition"), "manual-imported-srt-v1",
+        )
     input_signature = separation_signature(video) if video.enable_audio_separation else source_signature(video)
     return manual_artifacts.signature(
         input_signature,
@@ -1079,6 +1087,33 @@ def restore_cached_variants(video_id: str, *, validate: bool = True) -> list[str
 
 
 @manual_artifacts.presentation_batch
+def tool_readiness(video, tool_id: str, *, language: str = "vi") -> dict[str, Any]:
+    """Button preflight: check only this tool's prerequisite, not every cache.
+
+    Full presentation builds voice notices and every downstream signature.
+    Doing that again when enqueuing an unrelated tool reparses long editor
+    documents repeatedly. Workers still verify artifacts before consuming them.
+    """
+    vi = language == "vi"
+    ready, blocked = True, ""
+    if tool_id == "translation":
+        from haizflow.services.subtitle_import import has_import
+
+        ready = has_import(video) or not getattr(video, "enable_audio_separation", False) or _separation_ready(video, validate=False)
+        blocked = "Hãy tách giọng trước" if vi else "Separate the voice first"
+    elif tool_id == "subtitle":
+        ready = _translation_ready(video, validate=False)
+        from haizflow.services.subtitle_import import has_import
+
+        ready = ready or (has_import(video) and _subtitle_ready(video, validate=False))
+        blocked = "Hãy dịch nội dung" if vi else "Translate the content first"
+    elif tool_id == "voice":
+        ready = _subtitle_ready(video, validate=False)
+        blocked = "Hãy chuẩn bị phụ đề" if vi else "Prepare subtitles first"
+    return {"toolId": tool_id, "canRun": bool(ready), "blockedReason": "" if ready else blocked}
+
+
+@editor_documents.read_batch()
 def tool_states(video, *, language: str = "vi") -> list[dict[str, Any]]:
     labels_vi = {
         "source": "Nguồn", "translation": "Nhận dạng & dịch", "subtitle": "Phụ đề",
@@ -1091,7 +1126,10 @@ def tool_states(video, *, language: str = "vi") -> list[dict[str, Any]]:
     vi = language == "vi"
     # Presentation checks must not checksum large stems/exports on Qt's GUI
     # thread. Every runner performs full validation before consuming a hit.
+    from haizflow.services.subtitle_import import has_import
+
     separation_ok = not video.enable_audio_separation or _separation_ready(video, validate=False)
+    recognition_input_ok = has_import(video) or separation_ok
     translation_ok = _translation_ready(video, validate=False)
     subtitle_ok = _subtitle_ready(video, validate=False)
     image_ok = _image_ready(video, validate=False)
@@ -1106,11 +1144,11 @@ def tool_states(video, *, language: str = "vi") -> list[dict[str, Any]]:
     requirements = {
         "source": (True, separation_ok, ""),
         "translation": (
-            separation_ok,
+            recognition_input_ok,
             translation_ok,
             "Hãy tách giọng trước" if vi else "Separate the voice first",
         ),
-        "subtitle": (translation_ok, subtitle_ok, "Hãy dịch nội dung" if vi else "Translate the content first"),
+        "subtitle": (translation_ok or (has_import(video) and subtitle_ok), subtitle_ok, "Hãy dịch nội dung" if vi else "Translate the content first"),
         "image": (True, image_ok, ""),
         "voice": (subtitle_ok, voice_ok, "Hãy chuẩn bị phụ đề" if vi else "Prepare subtitles first"),
         "audio": (True, audio_ok, ""),
@@ -1430,7 +1468,13 @@ def _replace_subtitles_from_translation(video_id: str, translated_segments: str)
     video = video_store.get_video(video_id)
     if not video:
         raise RuntimeError("Manual project is no longer available.")
-    subtitle = _publish_subtitles(video, translated_segments)
+    from haizflow.services.subtitle_import import has_import, _visible_segments
+
+    if has_import(video):
+        source_payload = json.loads(Path(translated_segments).read_text(encoding="utf-8"))
+        subtitle = publish_edited_subtitles(video_id, _visible_segments(source_payload, editor_documents.load(video_id)))
+    else:
+        subtitle = _publish_subtitles(video, translated_segments)
     manual_artifacts.deactivate(
         video_id,
         {"tts_manifest", "audio_mix", "visual_proxy", "export"},
@@ -1520,6 +1564,26 @@ def _run_separation(video, reporter) -> None:
 
 
 def _run_recognition(video, reporter) -> None:
+    from haizflow.services.subtitle_import import has_import, load_segments
+
+    if has_import(video):
+        segments = load_segments(video)
+        expected = recognition_signature(video)
+        cached = manual_artifacts.resolve(video.video_id, "recognition", expected)
+        if not cached:
+            staging = manual_artifacts.create_staging_directory(video.video_id, "recognition")
+            try:
+                reporter.update(5, "manual_recognition", "Đang đọc SRT đã nhập · bỏ qua Whisper")
+                (staging / "source-segments.json").write_text(
+                    json.dumps(segments, ensure_ascii=False), encoding="utf-8")
+                cached = manual_artifacts.publish(video.video_id, "recognition", expected, staging,
+                    {"segments": "source-segments.json"}, config_fingerprint="manual-imported-srt-v1")
+            finally:
+                manual_artifacts.discard_staging_directory(staging)
+        else:
+            manual_artifacts.activate(video.video_id, "recognition", expected)
+        _update_files(video.video_id, source_segments=cached["resolved_outputs"]["segments"])
+        return
     source = None
     if video.enable_audio_separation:
         source = manual_artifacts.resolve(video.video_id, "separation", separation_signature(video))
@@ -1570,6 +1634,12 @@ def _run_recognition(video, reporter) -> None:
 
 
 def _run_translation(video, reporter) -> None:
+    from haizflow.services.subtitle_import import has_import, load_segments
+
+    if has_import(video):
+        # Validate the input even when a translation cache exists. Missing or
+        # modified user inputs must not silently fall back to ASR or old text.
+        load_segments(video)
     recognition = manual_artifacts.resolve(video.video_id, "recognition", recognition_signature(video))
     if not recognition:
         _run_recognition(video, reporter)
@@ -1632,6 +1702,10 @@ def _run_translation(video, reporter) -> None:
 
 
 def _run_subtitle(video, _reporter) -> None:
+    from haizflow.services.subtitle_import import has_import
+
+    if has_import(video) and _subtitle_ready(video):
+        return  # An imported SRT is already a published editable document.
     translation = manual_artifacts.resolve(video.video_id, "translation", translation_signature(video))
     if not translation:
         raise RuntimeError("Hãy chạy Dịch trước khi chuẩn bị phụ đề.")
@@ -1682,6 +1756,15 @@ def _run_voice(video, reporter) -> None:
     subtitle = _current_subtitle_record(video)
     if not segments or not subtitle:
         raise RuntimeError("Hãy chuẩn bị phụ đề trước khi tạo giọng đọc.")
+    from haizflow.services.subtitle_import import voice_notice
+
+    providers = {str(getattr(video, "tts_provider", "omnivoice"))}
+    providers.update(str(value.get("provider") or video.tts_provider)
+                     for value in dict((video.files or {}).get("manual_voice_overrides") or {}).values() if isinstance(value, dict))
+    for provider in providers:
+        notice = voice_notice(video, provider, segments)
+        if notice:
+            raise ValueError(notice[1])
     narrator_anchor = ensure_narrator_anchor(video.video_id)
     video = video_store.get_video(video.video_id) or video
     from haizflow.services.subtitle_language import manual_subtitle_language
@@ -2234,7 +2317,7 @@ def _run_export(video, reporter) -> None:
                 subtitle_layout_override=bool(video.subtitle_layout_override),
                 progress_callback=lambda fraction: reporter.update(
                     20 + round(69 * fraction), "manual_export" if fraction > 0 else "manual_export_preparing",
-                    f"Đang xuất video {round(100 * fraction)}%" if fraction > 0 else "Đang khởi tạo bộ mã hóa"
+                    "Đang dựng video" if fraction > 0 else "Đang khởi tạo bộ mã hóa"
                 ),
                 original_subtitle_removal_mode=video.original_subtitle_removal_mode,
                 original_subtitle_intervals=intervals,

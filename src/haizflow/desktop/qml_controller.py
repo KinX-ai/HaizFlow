@@ -21,7 +21,6 @@ from haizflow.core.hardware import (
     configure_processing_device,
     detect_hardware_capabilities,
     recommended_processing_device,
-    runtime_profile,
     runtime_profile_for,
     validate_processing_device,
 )
@@ -1548,6 +1547,16 @@ class HaizFlowController(QObject):
     @Slot(str, str, result=bool)
     def validateTtsProviderForLanguage(self, language_code, provider):
         from haizflow.core.vieneu_voices import unsupported_language_notice
+        from haizflow.services.subtitle_import import has_import, voice_notice
+
+        video = self._selected_video() if callable(getattr(self, "_selected_video", None)) else None
+        if has_import(video):
+            from haizflow.pipeline.manual_tools import _load_segments
+
+            notice = voice_notice(video, provider, _load_segments(video, validate=False), getattr(self, "_settings_language", "vi"))
+            if notice:
+                HaizFlowController._show_app_alert(self, *notice, "warning")
+                return False
 
         notice = unsupported_language_notice(provider, language_code, getattr(self, "_settings_language", "vi"))
         if notice:
@@ -4329,8 +4338,32 @@ class HaizFlowController(QObject):
         return self._video_exports.choose_file(video_id)
 
     @Slot(result=bool)
-    def exportSelectedSrt(self):
-        return HaizFlowController._project_commands_for(self).export_selected_srt()
+    @Slot(str, str, result=bool)
+    def exportSelectedSrt(self, kind="result", video_id=""):
+        return HaizFlowController._project_commands_for(self).export_selected_srt(str(kind), str(video_id))
+
+    @Slot(result=bool)
+    @Slot(str, str, str, result=bool)
+    def importSelectedSrt(self, path="", language="", video_id=""):
+        return HaizFlowController._project_commands_for(self).import_selected_srt(str(path), str(language), str(video_id))
+
+    @Slot(result="QVariantMap")
+    def chooseSrtImportFile(self):
+        return HaizFlowController._project_commands_for(self).choose_srt_import_file()
+
+    @Slot(str, result=bool)
+    def removeSelectedSrt(self, video_id):
+        return HaizFlowController._project_commands_for(self).remove_selected_srt(str(video_id))
+
+    @Slot(result="QVariantMap")
+    def srtExportSettings(self):
+        return HaizFlowController._project_commands_for(self).srt_export_settings()
+
+    @Property(bool, notify=selectedVideoChanged)
+    def manualHasImportedSrt(self):
+        from haizflow.services.subtitle_import import has_import
+
+        return has_import(self._selected_video())
 
     @Slot(str, str, str, bool, result=bool)
     def exportVideoTo(self, video_id, preset, destination, overwrite):
@@ -4427,7 +4460,7 @@ class HaizFlowController(QObject):
             self.appAlertRequested.emit("Đang chuyển gói tài nguyên", "Hãy chờ chuyển vị trí hoàn tất trước khi xử lý.", "info")
             return False
         from haizflow.pipeline.manual_tools import (
-            ensure_current_subtitle_document, prepare_manual_rerun, tool_states,
+            ensure_current_subtitle_document, prepare_manual_rerun, tool_readiness,
         )
 
         tool_id = str(tool_id or "").strip().lower()
@@ -4443,6 +4476,17 @@ class HaizFlowController(QObject):
         # stale persisted snapshot left behind while editing project options.
         build_config = getattr(self, "_build_config", None)
         effective_config = build_config() if callable(build_config) else video
+        if tool_id == "voice":
+            from haizflow.services.subtitle_import import has_import, voice_notice
+
+            if has_import(video):
+                from haizflow.pipeline.manual_tools import _load_segments
+
+                notice = voice_notice(video, getattr(effective_config, "tts_provider", "omnivoice"),
+                                      _load_segments(video, validate=False), self._settings_language)
+                if notice:
+                    self.appAlertRequested.emit(*notice, "warning")
+                    return False
         if (
             tool_id == "translation"
             and str(getattr(effective_config, "translation_model", "auto")).startswith("gemini-")
@@ -4460,6 +4504,11 @@ class HaizFlowController(QObject):
             "image": ("ocr",),
             "voice": ("voice",),
         }.get(tool_id, ())
+        from haizflow.services.subtitle_import import has_import
+
+        imported_srt = has_import(video)
+        if tool_id == "translation" and imported_srt:
+            capabilities = ("translation",)
         pack_context = {
             "voice_clone": str(getattr(effective_config, "tts_voice", "")) in {"omnivoice:clone", "vieneu:clone"},
             "speaker_mode": str(getattr(effective_config, "speaker_mode", "single") or "single"),
@@ -4470,10 +4519,14 @@ class HaizFlowController(QObject):
             "language": str(getattr(effective_config, "target_language", "") or ""),
             "provider": str(getattr(effective_config, "tts_provider", "omnivoice") or "omnivoice"),
         }
+        if tool_id == "voice" and imported_srt:
+            from haizflow.services.subtitle_language import manual_subtitle_language
+
+            pack_context["language"] = manual_subtitle_language(video)
         from haizflow.core.model_choices import gpu_choice_blocked
 
         if gpu_choice_blocked(pack_context["device"],
-                              recognition=pack_context["model"] if tool_id == "translation" else "small",
+                              recognition=pack_context["model"] if tool_id == "translation" and not imported_srt else "small",
                               translation=pack_context["translation_model"] if tool_id == "translation" else "auto",
                               voice=pack_context["provider"] if tool_id == "voice" else "omnivoice"):
             self.appAlertRequested.emit("Đang dùng chế độ CPU", "Chọn model CPU hoặc chuyển sang GPU trong Cài đặt → Chung.", "warning")
@@ -4505,7 +4558,7 @@ class HaizFlowController(QObject):
             self.appAlertRequested.emit(title, message, "info")
             return False
         if tool_id in {"subtitle", "voice", "audio", "export"}:
-            ensure_current_subtitle_document(video.video_id)
+            ensure_current_subtitle_document(video.video_id, validate=False)
             video = video_store.get_video(video.video_id) or video
         if tool_id == "export":
             preflight = self.manualExportPreflight()
@@ -4550,18 +4603,11 @@ class HaizFlowController(QObject):
             )
             return False
         aggregate_id = "source" if tool_id == "separation" else tool_id
-        state = next(
-            (
-                item
-                for item in tool_states(video, language=self._settings_language)
-                if item["toolId"] == aggregate_id
-            ),
-            None,
-        )
+        state = tool_readiness(video, aggregate_id, language=self._settings_language)
         if state and not state["canRun"]:
             self.appAlertRequested.emit("Chưa thể chạy", state["blockedReason"] or "Thiếu dữ liệu đầu vào.", "info")
             return False
-        if tool_id == "translation" and manual_artifacts.active(video, "tts_manifest"):
+        if tool_id == "translation" and manual_artifacts.peek_active(video, "tts_manifest"):
             answer = QMessageBox.question(
                 None,
                 "Translate again",
@@ -7491,31 +7537,8 @@ class HaizFlowController(QObject):
         return getattr(host, "_processing_lifecycle", None) or ProcessingLifecycleController(host)
 
     def _enqueue_video(self, video_id: str) -> bool:
-        warmup = getattr(self, "_smart_warmup", None)
-        if warmup is not None:
-            video = video_store.get_video(str(video_id))
-            target = str(getattr(video, "manual_target_tool", "") or "") if video else ""
-            required = {
-                "separation": {"separation"},
-                "translation": {"recognition"},
-                "image": {"ocr"},
-                "voice": {"voice"},
-            }.get(target, set())
-            profile = runtime_profile()
-            constrained = profile.total_ram_gib < 24 or (
-                profile.cuda_available and profile.total_vram_gib < 12
-            )
-            # A multi-stage Auto/Batch job cannot retain every model on a
-            # constrained machine. Each stage loads only what it needs.
-            if constrained:
-                # The queue worker performs a *blocking* cleanup before any
-                # foreground model load. An async release here could remove
-                # the resident marker before memory is actually returned.
-                required = set()
-            elif not target:
-                required = set(warmup.resident)
-            if not constrained:
-                warmup.foreground_work_requested(required)
+        # Model retirement may wait on an active warm RPC/driver. The queue
+        # worker performs it before model use, never in the button's Qt slot.
         return HaizFlowController._processing_delegate_for(self).enqueue_video(video_id)
 
     def _enqueue_videos(self, video_ids) -> int:

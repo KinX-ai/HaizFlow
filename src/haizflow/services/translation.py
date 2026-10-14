@@ -270,6 +270,8 @@ def translate_segments(
                 "source_language": source_codes[index - 1],
                 "timing_source": segment.get("timing_source", "unknown"),
             }
+        if segment.get("timing_source") == "imported-srt-v1" and segment.get("segment_id"):
+            translated_segment["segment_id"] = segment["segment_id"]
         if warnings:
             translated_segment["translation_warnings"] = warnings
             translated_segment["translation_warning_text"] = translated_segment["text"]

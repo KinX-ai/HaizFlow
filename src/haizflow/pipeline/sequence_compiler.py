@@ -292,7 +292,7 @@ def materialize_source_video(
             f"[sequence_v]tpad=stop_mode=clone:stop_duration={tail_seconds:.6f}[padded_v]"
         )
         video_label = "[padded_v]"
-    command = [
+    encode_inputs = [
         _binary("ffmpeg"),
         "-y",
         "-i",
@@ -302,17 +302,14 @@ def materialize_source_video(
         "-map",
         video_label,
         "-an",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
+    ]
+    output_args = [
         "-pix_fmt",
         "yuv420p",
         str(edited_video),
     ]
-    _run(command, cwd=str(output_dir), process_id=process_id, label="Editor source video",
+    _run_video_encode(encode_inputs, output_args, quality=18,
+         cwd=str(output_dir), process_id=process_id, label="Editor source video",
          progress_callback=progress_callback, duration=document.sequence.duration_ms / 1000)
     return str(edited_video)
 

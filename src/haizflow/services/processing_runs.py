@@ -18,8 +18,13 @@ _LOCK = threading.RLock()
 _RUNS = {}
 _CHECKED = set()
 _ARMED_EXPORTS = {}
+_ARMED_EXPORT_STATES = {}
 _CURRENT = threading.local()
 _LOG = logging.getLogger(__name__)
+_MANUAL_IDLE_FIELDS = {
+    "status", "progress", "step", "step_detail", "error", "resume_step",
+    "manual_target_tool", "manual_target_stage", "current_item", "total_items", "estimated_remaining_seconds",
+}
 
 
 def _source_identity(video):
@@ -56,16 +61,65 @@ def _get(video_id):
     return None
 
 
+def manual_export_state(video):
+    """Capture idle editor state before queueing changes its status/progress."""
+    if not video or getattr(video, "project_type", "") != "manual":
+        return None
+    fields = {name: getattr(video, name, None) for name in _MANUAL_IDLE_FIELDS}
+    if fields["status"] == "processing" or (fields["status"] == "pending" and fields["manual_target_tool"]):
+        fields.update(status="manual_ready", step="manual_ready", step_detail="", error=None,
+                      manual_target_tool="", manual_target_stage="", resume_step="", current_item=0, total_items=0)
+    if fields["status"] == "cancelled" and fields["manual_target_tool"] == "export":
+        fields.update(status="manual_ready", step="manual_ready", step_detail="", error=None,
+                      manual_target_tool="", manual_target_stage="", resume_step="")
+    return {"source_generation": list(_source_identity(video)), "fields": fields}
+
+
+def _validated_idle_fields(video, snapshot):
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("fields"), dict):
+        return None
+    generation = snapshot.get("source_generation")
+    if not isinstance(generation, (list, tuple)) or tuple(generation) != _source_identity(video):
+        return None
+    fields = snapshot["fields"]
+    if set(fields) != _MANUAL_IDLE_FIELDS or fields.get("status") not in {
+            "manual_ready", "done", "pending", "paused", "failed", "cancelled"}:
+        return None
+    if hasattr(video, "model_dump"):
+        try:
+            validated = type(video).model_validate({**video.model_dump(), **fields})
+        except (TypeError, ValueError):
+            return None
+        return {name: getattr(validated, name) for name in _MANUAL_IDLE_FIELDS}
+    return fields
+
+
+def restore_cancelled_manual_export(video_id, snapshot):
+    """Queued exports can be cancelled before a worker/journal ever exists."""
+    if not isinstance(snapshot, dict):
+        return False
+    video = video_store.get_video(video_id)
+    if not video or video.project_type != "manual" or video.status != "cancelled":
+        return False
+    fields = _validated_idle_fields(video, snapshot)
+    if fields is None:
+        return False
+    video_store.update_video(video_id, **fields)
+    return True
+
+
 def arm_export(video_id):
     with _LOCK:
         identifier = uuid.uuid4().hex
         _ARMED_EXPORTS[video_id] = identifier
+        _ARMED_EXPORT_STATES[video_id] = (identifier, manual_export_state(video_store.get_video(video_id)))
         return identifier
 
 
 def disarm_export(video_id):
     with _LOCK:
         _ARMED_EXPORTS.pop(video_id, None)
+        _ARMED_EXPORT_STATES.pop(video_id, None)
 
 
 def forget_restarted(video_id):
@@ -87,6 +141,8 @@ def _drop(run):
     _RUNS.pop(run["video_id"], None)
     if _ARMED_EXPORTS.get(run["video_id"]) == run["id"]:
         _ARMED_EXPORTS.pop(run["video_id"], None)
+    if (_ARMED_EXPORT_STATES.get(run["video_id"]) or (None,))[0] == run["id"]:
+        _ARMED_EXPORT_STATES.pop(run["video_id"], None)
 
 
 def begin(video_id, *, resuming=False):
@@ -129,6 +185,9 @@ def begin(video_id, *, resuming=False):
             "manual_completed_stages": list(video.manual_completed_stages or []),
             "manual_completed_stage": video.manual_completed_stage,
             "backup": "", "temp_files": [], "backup_ready": False}
+        armed_state = _ARMED_EXPORT_STATES.get(video_id)
+        if video.project_type == "manual" and tool == "export" and armed_state and armed_state[0] == run["id"]:
+            run["manual_idle_state"] = armed_state[1]
         _RUNS[video_id] = run
         _CURRENT.run = run
         temporary = owned_path(root / "temp", root)
@@ -173,6 +232,7 @@ def request_discard(video_id, run_id=None):
     run = _RUNS.get(video_id) or _get(video_id)
     if run_id is None or _ARMED_EXPORTS.get(video_id) == run_id:
         _ARMED_EXPORTS.pop(video_id, None)
+        _ARMED_EXPORT_STATES.pop(video_id, None)
     if run_id is not None and run and run["id"] != run_id:
         return
     if run:
@@ -259,6 +319,10 @@ def rollback(run):
             run["state"] = "discarding"
             _save(run)
             return False
+        fields = _validated_idle_fields(video, run.get("manual_idle_state"))
+        if (video.project_type == "manual" and run.get("export_owned") and fields is not None
+                and _ARMED_EXPORTS.get(video_id) in {None, run["id"]}):
+            video_store.update_video(video_id, **fields)
         _drop(run)
         return True
 

@@ -130,7 +130,139 @@ class ProjectCommandsController:
         self._host = host
         self._create_video = create_video or create_desktop_video
 
-    def export_selected_srt(self) -> bool:
+    def _srt_busy(self, *, editing=False) -> bool:
+        host = self._host
+        queue = getattr(host, "_processing_queue", None)
+        subtitle_model = getattr(host, "_manual_subtitles", None)
+        saving = any(state == "saving" for state in getattr(subtitle_model, "_states", {}).values())
+        return bool(editing and saving or getattr(host, "isProcessing", False) or getattr(queue, "has_work", False)
+                    or getattr(host, "videoExportBusy", False) or getattr(host, "mediaImportBusy", False))
+
+    def _srt_duration(self, video):
+        model = getattr(self._host, "_manual_editor_document", None)
+        document = model.document_object if model and model.video_id == video.video_id else None
+        return max((asset.duration_ms for asset in document.assets if asset.kind == "source"), default=0) if document else 0
+
+    def choose_srt_import_file(self) -> dict:
+        from haizflow.services import subtitle_import
+
+        host = self._host
+        if self._srt_busy(editing=True):
+            return {}
+        video = host._selected_video()
+        if not video or video.project_type != "manual":
+            host.appAlertRequested.emit("Chưa có video nguồn", "Hãy nhập video trước khi nhập SRT.", "warning")
+            return {}
+        path, _ = QFileDialog.getOpenFileName(None, "Nhập SRT", native_media_dialog_directory(), "SubRip (*.srt)")
+        if not path or self._srt_busy(editing=True) or getattr(host._selected_video(), "video_id", "") != video.video_id:
+            return {}
+        try:
+            _data, segments = subtitle_import.inspect_srt(path, duration_ms=self._srt_duration(video))
+        except (OSError, ValueError) as exc:
+            host.appAlertRequested.emit("Không thể nhập SRT", str(exc), "warning")
+            return {}
+        return {"videoId": video.video_id, "path": path, "filename": Path(path).name,
+                "count": len(segments), "language": subtitle_import.detect_language(segments)}
+
+    def _refresh_srt_workspace(self, video_id):
+        host = self._host
+        timer = getattr(host, "_manual_voice_refresh_timer", None)
+        if timer is not None:
+            timer.stop()
+        host._manual_voice_refresh_pending = False
+        host._manual_voice_refresh_enabled = False
+        history = getattr(host, "_manual_edit_history", None)
+        if history is not None:
+            history.forget_context(f"video:{video_id}")
+        model = getattr(host, "_manual_subtitles", None)
+        if model is not None:
+            model.reset_source(video_id)
+        refresh = getattr(host, "_refresh_selected_video_snapshot", None)
+        if callable(refresh):
+            refresh()
+        host.selectedVideoChanged.emit()
+        loader = getattr(host, "loadManualSubtitles", None)
+        if callable(loader):
+            loader()
+        notice = getattr(host, "manualSubtitleDocumentChanged", None)
+        if notice is not None:
+            notice.emit()
+        host.refreshVideos()
+
+    def import_selected_srt(self, path="", language="", video_id="") -> bool:
+        from haizflow.services import subtitle_import
+
+        host = self._host
+        if self._srt_busy(editing=True):
+            host.appAlertRequested.emit("Đang xử lý", "Chờ tác vụ hoàn tất trước khi nhập SRT.", "warning")
+            return False
+        video = host._selected_video()
+        if not video or video.project_type != "manual" or video_id and video_id != video.video_id:
+            host.appAlertRequested.emit("Chưa có video nguồn", "Hãy nhập video trước khi nhập SRT.", "warning")
+            return False
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(None, "Nhập SRT", native_media_dialog_directory(), "SubRip (*.srt)")
+        if not path or self._srt_busy(editing=True) or getattr(host._selected_video(), "video_id", "") != video.video_id:
+            return False
+        try:
+            count = subtitle_import.import_srt(video.video_id, path, duration_ms=self._srt_duration(video), language=language)
+        except (OSError, ValueError, RuntimeError) as exc:
+            host.appAlertRequested.emit("Không thể nhập SRT", str(exc), "warning")
+            return False
+        self._refresh_srt_workspace(video.video_id)
+        host.appAlertRequested.emit("Đã nhập SRT", f"{count} đoạn phụ đề đã hiển thị. Có thể tạo giọng hoặc dịch tiếp.", "info")
+        return True
+
+    def remove_selected_srt(self, video_id="") -> bool:
+        from haizflow.services import subtitle_import
+
+        host = self._host
+        if self._srt_busy(editing=True):
+            host.appAlertRequested.emit("Đang xử lý", "Chờ tác vụ hoàn tất trước khi xóa SRT.", "warning")
+            return False
+        video = host._selected_video()
+        if not video or video_id and video.video_id != video_id or not subtitle_import.has_import(video):
+            return False
+        if QMessageBox.question(None, "Xóa SRT đã nhập?", "Xóa phụ đề và giọng đọc hiện tại? Video nguồn và các lớp khác được giữ nguyên.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return False
+        if self._srt_busy(editing=True) or getattr(host._selected_video(), "video_id", "") != video.video_id:
+            return False
+        try:
+            if not subtitle_import.remove_srt(video.video_id):
+                return False
+        except (OSError, ValueError, RuntimeError) as exc:
+            host.appAlertRequested.emit("Không thể xóa SRT", str(exc), "warning")
+            return False
+        self._refresh_srt_workspace(video.video_id)
+        host.appAlertRequested.emit("Đã xóa SRT", "Phụ đề và giọng đọc đã được xóa. Có thể xử lý lại hoặc nhập SRT khác.", "info")
+        return True
+
+    def srt_export_settings(self) -> dict:
+        if self._srt_busy():
+            return {}
+        host = self._host
+        video = host._selected_video()
+        if not video:
+            return {}
+        from haizflow.services import subtitle_export
+
+        model = getattr(host, "_manual_editor_document", None)
+        document = model.document_object if model and model.video_id == video.video_id else None
+        result = bool(subtitle_export.compose_document_srt(document))
+        try:
+            original = bool(subtitle_export.compose_source_srt(video, document))
+        except (OSError, ValueError, TypeError) as exc:
+            original = False
+            if not result:
+                host.appAlertRequested.emit("Không thể đọc SRT", str(exc), "warning")
+                return {}
+        if not original and not result:
+            host.appAlertRequested.emit("Chưa có phụ đề để xuất", "Nhập SRT hoặc chạy Nhận dạng & dịch trước.", "warning")
+            return {}
+        return {"videoId": video.video_id, "source": original, "result": result}
+
+    def export_selected_srt(self, kind: str = "result", video_id: str = "") -> bool:
         from haizflow.services import desktop_settings, subtitle_export
         from haizflow.services.video_export import export_filename, project_display_name
 
@@ -144,6 +276,8 @@ class ProjectCommandsController:
                 "warning")
             return False
         video = host._selected_video()
+        if not video or video_id and video.video_id != video_id or kind not in {"source", "result", "both"}:
+            return False
         model = getattr(host, "_manual_editor_document", None)
         document = model.document_object if model and video and model.video_id == video.video_id else None
         # Text edits can still be publishing when the save picker opens. Take
@@ -153,7 +287,16 @@ class ProjectCommandsController:
                       if subtitle_model._states.get(item["segment_id"]) in {"saving", "error"}}
                      if subtitle_model is not None and video and subtitle_model.video_id == video.video_id else {})
         content = subtitle_export.compose_document_srt(document, overrides)
-        if not content:
+        original = ""
+        if kind in {"source", "both"}:
+            try:
+                original = subtitle_export.compose_source_srt(video, document)
+            except (OSError, ValueError, TypeError) as exc:
+                host.appAlertRequested.emit(text("Không thể đọc SRT gốc", "Cannot read source SRT"), str(exc), "warning")
+                return False
+        if kind == "source":
+            content = original
+        if not content or kind == "both" and not original:
             host.appAlertRequested.emit(
                 text("Chưa có phụ đề để xuất", "No subtitles to export"),
                 text("Nhận dạng & dịch hoặc thêm phụ đề trước khi xuất SRT.",
@@ -168,15 +311,25 @@ class ProjectCommandsController:
         )
         if not path:
             return False
+        if self._srt_busy() or getattr(host._selected_video(), "video_id", "") != video.video_id:
+            return False
         try:
             target = subtitle_export.validate_srt_destination(path)
-            if target.exists() and QMessageBox.question(
-                None, text("Thay thế tệp SRT?", "Replace SRT file?"), str(target),
+            targets = ([target.with_name(target.stem + ".source.srt"), target.with_name(target.stem + ".result.srt")]
+                       if kind == "both" else [target])
+            existing = [str(item) for item in targets if item.exists()]
+            if existing and QMessageBox.question(
+                None, text("Thay thế tệp SRT?", "Replace SRT file?"), "\n".join(existing),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             ) != QMessageBox.StandardButton.Yes:
                 return False
-            subtitle_export.save_srt(content, target)
+            if self._srt_busy():
+                return False
+            if kind == "both":
+                subtitle_export.save_srt_pair(original, content, target)
+            else:
+                subtitle_export.save_srt(content, target)
         except (OSError, ValueError) as exc:
             host.appAlertRequested.emit(
                 text("Không thể xuất SRT", "SRT export failed"),
@@ -185,7 +338,7 @@ class ProjectCommandsController:
                 "warning",
             )
             return False
-        host.appAlertRequested.emit(text("Đã xuất SRT", "SRT exported"), str(target), "info")
+        host.appAlertRequested.emit(text("Đã xuất SRT", "SRT exported"), "\n".join(str(item) for item in targets), "info")
         return True
 
     @staticmethod

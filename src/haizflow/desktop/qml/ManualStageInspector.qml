@@ -359,29 +359,34 @@ InspectorPanel {
                 }
             }
 
-            StudioButton {
+            DeferredActionButton {
                 objectName: "manualResumeToolButton"
                 Layout.fillWidth: true
                 visible: (root.taskBelongsToTool && (root.taskQueued || root.taskPaused))
                     || ["translation", "image", "export"].indexOf(root.toolId) >= 0
-                text: root.taskProcessing && root.taskBelongsToTool ? qsTr("Tạm dừng")
+                readyText: root.taskProcessing && root.taskBelongsToTool ? qsTr("Tạm dừng")
                     : root.taskQueued && root.taskBelongsToTool ? qsTr("Hủy tác vụ")
                     : root.taskPaused && root.taskBelongsToTool ? qsTr("Tiếp tục") : root.runLabel()
                 iconName: root.taskProcessing && root.taskBelongsToTool ? "pause"
                     : root.taskQueued && root.taskBelongsToTool ? "stop" : "play"
                 variant: (root.taskProcessing || root.taskQueued) && root.taskBelongsToTool
                     ? "danger" : "primary"
-                enabled: root.taskProcessing && root.taskBelongsToTool
+                actionEnabled: root.taskProcessing && root.taskBelongsToTool
                     || root.taskQueued && root.taskBelongsToTool
                     || root.taskPaused && root.taskBelongsToTool
                     || (root.editable && !root.taskQueued && (root.toolId === "image" || root.toolState.canRun)
                         && (root.toolId !== "export" || Boolean(root.exportPreflight.canExport)))
-                onClicked: {
-                    if ((root.taskProcessing || root.taskQueued) && root.taskBelongsToTool)
+                actionContext: ({ videoId: AppController.selectedVideoId, toolId: root.toolId,
+                    intent: (root.taskProcessing || root.taskQueued) && root.taskBelongsToTool ? "pause"
+                        : root.taskPaused && root.taskBelongsToTool ? "resume" : "run" })
+                onExecute: context => {
+                    if (!context || context.videoId !== AppController.selectedVideoId || context.toolId !== root.toolId)
+                        return;
+                    if (context.intent === "pause" && (root.taskProcessing || root.taskQueued) && root.taskBelongsToTool)
                         AppController.cancelManualTool(AppController.manualTargetTool);
-                    else if (root.taskPaused && root.taskBelongsToTool)
+                    else if (context.intent === "resume" && root.taskPaused && root.taskBelongsToTool)
                         AppController.resumeSelectedVideo();
-                    else {
+                    else if (context.intent === "run" && !root.taskProcessing && !root.taskQueued) {
                         if (root.toolId === "image") {
                             root.applyImageTreatment();
                             return;

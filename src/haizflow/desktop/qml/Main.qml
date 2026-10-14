@@ -44,7 +44,7 @@ ApplicationWindow {
     readonly property bool compactNavigation: width < 1280
     readonly property bool videoProcessing: AppController.isProcessing && !AppController.isSwitchingProcessingDevice
     readonly property var activeExportJob: AppController.videoExportJobs.find(
-        job => job.status === "exporting" || job.status === "pending") || ({})
+        job => job.status === "rendering" || job.status === "exporting" || job.status === "pending") || ({})
     readonly property bool exportWorking: AppController.videoExportBusy
         && Boolean(activeExportJob.videoId)
     // qmllint disable stale-property-read
@@ -560,14 +560,16 @@ ApplicationWindow {
                     : root.selectedTaskPaused ? "paused"
                     : root.selectedTaskQueued ? "queued" : "ready"
             message: root.selectedTaskFailed ? AppController.selectedFailureMessage
-                : root.exportWorking ? (root.activeExportJob.rangeMs
-                    ? qsTr("Đang xuất đoạn video") : qsTr("Đang xuất video"))
+                : root.exportWorking ? (root.activeExportJob.status === "rendering"
+                    ? qsTr("Đang dựng video") : root.activeExportJob.status === "exporting"
+                    ? qsTr("Đang hoàn thiện và lưu video") : qsTr("Đang chuẩn bị xuất"))
                 : root.videoProcessing ? (AppController.isSelectedVideoProcessing
                     ? AppController.selectedStageLabel
                     : qsTr("Đang xử lý video khác"))
                 : root.selectedTaskPaused || root.selectedTaskQueued
                     ? I18n.progressDetail(AppController.selectedProgressDetail) : ""
             progress: root.exportWorking ? (root.activeExportJob.status === "exporting"
+                || Boolean(root.activeExportJob.progressMeasured)
                 ? Math.max(0, Math.min(1, Number(root.activeExportJob.progress || 0) / 100)) : -1)
                 : AppController.isSelectedVideoProcessing
                 && root.selectedProgressMeasured

@@ -176,8 +176,22 @@ class ProcessingLifecycleController:
             current_video = video_store.get_video(video_id)
             if not current_video or current_video.status in {"paused", "cancelled"}:
                 return
+            warmup = getattr(host, "_smart_warmup", None)
+            if warmup is not None and not requires_model_runtime:
+                warmup.foreground_work_requested(set())
             if requires_model_runtime:
                 profile = runtime_profile()
+                constrained = profile.total_ram_gib < 24 or (profile.cuda_available and profile.total_vram_gib < 12)
+                if warmup is not None and not constrained:
+                    required = {
+                        "separation": {"separation"}, "translation": {"recognition"},
+                        "image": {"ocr"}, "voice": {"voice"},
+                    }.get(manual_tool, set()) if manual_tool else set(warmup.resident)
+                    if manual_tool == "translation":
+                        from haizflow.pipeline.process_video import foreground_capability
+
+                        required = {foreground_capability(current_video, manual_tool)}
+                    warmup.foreground_work_requested(required)
                 if profile.total_ram_gib < 24 or (not profile.cuda_available and cpu_memory_constrained()) or (
                     profile.cuda_available and profile.total_vram_gib < 12
                 ):

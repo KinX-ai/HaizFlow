@@ -1,6 +1,8 @@
 """Export editor captions without rendering or modifying project artifacts."""
 
 import os
+import json
+import shutil
 import tempfile
 from datetime import timedelta
 from pathlib import Path
@@ -10,6 +12,89 @@ import srt
 from haizflow.schemas.editor import EditorDocument
 from haizflow.services import project_store, video_store
 from haizflow.utils.atomic_file import replace_with_retry
+
+
+def compose_source_srt(video, document: EditorDocument | None = None) -> str:
+    """Original text follows source cuts, never translated caption edits."""
+    from haizflow.services import manual_artifacts, subtitle_import
+    from haizflow.pipeline.sequence_compiler import map_source_intervals
+
+    if subtitle_import.has_import(video):
+        segments = subtitle_import.load_segments(video)
+    else:
+        record = manual_artifacts.active(video, "recognition") if getattr(video, "active_artifacts", None) else None
+        path = ((record or {}).get("resolved_outputs") or {}).get("segments")
+        # A pending recognition-model choice may detach the active branch;
+        # keep the last published original transcript available for export.
+        if not path:
+            path = (getattr(video, "files", {}) or {}).get("source_segments")
+        if not path:
+            return ""
+        root = Path(video_store.get_video_dir(video.video_id))
+        if not Path(path).resolve().is_relative_to(root.resolve()):
+            raise ValueError("Source subtitles are outside the project workspace.")
+        segments = json.loads(Path(path).read_text(encoding="utf-8"))
+    cues = []
+    for item in segments:
+        content = str(item.get("text", "")).strip()
+        if not content:
+            continue
+        for start, end in map_source_intervals(document, [(float(item["start"]), float(item["end"]))]):
+            if start < 0 or end <= start:
+                continue
+            cues.append(srt.Subtitle(index=0, start=timedelta(seconds=start), end=timedelta(seconds=end), content=content))
+    return srt.compose(sorted(cues, key=lambda cue: (cue.start, cue.end)), eol="\r\n")
+
+
+def save_srt_pair(source: str, result: str, destination: str | Path) -> list[Path]:
+    """Stage both files before publication; restore previous files on failure."""
+    target = validate_srt_destination(destination)
+    outputs = {target.with_name(target.stem + ".source.srt"): source,
+               target.with_name(target.stem + ".result.srt"): result}
+    if not all(content.strip() for content in outputs.values()):
+        raise ValueError("No subtitles to export.")
+    temporary = []
+    prepared = []
+    published = []
+    try:
+        for path, content in outputs.items():
+            validate_srt_destination(path)
+            descriptor, name = tempfile.mkstemp(prefix=".haizflow-srt-", suffix=".tmp", dir=path.parent)
+            temporary.append(Path(name))
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            backup = None
+            if path.exists():
+                descriptor, backup_name = tempfile.mkstemp(prefix=".haizflow-srt-", suffix=".bak", dir=path.parent)
+                os.close(descriptor)
+                backup = Path(backup_name)
+                temporary.append(backup)
+                shutil.copy2(path, backup)
+            prepared.append((path, Path(name), backup))
+        for path, name, backup in prepared:
+            replace_with_retry(name, path)
+            published.append((path, backup))
+    except Exception:
+        for path, backup in reversed(published):
+            if backup:
+                try:
+                    replace_with_retry(backup, path)
+                except OSError:
+                    # Preserve the recovery copy if Windows keeps the target locked.
+                    temporary.remove(backup)
+                    raise
+            else:
+                path.unlink(missing_ok=True)
+        raise
+    finally:
+        for name in temporary:
+            try:
+                name.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return list(outputs)
 
 
 def compose_document_srt(document: EditorDocument | None, text_overrides: dict | None = None) -> str:

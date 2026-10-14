@@ -14,6 +14,7 @@ def video_factory(tmp_path, monkeypatch):
     monkeypatch.setattr(processing_runs, "_RUNS", {})
     monkeypatch.setattr(processing_runs, "_CHECKED", set())
     monkeypatch.setattr(processing_runs, "_ARMED_EXPORTS", {})
+    monkeypatch.setattr(processing_runs, "_ARMED_EXPORT_STATES", {})
     processing_runs._CURRENT.run = None
     def create(kind="manual"):
         project = project_store.create_project("Run " + uuid.uuid4().hex[:8], str(tmp_path), kind)
@@ -54,6 +55,74 @@ def test_cancel_removes_new_complete_cache_but_restores_previous_result(video_fa
     assert restored.files["final_video"] == str(old_path)
     assert Path(video.files["video_input"]).read_bytes() == b"original source"
     assert processing_runs._get(video.video_id) is None
+
+
+@pytest.mark.parametrize("prior_status", ["manual_ready", "done", "paused"])
+def test_cancelled_manual_export_restores_exact_idle_state_after_cache_rollback(video_factory, prior_status):
+    video = video_factory()
+    old = artifact(video, "export", "old-state")
+    fields = {"status": prior_status, "step": "manual_voice", "step_detail": "Giọng đã tạo",
+              "progress": 81, "current_item": 7, "total_items": 7, "error": None,
+              "manual_target_tool": "voice" if prior_status == "paused" else "",
+              "resume_step": "voice" if prior_status == "paused" else ""}
+    video_store.update_video(video.video_id, **fields)
+    identifier = processing_runs.arm_export(video.video_id)
+    # Queue updates happen after capture, before the worker journal exists.
+    video_store.update_video(video.video_id, status="processing", progress=0, manual_target_tool="export")
+    processing_runs.begin(video.video_id)
+    new = artifact(video, "export", "cancelled-new")
+    video_store.update_video(video.video_id, status="cancelled", step="cancelled", progress=99, resume_step="")
+    processing_runs.request_discard(video.video_id, identifier)
+    processing_runs.finish(video.video_id)
+    restored = video_store.get_video(video.video_id)
+    for name, value in fields.items():
+        assert getattr(restored, name) == value
+    assert restored.active_artifacts["export"] == "old-state"
+    assert Path(old["resolved_outputs"]["data"]).exists()
+    assert not Path(new["resolved_outputs"]["data"]).exists()
+
+
+def test_cancelled_export_idle_snapshot_survives_app_restart_journal_load(video_factory, monkeypatch):
+    video = video_factory()
+    video_store.update_video(video.video_id, status="manual_ready", manual_target_tool="", progress=87)
+    identifier = processing_runs.arm_export(video.video_id)
+    video_store.update_video(video.video_id, status="processing", manual_target_tool="export")
+    processing_runs.begin(video.video_id)
+    video_store.update_video(video.video_id, status="paused")
+    processing_runs.finish(video.video_id)
+    monkeypatch.setattr(processing_runs, "_RUNS", {})
+    monkeypatch.setattr(processing_runs, "_CHECKED", set())
+    monkeypatch.setattr(processing_runs, "_ARMED_EXPORTS", {})
+    monkeypatch.setattr(processing_runs, "_ARMED_EXPORT_STATES", {})
+    video_store.update_video(video.video_id, status="cancelled")
+    assert processing_runs.settle_export(video.video_id, "cancelled", identifier)
+    restored = video_store.get_video(video.video_id)
+    assert restored.status == "manual_ready" and restored.progress == 87
+    assert not restored.manual_target_tool
+
+
+def test_queued_cancel_without_worker_restores_state_but_not_a_replaced_source(video_factory):
+    video = video_factory()
+    video_store.update_video(video.video_id, status="manual_ready", manual_target_tool="")
+    video = video_store.get_video(video.video_id)
+    snapshot = processing_runs.manual_export_state(video)
+    video_store.update_video(video.video_id, status="cancelled", manual_target_tool="export")
+    assert processing_runs.restore_cancelled_manual_export(video.video_id, snapshot)
+    assert video_store.get_video(video.video_id).status == "manual_ready"
+    video_store.update_video(video.video_id, status="cancelled", created_at="changed-source")
+    assert not processing_runs.restore_cancelled_manual_export(video.video_id, snapshot)
+    assert video_store.get_video(video.video_id).status == "cancelled"
+
+
+def test_auto_export_cancel_keeps_its_original_cancel_semantics(video_factory):
+    video = video_factory("single")
+    assert processing_runs.manual_export_state(video) is None
+    identifier = processing_runs.arm_export(video.video_id)
+    processing_runs.begin(video.video_id)
+    video_store.update_video(video.video_id, status="cancelled")
+    processing_runs.request_discard(video.video_id, identifier)
+    processing_runs.finish(video.video_id)
+    assert video_store.get_video(video.video_id).status == "cancelled"
 
 
 def test_pause_and_resume_keep_progress_then_explicit_restart_removes_it(video_factory):

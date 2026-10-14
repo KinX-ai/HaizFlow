@@ -138,22 +138,29 @@ AppDialog {
     }
     footerActions: [
         StudioButton { text: qsTr("Hủy"); variant: "ghost"; onClicked: root.close() },
-        StudioButton {
+        DeferredActionButton {
             objectName: "confirmVideoExport"
-            text: root.processBeforeExport ? qsTr("Xử lý và xuất") : qsTr("Xuất")
+            readyText: root.processBeforeExport ? qsTr("Xử lý và xuất") : qsTr("Xuất")
             variant: "primary"
-            enabled: root.destination.length > 0 && !root.controller.videoExportBusy
+            actionEnabled: root.destination.length > 0 && !root.controller.videoExportBusy
                 && (root.batchMode || (!root.controller.isSelectedVideoProcessing
                     && !root.controller.isSelectedVideoQueued))
-            onClicked: {
-                const started = root.batchMode
-                    ? root.controller.processBatchTo(root.configuration.projectKey, root.configuration.videoIds,
-                        quality.currentValue, root.destination, root.destinationExists, root.processBeforeExport)
-                    : root.processBeforeExport
-                    ? root.controller.processVideoTo(root.configuration.videoId, quality.currentValue, root.destination, root.destinationExists)
-                    : exportRange.currentValue
-                    ? root.controller.exportVideoSegmentTo(root.configuration.videoId, quality.currentValue, root.destination, root.destinationExists, exportRange.currentValue)
-                    : root.controller.exportVideoTo(root.configuration.videoId, quality.currentValue, root.destination, root.destinationExists);
+            actionContext: ({ batch: root.batchMode, process: root.processBeforeExport,
+                projectKey: root.configuration.projectKey || "", videoIds: root.configuration.videoIds || [],
+                videoId: root.configuration.videoId || "", preset: quality.currentValue,
+                destination: root.destination, overwrite: root.destinationExists, segmentId: exportRange.currentValue || "" })
+            onExecute: context => {
+                if (!context || context.videoId !== (root.configuration.videoId || "")
+                        || context.projectKey !== (root.configuration.projectKey || ""))
+                    return;
+                const started = context.batch
+                    ? root.controller.processBatchTo(context.projectKey, context.videoIds,
+                        context.preset, context.destination, context.overwrite, context.process)
+                    : context.process
+                    ? root.controller.processVideoTo(context.videoId, context.preset, context.destination, context.overwrite)
+                    : context.segmentId
+                    ? root.controller.exportVideoSegmentTo(context.videoId, context.preset, context.destination, context.overwrite, context.segmentId)
+                    : root.controller.exportVideoTo(context.videoId, context.preset, context.destination, context.overwrite);
                 if (started)
                     root.close();
             }

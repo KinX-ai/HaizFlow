@@ -165,7 +165,79 @@ def test_rejecting_overwrite_preserves_destination(tmp_path, external_storage):
     assert target.read_bytes() == b"previous result"
 
 
+def test_two_srt_outputs_keep_original_and_result_separate(tmp_path, external_storage):
+    source = subtitle_export.compose_document_srt(document(), {"s1": "Original source"})
+    result = subtitle_export.compose_document_srt(document(), {"s1": "Bản dịch"})
+    paths = subtitle_export.save_srt_pair(source, result, tmp_path / "movie.srt")
+    assert [path.name for path in paths] == ["movie.source.srt", "movie.result.srt"]
+    assert next(srt.parse(paths[0].read_text(encoding="utf-8"))).content == "Original source"
+    assert next(srt.parse(paths[1].read_text(encoding="utf-8"))).content == "Bản dịch"
+    assert sorted(tmp_path.iterdir()) == sorted(paths)
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_pair_second_publication_failure_rolls_back_first_and_leaves_no_temps(tmp_path, external_storage, monkeypatch, existing):
+    source = tmp_path / "movie.source.srt"
+    result = tmp_path / "movie.result.srt"
+    if existing:
+        source.write_bytes(b"old source")
+        result.write_bytes(b"old result")
+    replace = subtitle_export.replace_with_retry
+    calls = 0
+
+    def fail_second(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("locked target")
+        return replace(*args)
+
+    monkeypatch.setattr(subtitle_export, "replace_with_retry", fail_second)
+    with pytest.raises(PermissionError):
+        subtitle_export.save_srt_pair("source captions", "result captions", tmp_path / "movie.srt")
+    if existing:
+        assert source.read_bytes() == b"old source"
+        assert result.read_bytes() == b"old result"
+        assert sorted(tmp_path.iterdir()) == sorted([source, result])
+    else:
+        assert not list(tmp_path.iterdir())
+
+
+def test_original_export_no_captions_blocks_before_picker():
+    host = host_for(document())
+    with patch("haizflow.desktop.project_commands_controller.QFileDialog.getSaveFileName") as picker:
+        assert not ProjectCommandsController(host).export_selected_srt("source")
+        picker.assert_not_called()
+
+
+def test_export_pair_checks_overwrite_on_both_output_names(tmp_path, external_storage):
+    host = host_for(document())
+    target = tmp_path / "movie.srt"
+    source = tmp_path / "movie.source.srt"
+    source.write_bytes(b"keep source")
+    with (patch("haizflow.desktop.project_commands_controller.QFileDialog.getSaveFileName", return_value=(str(target), "")),
+          patch.object(subtitle_export, "compose_source_srt", return_value="Original"),
+          patch("haizflow.desktop.project_commands_controller.QMessageBox.question", return_value=65536),
+          patch("haizflow.services.desktop_settings.load_settings", return_value={})):
+        assert not ProjectCommandsController(host).export_selected_srt("both")
+    assert source.read_bytes() == b"keep source"
+    assert not (tmp_path / "movie.result.srt").exists()
+
+
+def test_export_rechecks_busy_after_native_picker(tmp_path, external_storage):
+    host = host_for(document())
+
+    def pick(*_args):
+        host.isProcessing = True
+        return str(tmp_path / "movie.srt"), ""
+
+    with (patch("haizflow.desktop.project_commands_controller.QFileDialog.getSaveFileName", side_effect=pick),
+          patch("haizflow.services.desktop_settings.load_settings", return_value={})):
+        assert not ProjectCommandsController(host).export_selected_srt()
+    assert not list(tmp_path.iterdir())
+
+
 def test_workspace_action_is_directly_below_audio_and_does_not_start_a_pipeline_stage():
     workspace = (Path(__file__).parents[1] / "src/haizflow/desktop/qml/ManualWorkspace.qml").read_text(encoding="utf-8")
-    assert 'Object.assign({}, root.toolModel[5], {stageIndex: 5}),\n            {label: qsTr("Xuất SRT"), stageIndex: 8,' in workspace
-    assert "AppController.exportSelectedSrt();\n                return;" in workspace
+    assert workspace.index('root.toolModel[5], {stageIndex: 5}') < workspace.index('qsTr("Nhập SRT")') < workspace.index('qsTr("Xuất SRT")')
+    assert 'srtExportLoader.invoke("openForSelection");\n                return;' in workspace

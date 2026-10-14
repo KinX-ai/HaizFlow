@@ -265,7 +265,8 @@ def export_video(video, destination, *, overwrite: bool = False, cancel: threadi
             handle, temporary = tempfile.mkstemp(prefix=".haizflow-export-", suffix=".partial.mp4", dir=target.parent)
             if range_ms is not None:
                 os.close(handle)
-                _render_range(source, Path(temporary), range_ms, video.export_preset, token, progress)
+                _render_range(source, Path(temporary), range_ms, video.export_preset, token, progress,
+                              timeline_speed=getattr(video, "output_speed", 1.0))
                 size = Path(temporary).stat().st_size
                 digest_value = _export_digest(Path(temporary), token)
                 copied = size
@@ -372,7 +373,8 @@ def _export_editor_range(video, destination, range_ms, *, overwrite, cancel, pro
             if record:
                 with render_lease(video) as verified:
                     _render_range(Path(verified["resolved_outputs"]["video"]), output,
-                                  range_ms, video.export_preset, token, progress)
+                                  range_ms, video.export_preset, token, progress,
+                                  timeline_speed=getattr(video, "output_speed", 1.0))
             else:
                 render_segment(video, document.model_copy(deep=True), range_ms, output, token, progress)
             if token.is_set():
@@ -413,7 +415,7 @@ def _export_editor_range(video, destination, range_ms, *, overwrite, cancel, pro
     return str(target)
 
 
-def _render_range(source, output, range_ms, preset, token, progress):
+def _render_range(source, output, range_ms, preset, token, progress, *, timeline_speed: float = 1.0):
     """Frame-accurate cut of the immutable composed render; never run AI."""
     from haizflow.pipeline.render import _ffmpeg_progress_fraction
     from haizflow.utils.ffmpeg import (
@@ -421,12 +423,18 @@ def _render_range(source, output, range_ms, preset, token, progress):
     )
 
     start, end = range_ms
+    speed = float(timeline_speed)
+    if not math.isfinite(speed) or not .25 <= speed <= 3:
+        raise ValueError("Output speed must be between 0.25x and 3x.")
     if (not isinstance(start, int) or not isinstance(end, int) or start < 0
-            or end - start < 80 or end > round(get_video_duration(str(source)) * 1000) + 100):
+            or end - start < 80 or end / (1000 * speed) > get_video_duration(str(source)) + .1):
         raise ValueError("Invalid result segment boundaries.")
     if token.is_set():
         raise ExportCancelled("Export cancelled.")
-    duration = (end - start) / 1000
+    # Editor coordinates stay on the original sequence clock. The cached
+    # composed render is already sped up/slowed down, including its audio.
+    rendered_start = start / (1000 * speed)
+    duration = (end - start) / (1000 * speed)
     meter = output.with_suffix(".progress")
     process = None
     encoder, encoder_args = preferred_export_encoder(preset_settings(preset)["crf"],
@@ -444,7 +452,7 @@ def _render_range(source, output, range_ms, preset, token, progress):
             process = subprocess.Popen([
                 _binary("ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
                 "-progress", str(meter), "-stats_period", "0.2", "-nostats",
-                "-ss", str(start / 1000), "-i", str(source), "-t", str(duration),
+                "-ss", str(rendered_start), "-i", str(source), "-t", str(duration),
                 "-map", "0:v:0", "-map", "0:a:0?", "-c:v", encoder, *encoder_args, "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output),
             ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",

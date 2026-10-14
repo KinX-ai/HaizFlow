@@ -240,6 +240,7 @@ class VideoExportController(QObject):
             from haizflow.services import processing_runs
 
             job["runScopeId"] = processing_runs.arm_export(video.video_id)
+            job["renderRequired"] = True
             if not ProjectCommandsController(self.host).process_for_export(video.video_id):
                 processing_runs.disarm_export(video.video_id)
                 video_store.update_video(video.video_id, export_preset=previous_preset)
@@ -320,6 +321,7 @@ class VideoExportController(QObject):
 
             for video in videos:
                 job = next(item for item in jobs if item["videoId"] == video.video_id)
+                job["renderRequired"] = True
                 job["runScopeId"] = processing_runs.arm_export(video.video_id)
                 prepare_video_resume(video.video_id)
             self.host._batch_running = True
@@ -354,6 +356,8 @@ class VideoExportController(QObject):
     def request_render(self, video, job):
         from haizflow.services import processing_runs
 
+        job["manualIdleState"] = processing_runs.manual_export_state(video)
+        job["renderRequired"] = True
         job["runScopeId"] = processing_runs.arm_export(video.video_id)
         if video.project_type == "manual":
             if str(self.host._selected_video_id or "") != video.video_id or not self.host.runManualTool("export"):
@@ -536,6 +540,18 @@ class VideoExportController(QObject):
             self.host.processingChanged.emit()
             self.host.refreshVideos()
 
+    @staticmethod
+    def job_progress(job, status, value):
+        """One measured meter across rendering, verification and publication."""
+        if status == "done":
+            return 100
+        raw = max(0, min(100, int(value or 0)))
+        if status == "rendering":
+            return round(raw * .90)
+        if status == "exporting" and job.get("renderRequired"):
+            return min(99, 90 + round(raw * .09))
+        return min(99, raw)
+
     def poll(self):
         self._cancelling_render_tokens = {
             key: token for key, token in self._cancelling_render_tokens.items()
@@ -548,7 +564,10 @@ class VideoExportController(QObject):
             identifier, status, progress, error = self.events.get_nowait()
             job = next((item for item in self.jobs if item["videoId"] == identifier), None)
             if job:
-                job.update(status=status, progress=progress, error=error)
+                measured_progress = self.job_progress(job, status, progress)
+                if status in {"rendering", "exporting", "pending"}:
+                    measured_progress = max(int(job.get("progress", 0)), measured_progress)
+                job.update(status=status, progress=measured_progress, error=error)
                 changed = True
                 if status == "done":
                     self.host.videoExportCompleted.emit(identifier, job["path"])
@@ -560,6 +579,8 @@ class VideoExportController(QObject):
                 if job["status"] == "cancelled":
                     processing_runs.request_discard(job["videoId"], job.get("runScopeId"))
                 complete = processing_runs.settle_export(job["videoId"], job["status"], job.get("runScopeId"))
+                if complete and job["status"] == "cancelled":
+                    processing_runs.restore_cancelled_manual_export(job["videoId"], job.get("manualIdleState"))
                 job["runSettled"] = complete
                 pending_cleanup = pending_cleanup or not complete
                 settled_run = settled_run or bool(job.get("runScopeId"))
@@ -573,7 +594,7 @@ class VideoExportController(QObject):
                     "manual_separation", "manual_recognition", "manual_audio",
                     "waiting_for_models", "starting",
                 }
-                progress = max(0, min(100, int(video.progress or 0)))
+                progress = max(int(job.get("progress", 0)), self.job_progress(job, "rendering", video.progress))
                 if job.get("progressMeasured") != measured or job["progress"] != progress:
                     job.update(progress=progress, progressMeasured=measured)
                     changed = True

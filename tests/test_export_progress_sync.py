@@ -29,13 +29,58 @@ def test_job_receives_pipeline_progress_even_while_queue_owns_video(monkeypatch,
     monkeypatch.setattr("haizflow.desktop.video_export_controller.video_store.get_video", lambda _key: video)
     try:
         exporter.poll()
-        assert exporter.jobs[0]["progress"] == 61
+        assert exporter.jobs[0]["progress"] == 55
         assert exporter.jobs[0]["progressMeasured"] is measured
         video.progress = 79
         exporter.poll()
-        assert exporter.jobs[0]["progress"] == 79
+        assert exporter.jobs[0]["progress"] == 71
     finally:
         exporter.shutdown()
+
+
+def test_progress_reserves_publication_phase_and_reaches_100_only_on_success():
+    job = {"renderRequired": True}
+    values = [VideoExportController.job_progress(job, "rendering", raw) for raw in (0, 50, 99, 100)]
+    values += [VideoExportController.job_progress(job, "exporting", raw) for raw in (0, 30, 95, 99, 100)]
+    assert values == sorted(values)
+    assert values[3] == 90
+    assert max(values) == 99
+    assert VideoExportController.job_progress(job, "done", 100) == 100
+    # Cached/range-only exports use the full meter but retain the same gate.
+    assert VideoExportController.job_progress({}, "exporting", 100) == 99
+
+
+def test_render_to_copy_transition_does_not_reset_or_finish_early(monkeypatch):
+    host = QObject()
+    host.exportStateChanged = Mock()
+    host.videoExportCompleted = Mock()
+    host._processing_queue = SimpleNamespace(contains=lambda _key: True)
+    exporter = VideoExportController(host)
+    exporter.timer.stop()
+    job = {"videoId": "video-a", "path": "out.mp4", "status": "rendering", "progress": 0, "renderRequired": True}
+    exporter.jobs = [job]
+    video = SimpleNamespace(step="manual_export", progress=100, status="processing")
+    monkeypatch.setattr("haizflow.desktop.video_export_controller.video_store.get_video", lambda _key: video)
+    try:
+        exporter.poll()
+        assert job["progress"] == 90
+        for raw in (0, 95, 99, 100):
+            exporter.events.put(("video-a", "exporting", raw, ""))
+            exporter.poll()
+            assert 90 <= job["progress"] <= 99
+        host.videoExportCompleted.emit.assert_not_called()
+        exporter.events.put(("video-a", "done", 100, ""))
+        exporter.poll()
+        assert job["progress"] == 100 and job["status"] == "done"
+        host.videoExportCompleted.emit.assert_called_once_with("video-a", "out.mp4")
+    finally:
+        exporter.shutdown()
+
+
+def test_activity_strip_reads_same_export_meter_in_render_and_save_phases():
+    source = (QML_DIR / "Main.qml").read_text(encoding="utf-8")
+    assert 'job.status === "rendering" || job.status === "exporting"' in source
+    assert 'Number(root.activeExportJob.progress || 0) / 100' in source
 
 
 def test_real_dialog_updates_and_reopens_without_sweeping_measured_progress():

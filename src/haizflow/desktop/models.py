@@ -17,6 +17,16 @@ from PySide6.QtCore import (
 from haizflow.desktop.media import thumbnail_source
 
 
+def presentation_video_status(video):
+    # Compatibility for Manual exports cancelled by older builds. The export
+    # job was cancelled, not the project's existing completed editor work.
+    if (getattr(video, "project_type", "") == "manual" and video.status == "cancelled"
+            and (getattr(video, "manual_target_tool", "") == "export"
+                 or getattr(video, "step_detail", "") == "Đã hủy lượt xuất.")):
+        return "manual_ready"
+    return video.status
+
+
 class ActivityEventModel(QAbstractListModel):
     """Bounded, user-facing activity stream derived from technical logs.
 
@@ -237,7 +247,7 @@ class VideoListModel(QAbstractListModel):
             self.VideoIdRole: video.video_id,
             self.FileRole: video.original_filename,
             self.ModeRole: "Full Auto",
-            self.StatusRole: video.status,
+            self.StatusRole: presentation_video_status(video),
             self.StepRole: video.step,
             self.UpdatedRole: video.updated_at,
             self.ProgressRole: video.progress,

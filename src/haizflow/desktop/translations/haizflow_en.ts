@@ -2,6 +2,10 @@
 <!DOCTYPE TS>
 <TS version="2.1" language="en_US" sourcelanguage="vi_VN">
 <context>
+    <name>DeferredActionButton</name>
+    <message><source>Đang chuẩn bị…</source><translation>Preparing…</translation></message>
+</context>
+<context>
     <name>ManualImageToolPanel</name>
     <message><source>Lớp che phụ đề</source><translation>Subtitle coverage</translation></message>
     <message><source>Thêm lớp</source><translation>Add layer</translation></message>
@@ -1816,6 +1820,9 @@ Author and owner of HaizFlow.</translation>
 </context>
 <context>
     <name>Main</name>
+    <message><source>Đang dựng video</source><translation>Rendering video</translation></message>
+    <message><source>Đang hoàn thiện và lưu video</source><translation>Finalizing and saving video</translation></message>
+    <message><source>Đang chuẩn bị xuất</source><translation>Preparing export</translation></message>
     <message>
         <location filename="../qml/Main.qml" line="+339"/>
         <source>Chưa thiết lập Gemini API Key</source>
@@ -5414,5 +5421,36 @@ Author and owner of HaizFlow.</translation>
     <message><source>Đang xử lý</source><translation>Processing</translation></message>
     <message><source>Đang chờ</source><translation>Waiting</translation></message>
     <message><source>Đóng</source><translation>Close</translation></message>
+</context>
+<context>
+    <name>SrtExportDialog</name>
+    <message><source>Xuất SRT</source><translation>Export SRT</translation></message>
+    <message><source>Phụ đề kết quả</source><translation>Result subtitles</translation></message>
+    <message><source>Phụ đề ngôn ngữ gốc</source><translation>Original-language subtitles</translation></message>
+    <message><source>Cả hai · 2 tệp SRT</source><translation>Both · 2 SRT files</translation></message>
+    <message><source>Hủy</source><translation>Cancel</translation></message>
+    <message><source>Xuất</source><translation>Export</translation></message>
+</context>
+<context>
+    <name>ManualWorkspace</name>
+    <message><source>Nhập SRT</source><translation>Import SRT</translation></message>
+    <message><source>Xóa SRT</source><translation>Remove SRT</translation></message>
+</context>
+<context>
+    <name>SrtImportDialog</name>
+    <message><source>Nhập SRT</source><translation>Import SRT</translation></message>
+    <message><source>Chọn tệp SRT</source><translation>Select an SRT file</translation></message>
+    <message><source>Chọn…</source><translation>Choose…</translation></message>
+    <message><source>Ngôn ngữ SRT</source><translation>SRT language</translation></message>
+    <message><source>Chọn ngôn ngữ · Khác</source><translation>Select language · Other</translation></message>
+    <message><source>Tiếng Việt</source><translation>Vietnamese</translation></message>
+    <message><source>Tiếng Anh</source><translation>English</translation></message>
+    <message><source>Tiếng Trung</source><translation>Chinese</translation></message>
+    <message><source>Hủy</source><translation>Cancel</translation></message>
+    <message><source>Nhập</source><translation>Import</translation></message>
+</context>
+<context>
+    <name>ManualTranslationToolPanel</name>
+    <message><source>Nguồn nhận dạng: SRT đã nhập</source><translation>Recognition source: imported SRT</translation></message>
 </context>
 </TS>

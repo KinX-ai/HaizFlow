@@ -8,8 +8,12 @@ Item {
     required property rect sourceRect
     property var videoSink: null
     readonly property real sourceRatio: sourceRect.width / Math.max(1, sourceRect.height)
-    readonly property real smallWidth: Math.min(270, 480 * sourceRatio)
+    readonly property real smallWidth: Math.min(960, 540 * sourceRatio)
     readonly property real smallHeight: smallWidth / Math.max(0.001, sourceRatio)
+    // Keep the previous apparent blur radius after increasing capture detail.
+    readonly property int blurRadius: Math.min(64, Math.max(16,
+        Math.round(16 * smallWidth / Math.max(1, Math.min(270, 480 * sourceRatio)))))
+    readonly property bool blurReady: blurEffectLoader.status === Loader.Ready
 
     function requestRefresh() {
         if (visible && !refreshTimer.running)
@@ -38,7 +42,11 @@ Item {
         textureSize: Qt.size(Math.ceil(root.smallWidth), Math.ceil(root.smallHeight))
         width: root.smallWidth
         height: root.smallHeight
-        visible: false
+        // Show the same bounded frame while the blur shaders incubate. This
+        // avoids an empty portrait canvas without another media decoder.
+        visible: !root.blurReady
+        anchors.centerIn: parent
+        scale: root.blurReady ? 1 : Math.max(root.width / width, root.height / height)
         smooth: true
         live: false
         Component.onCompleted: root.requestRefresh()
@@ -60,6 +68,7 @@ Item {
         height: 0
     }
     Loader {
+        id: blurEffectLoader
         objectName: "outputBlurEffectLoader"
         active: root.visible && blurPrerequisite.status === Loader.Ready
         asynchronous: true
@@ -67,6 +76,7 @@ Item {
         height: root.smallHeight
         anchors.centerIn: parent
         scale: Math.max(root.width / width, root.height / height)
+        onLoaded: root.requestRefresh()
         sourceComponent: Component {
             MultiEffect {
                 objectName: "outputBackgroundBlur"
@@ -74,7 +84,7 @@ Item {
                 source: capture
                 blurEnabled: true
                 blur: 1
-                blurMax: 16
+                blurMax: root.blurRadius
                 autoPaddingEnabled: false
             }
         }

@@ -25,7 +25,7 @@ ColumnLayout {
     }
     AppComboBox {
         Layout.fillWidth: true
-        enabled: root.inspector.editable
+        enabled: root.inspector.editable && !AppController.manualHasImportedSrt
         textRole: "label"
         valueRole: "value"
         model: AppController.speechRecognitionModelOptions
@@ -37,7 +37,7 @@ ColumnLayout {
     }
     Text {
         Layout.fillWidth: true
-        text: AppController.enableAudioSeparation
+        text: AppController.manualHasImportedSrt ? qsTr("Nguồn nhận dạng: SRT đã nhập") : AppController.enableAudioSeparation
             ? qsTr("Nguồn nhận dạng: track giọng đã tách")
             : qsTr("Nguồn nhận dạng: âm thanh gốc")
         color: Theme.textMuted

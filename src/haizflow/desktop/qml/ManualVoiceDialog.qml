@@ -172,18 +172,23 @@ AppDialog {
             variant: "secondary"
             onClicked: root.close()
         },
-        StudioButton {
-            text: qsTr("Tạo giọng")
+        DeferredActionButton {
+            readyText: qsTr("Tạo giọng")
             iconName: "play"
             variant: "primary"
-            enabled: root.draftVoice.length > 0
-            onClicked: {
+            actionEnabled: root.draftVoice.length > 0
+            actionContext: ({ videoId: root.openedVideoId, provider: root.draftProvider,
+                voice: root.draftVoice, speakerMode: root.draftSpeakerMode })
+            onExecute: context => {
+                if (!context || context.videoId !== root.openedVideoId
+                        || context.videoId !== String(AppController.selectedVideoId || ""))
+                    return;
                 root.confirmed(
-                    root.draftProvider,
-                    root.draftVoice,
+                    context.provider,
+                    context.voice,
                     "all",
                     "",
-                    root.draftSpeakerMode
+                    context.speakerMode
                 );
                 root.close();
             }

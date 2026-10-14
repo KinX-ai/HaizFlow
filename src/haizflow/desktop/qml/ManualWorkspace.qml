@@ -244,7 +244,7 @@ Item {
     }
 
     function warmTool(index) {
-        const capability = ({
+        const capability = index === 1 && AppController.manualHasImportedSrt ? "translation" : ({
             0: "separation",
             1: "recognition",
             3: "ocr",
@@ -258,7 +258,7 @@ Item {
             language: AppController.targetLanguage,
             provider: AppController.ttsProvider
         });
-        if (index === 1)
+        if (index === 1 && capability !== "translation")
             AppController.warmCapabilities("translation", {
                 device: AppController.processingDevice,
                 language: AppController.targetLanguage
@@ -1013,17 +1013,28 @@ Item {
             {label: qsTr("Watermark"), stageIndex: 7},
             Object.assign({}, root.toolModel[4], {stageIndex: 4}),
             Object.assign({}, root.toolModel[5], {stageIndex: 5}),
+            {label: qsTr("Nhập SRT"), stageIndex: 9,
+                enabled: !AppController.isProcessing && !AppController.isSelectedVideoQueued
+                    && !AppController.videoExportBusy && !AppController.mediaImportBusy},
+            {label: qsTr("Xóa SRT"), stageIndex: 10,
+                enabled: AppController.manualHasImportedSrt && !AppController.isProcessing && !AppController.isSelectedVideoQueued
+                    && !AppController.videoExportBusy && !AppController.mediaImportBusy},
             {label: qsTr("Xuất SRT"), stageIndex: 8,
                 enabled: !AppController.isProcessing && !AppController.isSelectedVideoQueued
                     && !AppController.videoExportBusy && !AppController.mediaImportBusy}]
         currentIndex: root.selectedStageIndex
         onToolSelected: function(index) {
-            if (index === 8) {
+            if (index === 8 || index === 9 || index === 10) {
                 if (AppController.isProcessing || AppController.isSelectedVideoQueued
                         || AppController.videoExportBusy || AppController.mediaImportBusy)
                     return;
                 root.dismissSubtitleEditor();
-                AppController.exportSelectedSrt();
+                if (index === 9)
+                    srtImportLoader.invoke("openForSelection");
+                else if (index === 10)
+                    AppController.removeSelectedSrt(AppController.selectedVideoId);
+                else
+                    srtExportLoader.invoke("openForSelection");
                 return;
             }
             root.selectedStageIndex = index;
@@ -1076,6 +1087,20 @@ Item {
             root.dismissWatermarkEditor();
             root.selectedStageIndex = index;
             root.warmTool(index);
+        }
+    }
+
+    LazyDialogLoader {
+        id: srtImportLoader
+        sourceComponent: Component {
+            SrtImportDialog { onClosed: srtImportLoader.release() }
+        }
+    }
+
+    LazyDialogLoader {
+        id: srtExportLoader
+        sourceComponent: Component {
+            SrtExportDialog { onClosed: srtExportLoader.release() }
         }
     }
 

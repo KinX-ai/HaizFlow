@@ -34,7 +34,9 @@ Item {
         Loader {
             objectName: "outputBackgroundLoader"
             anchors.fill: parent
-            asynchronous: true
+            // This shell only captures a tiny frame. Native blur construction
+            // remains guarded/asynchronous inside OutputFrameBackground.
+            asynchronous: false
             active: root.visible && root.displayFormat === "blur_background_9_16"
                 && root.frameRect.width > 0 && root.frameRect.height > 0
             sourceComponent: Component {

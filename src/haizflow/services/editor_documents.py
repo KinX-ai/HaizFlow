@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 
@@ -24,6 +26,20 @@ from haizflow.schemas.video import SubtitleStyle
 from haizflow.services import manual_artifacts, video_store
 from haizflow.utils.atomic_file import atomic_json
 from haizflow.utils.ffmpeg import get_video_duration
+
+
+_READ_BATCH = threading.local()
+
+
+@contextmanager
+def read_batch():
+    """Borrow read-only documents within one UI calculation, never across it."""
+    previous = getattr(_READ_BATCH, "documents", None)
+    _READ_BATCH.documents = {}
+    try:
+        yield
+    finally:
+        _READ_BATCH.documents = previous
 
 TRACKS = (
     ("source-video", "source_video", "Video nguồn", 0),
@@ -308,8 +324,18 @@ def load(video_id: str) -> EditorDocument | None:
     if not path.is_file():
         return None
     try:
+        observations = getattr(_READ_BATCH, "documents", None)
+        key = None
+        if observations is not None:
+            info = path.stat()
+            key = (str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            if key in observations:
+                return observations[key]
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return EditorDocument.model_validate(payload)
+        document = EditorDocument.model_validate(payload)
+        if observations is not None:
+            observations[key] = document
+        return document
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return None
 

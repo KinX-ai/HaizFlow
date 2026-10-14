@@ -265,8 +265,8 @@ Window {{
         assert item is not None
         capture = item.findChild(QObject, 'outputBackgroundCapture')
         size = capture.property('textureSize')
-        assert 0 < size.width() <= 270 and 0 < size.height() <= 480
-        assert size.width() * size.height() <= 270 * 480
+        assert 0 < size.width() <= 960 and 0 < size.height() <= 540
+        assert size.width() * size.height() <= 960 * 540
         assert not capture.property('live')
         assert frame.property('videoSink') is sink  # No decoder/sink replacement.
         QTest.qWait(120)
@@ -278,7 +278,7 @@ Window {{
             effect_loader = item.findChild(QObject, 'outputBlurEffectLoader')
             assert ready(prerequisite) and ready(effect_loader)
             effect = item.findChild(QObject, 'outputBackgroundBlur')
-            assert effect.property('blur') == 1 and effect.property('blurMax') == 16
+            assert effect.property('blur') == 1 and 16 < effect.property('blurMax') <= 64
             # The source picture only occupies the middle of the portrait
             # canvas. Green here must come from the actual GPU background.
             color = shot.pixelColor(shot.width() // 2, round(50 * shot.height() / window.height()))
@@ -305,6 +305,12 @@ Window {{
         prerequisite.setProperty('source', QUrl('qrc:/data/missing-blur-test.qml'))
         QTest.qWait(30)
         assert not effect_loader.property('active') and effect_loader.property('item') is None
+        capture = item.findChild(QObject, 'outputBackgroundCapture')
+        assert capture.property('visible')
+        if os.environ.get('HAIZFLOW_FRAME_PIXEL_QA') == '1':
+            shot = window.grabWindow()
+            color = shot.pixelColor(shot.width() // 2, round(50 * shot.height() / window.height()))
+            assert color.green() > 80, color.name()  # Pending native blur must not show black.
         assert sink.videoFrame().isValid()
         prerequisite.setProperty('source', QUrl('qrc:/data/BlurItem.qml'))
         QTest.qWait(120)
@@ -333,10 +339,13 @@ def test_first_ratio_switch_and_rapid_teardown_in_cold_qt_process():
 def test_original_background_waits_for_native_blur_component_before_creation():
     preview = (QML_DIR / 'OutputFramePreview.qml').read_text(encoding='utf-8')
     background = (QML_DIR / 'OutputFrameBackground.qml').read_text(encoding='utf-8')
-    assert 'MultiEffect' in background and 'blurMax: 16' in background
+    assert 'MultiEffect' in background and 'blurMax: root.blurRadius' in background
     assert 'source: "qrc:/data/BlurItem.qml"' in background
     assert 'blurPrerequisite.status === Loader.Ready' in background
-    assert 'asynchronous: true' in preview and 'interval: 33' in background
+    assert 'asynchronous: false' in preview and 'interval: 33' in background
+    assert 'asynchronous: true' in background
+    assert 'visible: !root.blurReady' in background
+    assert 'onLoaded: root.requestRefresh()' in background
 
 
 if __name__ == "__main__":

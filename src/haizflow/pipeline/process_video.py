@@ -512,6 +512,10 @@ def _translation_signature(video, video_input: str) -> str:
 def foreground_capability(video, manual_tool: str = "") -> str:
     """Resolve the first actual stage on the worker, not in a QML getter."""
     if manual_tool:
+        from haizflow.services.subtitle_import import has_import
+
+        if manual_tool == "translation" and has_import(video):
+            return "translation"
         return {"voice": "voice", "translation": "recognition", "separation": "separation",
                 "source": "separation", "image": "ocr"}.get(manual_tool, "")
     files = getattr(video, "files", {}) or {}

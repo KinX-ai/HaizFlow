@@ -89,6 +89,37 @@ def test_nested_project_blocks_recursive_temporary_cleanup(tmp_path, monkeypatch
     assert project.exists() and not manager._pending
 
 
+def test_owned_srt_revision_cleanup_and_locked_retry(tmp_path, monkeypatch):
+    manager = manager_at(tmp_path, monkeypatch)
+    revision = tmp_path / "input" / "subtitles" / ("a" * 32)
+    revision.mkdir(parents=True)
+    (revision / "segments.json").write_text("[]", encoding="utf-8")
+    import shutil
+    remove = shutil.rmtree
+    with monkeypatch.context() as patch:
+        def locked(path, *args, **kwargs):
+            if Path(path) == revision:
+                raise PermissionError("WinError 32")
+            return remove(path, *args, **kwargs)
+        patch.setattr("haizflow.services.temporary_cleanup.shutil.rmtree", locked)
+        manager.discard(revision, tree=True)
+    assert revision.exists() and manager._pending
+    reopened = TemporaryCleanupManager(manager.journal)
+    reopened.retry()
+    assert not revision.exists()
+    assert revision.parent.exists() and revision.parent.parent.exists()
+
+
+@pytest.mark.parametrize("name", ["subtitles", "video.mp4", "not-owned"])
+def test_srt_cleanup_refuses_broad_or_non_revision_targets(tmp_path, monkeypatch, name):
+    manager = manager_at(tmp_path, monkeypatch)
+    target = tmp_path / "input" / "subtitles" / name
+    target.mkdir(parents=True)
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+    manager.discard(target, tree=True)
+    assert target.exists() and not manager._pending
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Real Windows file-sharing lock")
 def test_actual_windows_locked_file_can_be_removed_after_handle_closes(tmp_path, monkeypatch):
     from ctypes import wintypes

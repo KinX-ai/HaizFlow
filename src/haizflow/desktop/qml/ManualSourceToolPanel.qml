@@ -63,15 +63,19 @@ ColumnLayout {
             root.inspector.scheduleSave();
         }
     }
-    StudioButton {
+    DeferredActionButton {
         Layout.fillWidth: true
         visible: root.appliedAudioSeparation && root.draftAudioSeparation
-        text: root.inspector.toolState.cacheHit
+        objectName: "manualSeparateVoiceButton"
+        readyText: root.inspector.toolState.cacheHit
             ? qsTr("Tách lại giọng") : qsTr("Chạy tách giọng")
         iconName: "volume"
         variant: "primary"
-        enabled: root.inspector.editable && !root.inspector.taskQueued && root.inspector.toolState.canRun
-        onClicked: {
+        actionEnabled: root.inspector.editable && !root.inspector.taskQueued && root.inspector.toolState.canRun
+        actionContext: ({videoId: AppController.selectedVideoId})
+        onExecute: context => {
+            if (!context || context.videoId !== AppController.selectedVideoId)
+                return;
             root.inspector.saveNow();
             AppController.runManualTool("separation");
         }

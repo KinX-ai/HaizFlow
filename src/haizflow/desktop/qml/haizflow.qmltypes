@@ -2340,6 +2340,13 @@ Module {
         Method { name: "setManualExportPreset"; type: "bool"; Parameter { name: "a1"; type: "QString" } }
         Method { name: "chooseVideoExportDestination"; type: "QString"; Parameter { name: "a1"; type: "QString" } }
         Method { name: "exportSelectedSrt"; type: "bool" }
+        Method { name: "exportSelectedSrt"; type: "bool"; Parameter { name: "kind"; type: "QString" } Parameter { name: "video_id"; type: "QString" } }
+        Method { name: "importSelectedSrt"; type: "bool" }
+        Method { name: "importSelectedSrt"; type: "bool"; Parameter { name: "path"; type: "QString" } Parameter { name: "language"; type: "QString" } Parameter { name: "video_id"; type: "QString" } }
+        Method { name: "chooseSrtImportFile"; type: "QVariantMap" }
+        Method { name: "removeSelectedSrt"; type: "bool"; Parameter { name: "video_id"; type: "QString" } }
+        Method { name: "srtExportSettings"; type: "QVariantMap" }
+        Property { name: "manualHasImportedSrt"; type: "bool"; isReadonly: true }
         Method { name: "setManualOutputSpeed"; type: "bool"; Parameter { name: "value"; type: "double" } }
         Property { name: "manualVoiceLanguage"; type: "string"; isReadonly: true }
         Method { name: "exportDestinationExists"; type: "bool"; Parameter { name: "a1"; type: "QString" } }

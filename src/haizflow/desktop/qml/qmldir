@@ -1,5 +1,8 @@
 module HaizFlow
 LazyDialogLoader 1.0 LazyDialogLoader.qml
+DeferredActionButton 1.0 DeferredActionButton.qml
+SrtExportDialog 1.0 SrtExportDialog.qml
+SrtImportDialog 1.0 SrtImportDialog.qml
 typeinfo haizflow.qmltypes
 singleton Theme 1.0 Theme.qml
 singleton I18n 1.0 I18n.qml

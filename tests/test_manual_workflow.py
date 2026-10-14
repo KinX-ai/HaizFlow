@@ -235,10 +235,10 @@ class ManualWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "haizflow.pipeline.manual_tools.tool_states",
-                return_value=[{"toolId": "translation", "canRun": True, "blockedReason": ""}],
+                "haizflow.pipeline.manual_tools.tool_readiness",
+                return_value={"toolId": "translation", "canRun": True, "blockedReason": ""},
             ),
-            patch("haizflow.desktop.qml_controller.manual_artifacts.active", return_value={"artifact_id": "voice"}),
+            patch("haizflow.desktop.qml_controller.manual_artifacts.peek_active", return_value={"artifact_id": "voice"}),
             patch("haizflow.desktop.qml_controller.QMessageBox.question", return_value=0) as question,
         ):
             started = HaizFlowController.runManualTool(host, "translation")
