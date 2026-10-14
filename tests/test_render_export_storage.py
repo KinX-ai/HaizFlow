@@ -440,7 +440,7 @@ class RenderExportStorageTests(unittest.TestCase):
             self.assertIsNotNone(state["process"].poll())
             self.assertFalse(state["staging"].exists())
             self.assertEqual(job["status"], "cancelled")
-            self.assertEqual(video_store.get_video(video.video_id).status, "paused")
+            self.assertEqual(video_store.get_video(video.video_id).status, "cancelled")
             self.assertIsNotNone(video_export.current_render(video_store.get_video(video.video_id)))
         finally:
             if state.get("process") is not None and state["process"].poll() is None:

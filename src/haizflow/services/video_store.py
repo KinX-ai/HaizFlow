@@ -1037,53 +1037,68 @@ def prepare_video_restart(video_id: str) -> Optional[VideoInfo]:
         from haizflow.services import manual_artifacts
 
         artifacts_dir = str(manual_artifacts.cache_root(video_id))
+        original = video.model_copy(deep=True)
+        retirement = tempfile.mkdtemp(prefix=".processing-backup-restart-", dir=video_dir)
+        moved = []
+        committed = False
+        temp_dir = os.path.join(video_dir, "temp")
+        final_video = (video.files or {}).get("final_video") or ""
+        legacy_output_dir = os.path.join(video_dir, "output")
         # Auto/Batch restart discards the full generated workspace, including
         # immutable render revisions, never input assets or external exports.
-        if video.project_type in {"single", "batch"} and os.path.isdir(artifacts_dir):
-            if not _is_inside(artifacts_dir, video_dir) or os.path.normcase(os.path.abspath(artifacts_dir)) == os.path.normcase(os.path.abspath(video_dir)):
-                raise ValueError("Generated cache is outside its owning video workspace.")
-            shutil.rmtree(artifacts_dir, onerror=_force_remove_readonly)
-        temp_dir = os.path.join(video_dir, "temp")
-        if os.path.isdir(temp_dir):
-            shutil.rmtree(temp_dir, onerror=_force_remove_readonly)
-        os.makedirs(os.path.join(temp_dir, "voice_parts"), exist_ok=True)
+        try:
+            targets = []
+            if video.project_type in {"single", "batch"} and os.path.isdir(artifacts_dir):
+                targets.append((owned_path(artifacts_dir, video_dir), os.path.join(retirement, "cache")))
+            if os.path.isdir(temp_dir):
+                targets.append((owned_path(temp_dir, video_dir), os.path.join(retirement, "temp")))
+            if final_video and _is_inside(final_video, legacy_output_dir) and os.path.isfile(final_video):
+                targets.append((owned_path(final_video, video_dir), os.path.join(retirement, "legacy-output")))
+            for source, destination in targets:
+                os.replace(source, destination)
+                moved.append((source, destination))
+            os.makedirs(os.path.join(temp_dir, "voice_parts"), exist_ok=True)
+            video.files["srt_output"] = os.path.join(temp_dir, "vi.srt")
+            video.files["voice_output"] = os.path.join(temp_dir, "voice_final.wav")
+            video.files["transcript_json"] = os.path.join(temp_dir, "vi_segments.json")
+            if video.project_type in {"single", "batch"}:
+                video.files["final_video"] = os.path.join(temp_dir, "render.mp4")
+                video.active_artifacts = {}
+            video.review_approved = False
+            video.status = "pending"
+            video.progress = 0
+            video.step = "queued"
+            video.resume_step = ""
+            video.runtime_recovery_step = ""
+            video.gpu_recovery_attempted = False
+            video.checkpoints = {}
+            video.started_at = None
+            video.processing_elapsed_seconds = 0.0
+            video.estimated_remaining_seconds = None
+            video.step_detail = "Queued to restart"
+            video.current_item = 0
+            video.total_items = 0
+            video.error = None
+            video.updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            _save_video_unlocked(video)
+            committed = True
+        except Exception:
+            for source, destination in reversed(moved):
+                if os.path.exists(destination):
+                    if os.path.isdir(source):
+                        safe_tree(source)
+                        shutil.rmtree(source, onerror=_force_remove_readonly)
+                    os.replace(destination, source)
+            _save_video_unlocked(original)
+            raise
+        finally:
+            if committed or not any(os.path.exists(destination) for _source, destination in moved):
+                from haizflow.services.temporary_cleanup import discard_tree
 
-        final_video = (video.files or {}).get("final_video") or ""
-        # Manual artifacts remain immutable; Auto/Batch revisions above have
-        # been discarded. Never remove a file from a retained artifact here.
-        if final_video and _is_inside(final_video, video_dir) and not _is_inside(final_video, artifacts_dir):
-            try:
-                os.remove(final_video)
-            except FileNotFoundError:
-                pass
+                discard_tree(retirement)
+        from haizflow.services.processing_runs import forget_restarted
 
-        legacy_output_dir = os.path.join(video_dir, "output")
-        if _is_inside(final_video, legacy_output_dir):
-            os.makedirs(legacy_output_dir, exist_ok=True)
-
-        video.files["srt_output"] = os.path.join(temp_dir, "vi.srt")
-        video.files["voice_output"] = os.path.join(temp_dir, "voice_final.wav")
-        video.files["transcript_json"] = os.path.join(temp_dir, "vi_segments.json")
-        if video.project_type in {"single", "batch"}:
-            video.files["final_video"] = os.path.join(temp_dir, "render.mp4")
-            video.active_artifacts = {}
-        video.review_approved = False
-        video.status = "pending"
-        video.progress = 0
-        video.step = "queued"
-        video.resume_step = ""
-        video.runtime_recovery_step = ""
-        video.gpu_recovery_attempted = False
-        video.checkpoints = {}
-        video.started_at = None
-        video.processing_elapsed_seconds = 0.0
-        video.estimated_remaining_seconds = None
-        video.step_detail = "Queued to restart"
-        video.current_item = 0
-        video.total_items = 0
-        video.error = None
-        video.updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        _save_video_unlocked(video)
+        forget_restarted(video_id)
         log_to_video(video_id, "Restart prepared. Generated files and checkpoints were cleared.")
         return video
 

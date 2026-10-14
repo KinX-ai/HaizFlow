@@ -19,7 +19,8 @@ def _validate(path: Path, tree: bool) -> None:
     owned_path(path, path.parent)
     if tree:
         allowed = (path.parent.name in {"downloads", ".downloads", ".haizflow-downloads"}
-                   or path.name.startswith(".haizflow-segment-"))
+                   or path.name.startswith(".haizflow-segment-")
+                   or path.name.startswith(".processing-backup-") and (path.parent / "video.json").is_file())
         if not allowed:
             raise ValueError("Not a download/export temporary directory.")
         safe_tree(path)

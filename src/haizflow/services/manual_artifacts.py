@@ -422,6 +422,9 @@ def publish(
                 references = dict(getattr(video, "active_artifacts", {}) or {})
                 references[kind] = artifact_signature
                 video_store.update_video(video_id, active_artifacts=references)
+            from haizflow.services.processing_runs import published
+
+            published(video_id, record["artifact_id"])
             return {**record, "resolved_outputs": resolved_outputs}
     finally:
         release_staging_directory(staging)
@@ -747,6 +750,9 @@ def _active_ids(video_id: str) -> set[str]:
         for kind, value in (getattr(video, "active_artifacts", {}) or {}).items()
         if kind in ARTIFACT_KINDS and value
     }
+    from haizflow.services.processing_runs import retained_ids
+
+    active_ids.update(retained_ids(video_id, video))
     with _RUNTIME_PINS_GUARD:
         active_ids.update(
             artifact_key

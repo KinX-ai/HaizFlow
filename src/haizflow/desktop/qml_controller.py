@@ -4587,7 +4587,7 @@ class HaizFlowController(QObject):
             from haizflow.services.translation_progress import clear_manual_progress
 
             clear_manual_progress(video.video_id)
-        if tool_id != "export":
+        if tool_id != "export" or restarting_paused_tool:
             if restarting_paused_tool:
                 prepare_manual_rerun(video.video_id, tool_id, force=True)
             else:

@@ -28,6 +28,7 @@ class VideoExportController(QObject):
         self._chosen_targets = {}
         self._batch_notices = []
         self._cancelling_render_tokens = {}
+        self._pending_run_cleanup = False
         self.timer = QTimer(self)
         self.timer.setInterval(150)
         self.timer.timeout.connect(self.poll)
@@ -35,7 +36,12 @@ class VideoExportController(QObject):
 
     @property
     def busy(self):
+        from haizflow.services.processing_runs import discard_pending
+
         return bool((self.worker and self.worker.is_alive()) or not self.events.empty()
+                    or self._pending_run_cleanup
+                    or any(discard_pending(job["videoId"], job.get("runScopeId")) for job in self.jobs
+                           if job["status"] == "cancelled" and job.get("runScopeId"))
                     or any(job["status"] == "rendering" for job in self.jobs)
                     or any(self.host._processing_queue.token_for(key) == token
                            for key, token in self._cancelling_render_tokens.items()))
@@ -166,7 +172,8 @@ class VideoExportController(QObject):
 
     def error_text(self, error) -> str:
         if isinstance(error, ExportCancelled):
-            return self.text("Đã hủy xuất. Bản dựng trong dự án được giữ nguyên.", "Export cancelled. The internal render is unchanged.")
+            return self.text("Đã hủy xuất. Kết quả từ trước lượt này được giữ nguyên.",
+                             "Export cancelled. Results from before this run are unchanged.")
         if isinstance(error, FileExistsError):
             return self.text("Tệp đích đã tồn tại. Chọn tên khác hoặc xác nhận thay thế.", "Destination exists. Choose another name or confirm replacement.")
         if isinstance(error, PermissionError):
@@ -230,8 +237,11 @@ class VideoExportController(QObject):
             self.launch([job])
         elif process:
             from haizflow.desktop.project_commands_controller import ProjectCommandsController
+            from haizflow.services import processing_runs
 
+            job["runScopeId"] = processing_runs.arm_export(video.video_id)
             if not ProjectCommandsController(self.host).process_for_export(video.video_id):
+                processing_runs.disarm_export(video.video_id)
                 video_store.update_video(video.video_id, export_preset=previous_preset)
                 self.jobs = previous_jobs
                 self.changed()
@@ -306,8 +316,11 @@ class VideoExportController(QObject):
             video_store.update_video(video.video_id, export_preset=str(preset))
         if process:
             from haizflow.pipeline.process_registry import prepare_video_resume
+            from haizflow.services import processing_runs
 
             for video in videos:
+                job = next(item for item in jobs if item["videoId"] == video.video_id)
+                job["runScopeId"] = processing_runs.arm_export(video.video_id)
                 prepare_video_resume(video.video_id)
             self.host._batch_running = True
             self.host._batch_stop_requested = False
@@ -315,6 +328,7 @@ class VideoExportController(QObject):
                 self.host._batch_running = False
                 for job in jobs:
                     if job["status"] == "rendering":
+                        processing_runs.disarm_export(job["videoId"])
                         video = video_store.get_video(job["videoId"])
                         job.update(status="failed", error=str(getattr(video, "error", "") or "") or self.text(
                             "Không thể đưa video vào hàng đợi.", "Cannot enqueue video."))
@@ -338,20 +352,26 @@ class VideoExportController(QObject):
         return True
 
     def request_render(self, video, job):
+        from haizflow.services import processing_runs
+
+        job["runScopeId"] = processing_runs.arm_export(video.video_id)
         if video.project_type == "manual":
             if str(self.host._selected_video_id or "") != video.video_id or not self.host.runManualTool("export"):
+                processing_runs.disarm_export(video.video_id)
                 return False
         else:
             from haizflow.desktop.project_commands_controller import ProjectCommandsController
             from haizflow.pipeline.process_registry import prepare_video_resume
 
             if not ProjectCommandsController._resources_ready(self.host, video):
+                processing_runs.disarm_export(video.video_id)
                 return False
             prepare_video_resume(video.video_id)
             # A resume hint enables checkpoint reuse, not stage skipping. The
             # pipeline still validates every upstream signature and output.
             video_store.update_video(video.video_id, status="pending", resume_step="rendering", error=None)
             if not self.host._enqueue_video(video.video_id):
+                processing_runs.disarm_export(video.video_id)
                 return False
         job["status"] = "rendering"
         self._capture_render_owner(job)
@@ -369,6 +389,10 @@ class VideoExportController(QObject):
                 continue
             self.events.put((identifier, "exporting", 0, ""))
             try:
+                if not job.get("runScopeId"):
+                    from haizflow.services.processing_runs import commit_previous_ready
+
+                    commit_previous_ready(identifier)
                 video = video_store.get_video(identifier)
                 if not video:
                     raise FileNotFoundError(identifier)
@@ -455,6 +479,7 @@ class VideoExportController(QObject):
                 return False
         for job in jobs:
             job.update(status="pending", progress=0, error="")
+            job.pop("runSettled", None)
         if any((video := video_store.get_video(job["videoId"])) and video.project_type == "batch" for job in jobs):
             self._watch_batch(jobs)
         self.cancel.clear()
@@ -480,17 +505,26 @@ class VideoExportController(QObject):
         tokens = {job["videoId"]: job["renderToken"] for job in self.jobs
                   if job.get("renderToken") is not None
                   and job["status"] in {"rendering", "paused", "awaiting_review"}}
-        from haizflow.pipeline.process_registry import pause_video
+        from haizflow.pipeline.process_registry import cancel_video
+        from haizflow.services import processing_runs
 
-        active, removed = task_queue.detach_owned(tokens, on_active=pause_video) if tokens else (None, [])
+        def cancel_owned(identifier):
+            job = next(item for item in self.jobs if item["videoId"] == identifier)
+            if job.get("runScopeId"):
+                processing_runs.request_discard(identifier, job["runScopeId"])
+            cancel_video(identifier)
+
+        active, removed = task_queue.detach_owned(tokens, on_active=cancel_owned) if tokens else (None, [])
         if active:
             self._cancelling_render_tokens[active] = tokens[active]
         for identifier in [*removed, *([active] if active else [])]:
+            job = next(item for item in self.jobs if item["videoId"] == identifier)
+            if job.get("runScopeId"):
+                processing_runs.request_discard(identifier, job["runScopeId"])
             video = video_store.get_video(identifier)
             if video:
-                video_store.update_video(identifier, status="paused", error=None, step="paused",
-                    resume_step=(video.resume_step or "starting") if identifier in removed else video.step,
-                    step_detail="Đã hủy lượt xuất; có thể tiếp tục từ kết quả đã lưu.")
+                video_store.update_video(identifier, status="cancelled", error=None, step="cancelled",
+                    resume_step="", step_detail="Đã hủy lượt xuất.")
         for job in self.jobs:
             if job["status"] in {"rendering", "paused", "awaiting_review"}:
                 job.update(status="cancelled", error=self.error_text(ExportCancelled()))
@@ -506,6 +540,8 @@ class VideoExportController(QObject):
             if self.host._processing_queue.token_for(key) == token
         }
         changed = False
+        pending_cleanup = False
+        settled_run = False
         while not self.events.empty():
             identifier, status, progress, error = self.events.get_nowait()
             job = next((item for item in self.jobs if item["videoId"] == identifier), None)
@@ -515,6 +551,16 @@ class VideoExportController(QObject):
                 if status == "done":
                     self.host.videoExportCompleted.emit(identifier, job["path"])
         for job in self.jobs:
+            if (job.get("runScopeId") and not job.get("runSettled") and job["status"] in {"done", "failed", "cancelled"}
+                    and not self.host._processing_queue.contains(job["videoId"])):
+                from haizflow.services import processing_runs
+
+                if job["status"] == "cancelled":
+                    processing_runs.request_discard(job["videoId"], job.get("runScopeId"))
+                complete = processing_runs.settle_export(job["videoId"], job["status"], job.get("runScopeId"))
+                job["runSettled"] = complete
+                pending_cleanup = pending_cleanup or not complete
+                settled_run = settled_run or bool(job.get("runScopeId"))
             if job["status"] not in {"rendering", "paused", "awaiting_review"}:
                 continue
             video = video_store.get_video(job["videoId"])
@@ -530,8 +576,19 @@ class VideoExportController(QObject):
                     job.update(progress=progress, progressMeasured=measured)
                     changed = True
             if self.host._processing_queue.contains(job["videoId"]):
+                if job.get("runScopeId"):
+                    from haizflow.services.processing_runs import current_id
+
+                    current_scope = current_id(job["videoId"])
+                    if current_scope is not None and current_scope != job["runScopeId"]:
+                        if job["status"] != "paused":
+                            job.update(status="paused", error=self.text("Đang xử lý lượt khác trong dự án.",
+                                                                         "Another project run is active."))
+                            changed = True
+                        continue
                 if job["status"] != "rendering":
                     job.update(status="rendering", error="")
+                    self._capture_render_owner(job)
                     changed = True
                 continue
             if self.worker and self.worker.is_alive():
@@ -554,6 +611,12 @@ class VideoExportController(QObject):
                                                             "Render not completed. Resume the project task, then export again."))
             changed = True
         if changed:
+            self.changed()
+        if pending_cleanup != self._pending_run_cleanup or settled_run:
+            self._pending_run_cleanup = pending_cleanup
+            if hasattr(self.host, "selectedVideoChanged"):
+                self.host.selectedVideoChanged.emit()
+                self.host.refreshVideos()
             self.changed()
         self._report_finished_batches()
         if self.busy != self._last_busy:

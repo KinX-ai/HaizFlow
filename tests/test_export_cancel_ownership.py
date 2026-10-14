@@ -22,7 +22,7 @@ def host_for(task_queue):
     return host
 
 
-def test_cancel_detaches_only_owned_waiters_and_pauses_owned_active_render(monkeypatch):
+def test_cancel_detaches_only_owned_waiters_and_cancels_owned_active_render(monkeypatch):
     app = QGuiApplication.instance() or QGuiApplication([])
     started, release = threading.Event(), threading.Event()
     ran = []
@@ -41,7 +41,7 @@ def test_cancel_detaches_only_owned_waiters_and_pauses_owned_active_render(monke
     pause = Mock()
     monkeypatch.setattr("haizflow.desktop.video_export_controller.video_store.get_video", videos.get)
     monkeypatch.setattr("haizflow.desktop.video_export_controller.video_store.update_video", update)
-    monkeypatch.setattr("haizflow.pipeline.process_registry.pause_video", pause)
+    monkeypatch.setattr("haizflow.pipeline.process_registry.cancel_video", pause)
     try:
         assert task_queue.enqueue("active-export") and started.wait(1)
         assert task_queue.enqueue("waiting-export") and task_queue.enqueue("unrelated")
@@ -72,7 +72,7 @@ def test_old_export_token_cannot_cancel_new_run_of_same_video(monkeypatch):
     exporter = VideoExportController(host)
     exporter.timer.stop()
     pause = Mock()
-    monkeypatch.setattr("haizflow.pipeline.process_registry.pause_video", pause)
+    monkeypatch.setattr("haizflow.pipeline.process_registry.cancel_video", pause)
     try:
         assert task_queue.enqueue("same-video") and started.wait(1)
         token = task_queue.token_for("same-video")

@@ -138,6 +138,9 @@ class ProcessingLifecycleController:
         if not video or video.status == "cancelled" or video_id in host._deleted_video_ids:
             return
         try:
+            from haizflow.services import processing_runs
+
+            processing_runs.begin(video_id, resuming=bool(getattr(video, "resume_step", "")))
             manual_tool = (
                 str(getattr(video, "manual_target_tool", "") or "")
                 if getattr(video, "project_type", "single") == "manual"
@@ -237,6 +240,10 @@ class ProcessingLifecycleController:
                 message = f"Desktop worker failed before pipeline could start: {exc}"
                 video_store.log_to_video(video_id, message)
                 video_store.update_video(video_id, status="failed", error=str(exc), step="failed")
+        finally:
+            from haizflow.services import processing_runs
+
+            processing_runs.finish(video_id)
 
     def prepare_batch_models(self, video_id: str) -> None:
         """Queue speculative batch warm-up without importing inference in Core."""

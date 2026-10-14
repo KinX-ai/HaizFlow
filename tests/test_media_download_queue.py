@@ -97,7 +97,7 @@ class MediaDownloadQueueTests(unittest.TestCase):
                     controller._run(metadata.url, "audio", directory)
                 self.assertEqual(original.read_bytes(), b"existing")
                 self.assertEqual((output / "Title (2).m4a").read_bytes(), b"new audio")
-                self.assertEqual(list((output / ".haizflow-downloads").iterdir()), [])
+                self.assertEqual(list(output.glob(".haizflow-downloads/*")), [])
             finally:
                 controller.shutdown()
 
@@ -114,7 +114,7 @@ class MediaDownloadQueueTests(unittest.TestCase):
                 with mock.patch.object(controller, "_extract", side_effect=extract):
                     controller._run("source.mp4", "extract", directory)
                 self.assertEqual(list(output.glob("*.m4a")), [])
-                self.assertEqual(list((output / ".haizflow-downloads").iterdir()), [])
+                self.assertEqual(list(output.glob(".haizflow-downloads/*")), [])
             finally:
                 controller.shutdown()
     def test_download_state_distinguishes_idle_and_validation_error(self):
