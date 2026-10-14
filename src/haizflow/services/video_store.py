@@ -252,6 +252,7 @@ def create_video(video_id: str, original_filename: str, config: VideoConfig, vid
         remove_original_subtitles=config.remove_original_subtitles,
         original_subtitle_removal_mode=config.original_subtitle_removal_mode,
         output_format=config.output_format,
+        output_speed=config.output_speed,
         crop=config.crop,
         enable_audio_separation=config.enable_audio_separation,
         original_video_volume=config.original_video_volume,
@@ -482,19 +483,28 @@ def _migrate_video_metadata(raw_data: dict) -> tuple[dict, bool]:
     data["mode"] = data.get("mode") if data.get("mode") in {"A", "review"} else "A"
     # Preserve explicit online/local choices without changing published audio.
     legacy_voice = str(data.get("tts_voice") or "")
-    if data.get("tts_provider") != "edge" and not legacy_voice.startswith("omnivoice:"):
+    if str(data.get("tts_provider") or "").startswith("vieneu"):
+        from haizflow.core.vieneu_voices import native_voice
+
+        try:
+            data["tts_voice"] = "vieneu:" + native_voice(legacy_voice)
+        except ValueError:
+            data["tts_voice"] = "vieneu:Hải Đăng"
+    elif data.get("tts_provider") != "edge" and not legacy_voice.startswith("omnivoice:"):
         data["tts_voice"] = (
             "omnivoice:male"
             if legacy_voice in {"vi-VN-NamMinhNeural", "en-US-GuyNeural", "zh-CN-YunxiNeural"}
             else "omnivoice:female"
         )
-    if data.get("tts_provider") not in {"omnivoice", "omnivoice-gpu", "edge"}:
+    if data.get("tts_provider") not in {"omnivoice", "omnivoice-gpu", "edge", "vieneu", "vieneu-gpu"}:
         data["tts_provider"] = "omnivoice"
     files = data.get("files")
     if isinstance(files, dict) and isinstance(files.get("manual_voice_overrides"), dict):
         for override in files["manual_voice_overrides"].values():
             if isinstance(override, dict):
                 voice = str(override.get("voice") or "")
+                if str(override.get("provider") or "").startswith("vieneu"):
+                    continue
                 if override.get("provider") != "edge" and not voice.startswith("omnivoice:"):
                     override["voice"] = (
                         "omnivoice:male"
@@ -824,11 +834,16 @@ def replace_video_input(
         staged_input_directory = os.path.join(transaction_directory, "new-input")
         staged_input_path = os.path.join(staged_input_directory, f"video{extension}")
         backup_input_directory = os.path.join(transaction_directory, "old-input")
+        temp_directory = os.path.join(video_dir, "temp")
+        backup_temp_directory = os.path.join(transaction_directory, "old-temp")
         metadata_snapshot_path = os.path.join(transaction_directory, "video.json")
         input_directory = os.path.join(video_dir, "input")
         os.makedirs(staged_input_directory, exist_ok=True)
         input_backed_up = False
         new_input_published = False
+        temp_backed_up = False
+        fresh_temp_prepared = False
+        committed = False
         editor_document_path = os.path.join(video_dir, "editor", "document.json")
         editor_backup_path = os.path.join(video_dir, "editor", "source-replacements",
                                          os.path.basename(transaction_directory) + ".json")
@@ -848,6 +863,15 @@ def replace_video_input(
                 os.makedirs(os.path.dirname(editor_backup_path), exist_ok=True)
                 os.replace(editor_document_path, editor_backup_path)
                 editor_backed_up = True
+
+            # Move old generated files out of every canonical lookup path
+            # before publishing new metadata. Best-effort deletion alone can
+            # leave locked old OCR/subtitles/audio available to the new source.
+            if os.path.isdir(temp_directory):
+                os.replace(temp_directory, backup_temp_directory)
+                temp_backed_up = True
+            fresh_temp_prepared = True
+            os.makedirs(os.path.join(temp_directory, "voice_parts"), exist_ok=True)
 
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             # Input assets, editor overrides and generated paths all belong to
@@ -877,8 +901,8 @@ def replace_video_input(
             video.export_history = []
             # A clone cannot remain selected after its source reference has
             # been replaced together with the input directory.
-            if video.tts_voice == "omnivoice:clone":
-                video.tts_voice = defaults.tts_voice
+            if video.tts_voice in {"omnivoice:clone", "vieneu:clone"}:
+                video.tts_voice = "vieneu:Hải Đăng" if video.tts_provider.startswith("vieneu") else defaults.tts_voice
             video.review_approved = False
             video.status = "pending"
             video.progress = 0
@@ -892,7 +916,10 @@ def replace_video_input(
             video.manual_tool_generations = {
                 "source": int((video.manual_tool_generations or {}).get("source", 0)) + 1,
             }
-            video.manual_artifact_migration_version = 0
+            # This is a known fresh source, not an unindexed legacy workspace.
+            # Locked/deferred old temp files must never be adopted as new
+            # subtitle/voice/audio artifacts by the legacy migration pass.
+            video.manual_artifact_migration_version = 1
             video.editor_document_schema_version = 0
             video.editor_document_revision = 0
             video.editor_document_path = ""
@@ -900,6 +927,7 @@ def replace_video_input(
             video.manual_target_stage = ""
             video.manual_completed_stage = ""
             video.manual_completed_stages = []
+            video.subtitle_language = ""
             video.started_at = None
             video.processing_elapsed_seconds = 0.0
             video.estimated_remaining_seconds = None
@@ -910,7 +938,12 @@ def replace_video_input(
             video.created_at = now
             video.updated_at = now
             _save_video_unlocked(video)
+            committed = True
         except Exception:
+            if fresh_temp_prepared and os.path.isdir(temp_directory):
+                shutil.rmtree(temp_directory, onerror=_force_remove_readonly)
+            if temp_backed_up and os.path.isdir(backup_temp_directory):
+                os.replace(backup_temp_directory, temp_directory)
             if editor_backed_up:
                 os.replace(editor_backup_path, editor_document_path)
             if new_input_published and os.path.isdir(input_directory):
@@ -922,17 +955,13 @@ def replace_video_input(
             _VIDEO_METADATA_CACHE.pop(video_id, None)
             raise
         finally:
-            shutil.rmtree(transaction_directory, ignore_errors=True)
+            # Keep recoverable backups if a Windows lock also prevents rollback.
+            if committed or not (os.path.isdir(backup_input_directory) or os.path.isdir(backup_temp_directory)):
+                shutil.rmtree(transaction_directory, ignore_errors=True)
 
         cleanup_errors: list[str] = []
-        temp_directory = os.path.join(video_dir, "temp")
-        try:
-            if os.path.isdir(temp_directory):
-                shutil.rmtree(temp_directory, onerror=_force_remove_readonly)
-            os.makedirs(os.path.join(temp_directory, "voice_parts"), exist_ok=True)
-        except OSError as exc:
-            cleanup_errors.append(f"temporary workspace: {exc}")
-
+        if os.path.isdir(transaction_directory):
+            cleanup_errors.append(f"previous source backup: {os.path.basename(transaction_directory)}")
         legacy_output_dir = os.path.join(video_dir, "output")
         try:
             if os.path.isdir(legacy_output_dir):

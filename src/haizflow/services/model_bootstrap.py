@@ -273,6 +273,14 @@ def required_assets(device: str) -> tuple[ModelAsset, ...]:
     return tuple(assets)
 
 
+def vieneu_assets() -> tuple[ModelAsset, ...]:
+    from haizflow.core.vieneu_assets import MANIFEST
+
+    return tuple(ModelAsset("vieneu", "VieNeu CPU / GPU", item["url"],
+                            "vieneu/" + item["path"], item["size"], item["sha256"])
+                 for item in MANIFEST["assets"])
+
+
 def required_download_bytes(device: str) -> int:
     return sum(asset.size for asset in required_assets(device))
 

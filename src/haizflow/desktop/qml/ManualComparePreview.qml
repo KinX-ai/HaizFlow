@@ -27,7 +27,6 @@ Rectangle {
     property bool inputMuted: true
     property bool resultMuted: false
     property real playbackSpeed: 1.0
-    readonly property var playbackSpeeds: [1.0, 1.5, 2.0, 0.5]
     onPlaybackSpeedChanged: {
         inputClockTickMs = Date.now();
         if (controller && controller.manualPreviewAudio)
@@ -392,11 +391,6 @@ Rectangle {
         resultFramePauseTimer.stop();
         frameRefreshTimer.stop();
         frameRefreshSafetyTimer.stop();
-    }
-
-    function cyclePlaybackSpeed() {
-        const index = playbackSpeeds.indexOf(playbackSpeed);
-        playbackSpeed = playbackSpeeds[(index + 1) % playbackSpeeds.length];
     }
 
     function releaseMedia() {
@@ -1030,7 +1024,7 @@ Rectangle {
                     PlaybackSpeedButton {
                         objectName: "manualFullscreenSpeedButton"
                         speed: root.playbackSpeed
-                        onClicked: root.cyclePlaybackSpeed()
+                        onEdited: function(value) { root.playbackSpeed = value; }
                     }
                     StudioSlider {
                         id: fullscreenSeekSlider
@@ -1205,6 +1199,7 @@ Rectangle {
         id: inputPlayer
         objectName: "manualInputPlayer"
         playbackRate: root.playbackSpeed
+        pitchCompensation: true
         source: root.attachedInputSource
         videoOutput: fullscreenLayer.visible && !root.fullscreenResult
             ? fullscreenOutput.videoOutput : inputPane.videoOutputItem
@@ -1253,6 +1248,7 @@ Rectangle {
         id: resultPlayer
         objectName: "manualResultPlayer"
         playbackRate: root.playbackSpeed
+        pitchCompensation: true
         source: root.attachedResultSource
         videoOutput: fullscreenLayer.visible && root.fullscreenResult
             ? fullscreenOutput.videoOutput : resultPane.videoOutputItem
@@ -1571,7 +1567,7 @@ Rectangle {
                 PlaybackSpeedButton {
                     objectName: pane === inputPane ? "manualInputSpeedButton" : "manualResultSpeedButton"
                     speed: root.playbackSpeed
-                    onClicked: root.cyclePlaybackSpeed()
+                    onEdited: function(value) { root.playbackSpeed = value; }
                 }
             }
         }

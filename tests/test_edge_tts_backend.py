@@ -58,6 +58,25 @@ def test_no_audio_retry_uses_fresh_communicate_and_atomic_publish(tmp_path, back
     assert list(tmp_path.iterdir()) == [output]
 
 
+def test_old_client_is_blocked_before_network_without_repeating_empty_audio(tmp_path, backend):
+    with patch("edge_tts.__version__", "7.2.8"), patch("edge_tts.Communicate") as communicate:
+        with pytest.raises(ValueError, match="7.3.1"):
+            run(tmp_path / "voice.mp3")
+    communicate.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+def test_transport_upgrade_keeps_verified_audio_cache_and_pins_exact_upstream_source():
+    import tomllib
+
+    root = Path(__file__).parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    reference = next(value for value in project["project"]["dependencies"] if value.startswith("edge-tts"))
+    assert "360fa8e1de354e1dda74c09bd695887d6a44df74" in reference
+    assert "sha256=470d399a288b9ff9800988538ae31c99f06e589ec0ed67cb01141b29a005ab47" in reference
+    assert edge.EDGE_CACHE_VERSION == "edge-7.2.8-verified-v1"
+
+
 @pytest.mark.parametrize("failure", [NoAudioReceived("empty"), TimeoutError("slow")])
 def test_exhausted_retries_preserve_old_audio_and_cleanup_staging(tmp_path, backend, failure):
     output = tmp_path / "old.mp3"

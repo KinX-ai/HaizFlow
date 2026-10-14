@@ -363,9 +363,8 @@ curl-cffi==0.16.3 \
     # via
     #   haizflow (pyproject.toml)
     #   yt-dlp
-edge-tts==7.2.8 \
-    --hash=sha256:361fe48ce7ef613adbe30f664e3765dd71029c6cb57427279eff8ad6df2eb211 \
-    --hash=sha256:fcf185a0d527a0d2d003f9d5841facc1d5e0e7b3b88d5df9c32990402c6b8cd0
+edge-tts @ https://codeload.github.com/rany2/edge-tts/tar.gz/360fa8e1de354e1dda74c09bd695887d6a44df74 \
+    --hash=sha256:470d399a288b9ff9800988538ae31c99f06e589ec0ed67cb01141b29a005ab47
     # via haizflow (pyproject.toml)
 flatbuffers==25.12.19 \
     --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4

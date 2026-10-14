@@ -88,6 +88,7 @@ class MediaDownloadController(QObject):
         # coordinator's default picture-and-audio requirement for dubbing.
         self._channel_importer = ChannelImportCoordinator(self, require_audio=False)
         self._video_preview = VideoUrlImportCoordinator(self)
+        self._audio_preview = VideoUrlImportCoordinator(self)
         self._request_guard = None
         self._channel_workspace = ""
         self._channel_project_key = ""
@@ -98,6 +99,7 @@ class MediaDownloadController(QObject):
         self._channel_importer.changed.connect(self._on_channel_changed)
         self._channel_importer.videoReady.connect(self._save_channel_video)
         self._video_preview.changed.connect(self._on_preview_changed)
+        self._audio_preview.changed.connect(self._on_preview_changed)
 
     @Property("QVariantMap", notify=workspaceChanged)
     def workspaceState(self):
@@ -127,7 +129,8 @@ class MediaDownloadController(QObject):
         if not self._project_root or self._restoring_workspace:
             return
         payload = {"version": 1, "form": self._workspace_state,
-                   "preview": self._video_preview.preview_checkpoint(), "audio_source": self._audio_source}
+                   "preview": self._video_preview.preview_checkpoint(),
+                   "audio_preview": self._audio_preview.preview_checkpoint(), "audio_source": self._audio_source}
         try:
             project_store._write_json_atomic(
                 os.path.join(self._project_root, "downloads", "workspace.json"), payload)
@@ -137,6 +140,7 @@ class MediaDownloadController(QObject):
     def set_request_guard(self, guard):
         self._request_guard = guard
         self._video_preview.set_request_guard(guard)
+        self._audio_preview.set_request_guard(guard)
 
     @Property(str, notify=changed)
     def videoOutputDirectory(self):
@@ -203,6 +207,18 @@ class MediaDownloadController(QObject):
     @Property(str, notify=changed)
     def videoPreviewThumbnail(self):
         return self._video_preview.thumbnailSource
+
+    @Property(QObject, constant=True)
+    def audioPreview(self):
+        return self._audio_preview
+
+    @Property(bool, notify=changed)
+    def audioPreviewReady(self):
+        return self._audio_preview.state in {"ready", "retry"}
+
+    @Property(bool, notify=changed)
+    def audioPreviewBusy(self):
+        return self._audio_preview.busy
 
     @Property(bool, notify=changed)
     def busy(self):
@@ -301,6 +317,7 @@ class MediaDownloadController(QObject):
         self._workspace_state = {}
         self._audio_source = ""
         self._video_preview.restore_preview(None)
+        self._audio_preview.restore_preview(None)
         if not key or not root:
             self._project_key = ""
             self._project_root = ""
@@ -333,6 +350,8 @@ class MediaDownloadController(QObject):
                 self._audio_source = str(payload.get("audio_source") or "")
                 preview = payload.get("preview")
                 self._video_preview.restore_preview(preview if isinstance(preview, dict) else None)
+                audio_preview = payload.get("audio_preview")
+                self._audio_preview.restore_preview(audio_preview if isinstance(audio_preview, dict) else None)
         except (OSError, ValueError, TypeError):
             pass
         if "channelUrl" not in self._workspace_state:
@@ -451,6 +470,22 @@ class MediaDownloadController(QObject):
     def cancelVideoPreview(self):
         self._video_preview.cancel()
 
+    @Slot(str)
+    def inspectAudio(self, url):
+        self.clearDownloadFeedback()
+        self._audio_preview.begin("single")
+        self._audio_preview.inspect(str(url or ""))
+
+    @Slot()
+    def clearAudioPreview(self):
+        if not self.audioPreviewBusy:
+            self._audio_preview.begin("single")
+        self.clearDownloadFeedback()
+
+    @Slot()
+    def cancelAudioPreview(self):
+        self._audio_preview.cancel()
+
     @Slot()
     def clearQueuedDownloads(self):
         if self._pending_tasks:
@@ -463,6 +498,9 @@ class MediaDownloadController(QObject):
 
     @Slot(str)
     def downloadAudio(self, url):
+        if not self.audioPreviewReady or str(url or "").strip() != self._audio_preview.url:
+            self._reject("Hãy kiểm tra liên kết âm thanh trước khi tải.")
+            return
         self._queue_download(url, "audio", self._audio_output_directory, "audio download")
 
     @Slot()
@@ -681,7 +719,9 @@ class MediaDownloadController(QObject):
                         raise DownloadCancelled("Audio extraction cancelled.")
                     destination = self._move_to_unique_path(downloaded, output / f"{Path(value).stem}.m4a")
                 finally:
-                    shutil.rmtree(workspace, ignore_errors=True)
+                    from haizflow.services.temporary_cleanup import discard_tree
+
+                    discard_tree(workspace)
             else:
                 metadata = inspect_video_url(value, self._cancel)
                 workspace = output / ".haizflow-downloads" / uuid.uuid4().hex
@@ -704,7 +744,9 @@ class MediaDownloadController(QObject):
                             downloaded, output / f"{_safe_output_stem(metadata.title, 'audio')}.m4a"
                         )
                 finally:
-                    shutil.rmtree(workspace, ignore_errors=True)
+                    from haizflow.services.temporary_cleanup import discard_tree
+
+                    discard_tree(workspace)
             # Moving the validated file commits the operation. A late cancel
             # must not report failure after the completed file was saved.
             self._finished.emit(str(destination))
@@ -810,6 +852,7 @@ class MediaDownloadController(QObject):
         if self._channel_importer.busy:
             return
         state = "done" if self.channelState in {"ready", "success"} else (
+            "partial" if self.channelState == "partial" else
             "idle" if self.channelState == "idle" else "error")
         self._finish_active(self._channel_importer.status or "Channel task finished.", state)
 
@@ -840,7 +883,8 @@ class MediaDownloadController(QObject):
         self._cancel.set()
         channel_stopped = self._channel_importer.shutdown(timeout_seconds)
         preview_stopped = self._video_preview.shutdown(timeout_seconds)
+        audio_preview_stopped = self._audio_preview.shutdown(timeout_seconds)
         worker = self._worker_thread
         if worker and worker.is_alive():
             worker.join(timeout=max(0.0, timeout_seconds))
-        return channel_stopped and preview_stopped and not (worker and worker.is_alive())
+        return channel_stopped and preview_stopped and audio_preview_stopped and not (worker and worker.is_alive())

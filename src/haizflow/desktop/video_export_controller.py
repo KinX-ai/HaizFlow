@@ -27,6 +27,7 @@ class VideoExportController(QObject):
         self._last_busy = False
         self._chosen_targets = {}
         self._batch_notices = []
+        self._cancelling_render_tokens = {}
         self.timer = QTimer(self)
         self.timer.setInterval(150)
         self.timer.timeout.connect(self.poll)
@@ -35,13 +36,20 @@ class VideoExportController(QObject):
     @property
     def busy(self):
         return bool((self.worker and self.worker.is_alive()) or not self.events.empty()
-                    or any(job["status"] == "rendering" for job in self.jobs))
+                    or any(job["status"] == "rendering" for job in self.jobs)
+                    or any(self.host._processing_queue.token_for(key) == token
+                           for key, token in self._cancelling_render_tokens.items()))
 
     def text(self, vi, en):
         return vi if self.host._settings_language == "vi" else en
 
     def changed(self):
         self.host.exportStateChanged.emit()
+
+    def _capture_render_owner(self, job):
+        task_queue = self.host._processing_queue
+        if hasattr(task_queue, "token_for"):
+            job["renderToken"] = task_queue.token_for(job["videoId"])
 
     def _watch_batch(self, jobs):
         # Capture actual job objects, not the currently open project. Paused
@@ -55,6 +63,8 @@ class VideoExportController(QObject):
         from haizflow.services.batch_feedback import completion_notice
 
         for group in list(self._batch_notices):
+            if any(job["videoId"] in self._cancelling_render_tokens for job in group):
+                continue
             if any(job["status"] not in {"done", "failed", "cancelled"} for job in group):
                 continue
             summary = {"succeeded": sum(job["status"] == "done" for job in group),
@@ -227,6 +237,7 @@ class VideoExportController(QObject):
                 self.changed()
                 return False
             job["status"] = "rendering"
+            self._capture_render_owner(job)
         elif not ready:
             # A legacy copy may be adopted only on the worker, never while QML
             # paints. If a rebuild is required, reuse upstream checkpoints.
@@ -309,6 +320,9 @@ class VideoExportController(QObject):
                             "Không thể đưa video vào hàng đợi.", "Cannot enqueue video."))
             self.host.batchChanged.emit()
             self.host.refreshVideos()
+            for job in jobs:
+                if job["status"] == "rendering":
+                    self._capture_render_owner(job)
         else:
             ready = []
             for job in jobs:
@@ -340,6 +354,7 @@ class VideoExportController(QObject):
             if not self.host._enqueue_video(video.video_id):
                 return False
         job["status"] = "rendering"
+        self._capture_render_owner(job)
         return True
 
     def launch(self, jobs):
@@ -461,12 +476,35 @@ class VideoExportController(QObject):
 
     def cancel_all(self):
         self.cancel.set()
+        task_queue = self.host._processing_queue
+        tokens = {job["videoId"]: job["renderToken"] for job in self.jobs
+                  if job.get("renderToken") is not None
+                  and job["status"] in {"rendering", "paused", "awaiting_review"}}
+        from haizflow.pipeline.process_registry import pause_video
+
+        active, removed = task_queue.detach_owned(tokens, on_active=pause_video) if tokens else (None, [])
+        if active:
+            self._cancelling_render_tokens[active] = tokens[active]
+        for identifier in [*removed, *([active] if active else [])]:
+            video = video_store.get_video(identifier)
+            if video:
+                video_store.update_video(identifier, status="paused", error=None, step="paused",
+                    resume_step=(video.resume_step or "starting") if identifier in removed else video.step,
+                    step_detail="Đã hủy lượt xuất; có thể tiếp tục từ kết quả đã lưu.")
         for job in self.jobs:
             if job["status"] in {"rendering", "paused", "awaiting_review"}:
                 job.update(status="cancelled", error=self.error_text(ExportCancelled()))
         self.changed()
+        if active or removed:
+            self.host.selectedVideoChanged.emit()
+            self.host.processingChanged.emit()
+            self.host.refreshVideos()
 
     def poll(self):
+        self._cancelling_render_tokens = {
+            key: token for key, token in self._cancelling_render_tokens.items()
+            if self.host._processing_queue.token_for(key) == token
+        }
         changed = False
         while not self.events.empty():
             identifier, status, progress, error = self.events.get_nowait()
@@ -479,6 +517,18 @@ class VideoExportController(QObject):
         for job in self.jobs:
             if job["status"] not in {"rendering", "paused", "awaiting_review"}:
                 continue
+            video = video_store.get_video(job["videoId"])
+            if video:
+                measured = str(video.step or "") not in {
+                    "extracting_audio", "separating_audio", "transcribing",
+                    "creating_subtitle", "building_audio_timeline", "manual_source",
+                    "manual_separation", "manual_recognition", "manual_audio",
+                    "waiting_for_models", "starting",
+                }
+                progress = max(0, min(100, int(video.progress or 0)))
+                if job.get("progressMeasured") != measured or job["progress"] != progress:
+                    job.update(progress=progress, progressMeasured=measured)
+                    changed = True
             if self.host._processing_queue.contains(job["videoId"]):
                 if job["status"] != "rendering":
                     job.update(status="rendering", error="")
@@ -486,7 +536,6 @@ class VideoExportController(QObject):
                 continue
             if self.worker and self.worker.is_alive():
                 continue
-            video = video_store.get_video(job["videoId"])
             if video and video.status == "processing":
                 # The queue must remain the owner until it detaches the item.
                 continue

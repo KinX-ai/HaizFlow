@@ -11,6 +11,7 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+from urllib.parse import urldefrag
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -60,16 +61,40 @@ def _logical_requirements(path: Path) -> list[str]:
     return logical
 
 
+def _source_pins() -> dict[str, dict[str, str]]:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return project.get("tool", {}).get("haizflow", {}).get("source-dependencies", {})
+
+
 def _locked_requirements() -> dict[str, tuple[Requirement, str]]:
+    source_pins = _source_pins()
     locked: dict[str, tuple[Requirement, str]] = {}
     for logical in _logical_requirements(LOCK_PATH):
         requirement_text = logical.split(" --hash=", 1)[0].strip()
         requirement = Requirement(requirement_text)
         if requirement.marker and not requirement.marker.evaluate():
             continue
-        exact_versions = [item.version for item in requirement.specifier if item.operator == "=="]
-        if len(exact_versions) != 1 or len(list(requirement.specifier)) != 1:
-            raise RuntimeError(f"Lock entry is not exact: {requirement_text}")
+        if requirement.url:
+            pin = source_pins.get(canonicalize_name(requirement.name), {})
+            url, fragment = urldefrag(requirement.url)
+            digest = str(pin.get("sha256", ""))
+            # Source entries are allowed only with an explicitly reviewed
+            # version, full upstream commit and the one exact archive hash.
+            if (url != pin.get("url")
+                    or not re.fullmatch(r"https://codeload\.github\.com/[^/]+/[^/]+/tar\.gz/[0-9a-f]{40}", url)
+                    or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                    or set(HASH_PATTERN.findall(logical)) != {digest}
+                    or fragment not in {"", "sha256=" + digest}
+                    or requirement.specifier):
+                raise RuntimeError(f"Lock source entry is not exact: {requirement_text}")
+            version = str(pin.get("version", ""))
+            if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+                raise RuntimeError(f"Lock source entry has no exact version: {requirement_text}")
+            exact_versions = [version]
+        else:
+            exact_versions = [item.version for item in requirement.specifier if item.operator == "=="]
+            if len(exact_versions) != 1 or len(list(requirement.specifier)) != 1:
+                raise RuntimeError(f"Lock entry is not exact: {requirement_text}")
         if not HASH_PATTERN.search(logical):
             raise RuntimeError(f"Lock entry has no SHA-256 hash: {requirement_text}")
         name = canonicalize_name(requirement.name)
@@ -137,6 +162,14 @@ def verify(*, write_manifest: bool, check_installed: bool) -> dict[str, object]:
     if missing:
         raise RuntimeError(f"Direct dependencies are missing from the lock: {', '.join(missing)}")
     for name, requirement in expected.items():
+        if requirement.url:
+            locked_url = locked[name][0].url
+            if not locked_url or urldefrag(locked_url)[0] != urldefrag(requirement.url)[0]:
+                raise RuntimeError(f"Locked source URL for {name} differs from the direct dependency.")
+            expected_hash = urldefrag(requirement.url)[1]
+            if expected_hash != "sha256=" + _source_pins()[name]["sha256"]:
+                raise RuntimeError(f"Direct source dependency {name} has no matching archive hash.")
+            continue
         locked_version = locked[name][1]
         if Version(locked_version) not in requirement.specifier:
             raise RuntimeError(f"Locked {name}=={locked_version} does not satisfy {requirement.specifier}.")

@@ -2,9 +2,10 @@
 import re
 import unicodedata
 
-SHORT_PHRASE_VERSION = "omnivoice-short-phrase-v2-natural-duration"
-NUMBER_SPEECH_VERSION = "omnivoice-vi-numbers-v2-spoken-level"
-VOICE_AUDIO_VERSION = "omnivoice-clean-level-v3-speaker-peer-median"
+SHORT_PHRASE_VERSION = "omnivoice-short-phrase-v5-legacy-generation-zero-fade"
+NUMBER_SPEECH_VERSION = "omnivoice-vi-numbers-v3-legacy-native-text"
+VOICE_AUDIO_VERSION = "omnivoice-clean-level-v4-zero-fade-speaker-peer-median"
+OMNIVOICE_FADE_DURATION = 0.0
 
 _VI_DIGITS = ("không", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín")
 
@@ -124,7 +125,7 @@ def short_phrase_generation_options(text: str, language: str) -> dict:
     # afterwards. The SDK's 100 ms edge fades can erase short final consonants.
     # Arbitrary fixed token budgets can collapse the decoder into DC/tones.
     # Preserve the SDK's reference-calibrated duration; only protect the edges.
-    return {"fade_duration": .005, "pad_duration": .06}
+    return {"fade_duration": OMNIVOICE_FADE_DURATION}
 
 
 def active_speech_rms(waveform, sample_rate: int) -> float:

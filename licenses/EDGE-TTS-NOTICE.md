@@ -1,10 +1,10 @@
 # edge-tts
 
-HaizFlow uses the unmodified edge-tts 7.2.8 Python client by rany.
+HaizFlow uses the unmodified edge-tts 7.3.1 Python client by rany.
 
 - Upstream: https://github.com/rany2/edge-tts
-- Pinned source: https://github.com/rany2/edge-tts/tree/7.2.8
-- Source distribution: https://pypi.org/project/edge-tts/7.2.8/#files
+- Pinned source: https://github.com/rany2/edge-tts/tree/360fa8e1de354e1dda74c09bd695887d6a44df74
+- Source distribution: https://codeload.github.com/rany2/edge-tts/tar.gz/360fa8e1de354e1dda74c09bd695887d6a44df74
 - License: GNU Lesser General Public License version 3; the exact wheel license
   is copied by the release dependency-notice generator. The repository also
   retains `LGPL-3.0.txt` and `GPL-3.0.txt` in this directory.

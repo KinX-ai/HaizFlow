@@ -27,6 +27,7 @@ Item {
             width: toolList.width
             height: 40
             readonly property int stageIndex: modelData.stageIndex !== undefined ? Number(modelData.stageIndex) : index
+            enabled: modelData.enabled !== false
             color: root.currentIndex === stageIndex ? Theme.sidebarSelected
                 : pointer.hovered ? Theme.surfaceMuted : "transparent"
             radius: Theme.radiusTiny
@@ -49,7 +50,7 @@ Item {
                 Text {
                     Layout.fillWidth: true
                     text: String(row.modelData.label || "")
-                    color: Theme.text
+                    color: row.enabled ? Theme.text : Theme.textDisabled
                     font.family: Theme.fontFamily
                     font.pixelSize: TypeScale.control
                     elide: Text.ElideRight

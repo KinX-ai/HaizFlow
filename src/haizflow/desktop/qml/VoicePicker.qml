@@ -28,12 +28,14 @@ Control {
     focusPolicy: Qt.StrongFocus
     Accessible.name: displayLabel()
 
+    function isClone(value) { return value === "omnivoice:clone" || value === "vieneu:clone" }
+
     function visibleOptions() {
         const result = []
         const source = model || []
         for (let i = 0; i < source.length; ++i) {
             const option = source[i]
-            if (allowVoiceClone || String(option.voice || "") !== "omnivoice:clone")
+            if (allowVoiceClone || !isClone(String(option.voice || "")))
                 result.push(option)
         }
         if (allowMultipleSpeakers)
@@ -47,7 +49,7 @@ Control {
         const seen = {}
         const options = visibleOptions()
         for (let i = 0; i < options.length; ++i) {
-            if (String(options[i].voice || "") === "omnivoice:clone"
+            if (isClone(String(options[i].voice || ""))
                 || String(options[i].voice || "") === "omnivoice:multiple")
                 continue
             const key = String(options[i].category || "voices")
@@ -66,7 +68,7 @@ Control {
         const result = []
         const options = visibleOptions()
         for (let i = 0; i < options.length; ++i) {
-            if (String(options[i].voice || "") !== "omnivoice:clone"
+            if (!isClone(String(options[i].voice || ""))
                 && String(options[i].voice || "") !== "omnivoice:multiple"
                 && String(options[i].category || "voices") === category)
                 result.push(options[i])
@@ -79,7 +81,7 @@ Control {
         if (allowVoiceClone) {
             let clone = { voice: "omnivoice:clone", available: false, previewAvailable: false }
             for (const option of model || []) {
-                if (String(option.voice || "") === "omnivoice:clone")
+                if (isClone(String(option.voice || "")))
                     clone = option
             }
             result.push(Object.assign({}, clone, { label: qsTr("Nhân bản giọng") }))
@@ -91,7 +93,7 @@ Control {
 
     function chooseOption(option) {
         voicePopup.close()
-        if (String(option.voice || "") === "omnivoice:clone")
+        if (isClone(String(option.voice || "")))
             cloneRequested()
         else
             selected(String(option.voice || ""))
@@ -100,7 +102,7 @@ Control {
     function displayLabel() {
         if (currentValue === "omnivoice:multiple")
             return qsTr("Nhận diện nhiều người nói")
-        if (currentValue === "omnivoice:clone")
+        if (isClone(currentValue))
             return qsTr("Giọng đã nhân bản")
         for (let i = 0; i < model.length; ++i) {
             if (String(model[i].voice || "") === currentValue)
@@ -113,7 +115,7 @@ Control {
         const options = visibleOptions()
         for (let i = 0; i < options.length; ++i) {
             if (String(options[i].voice || "") === currentValue
-                && currentValue !== "omnivoice:clone" && currentValue !== "omnivoice:multiple") {
+                && !isClone(currentValue) && currentValue !== "omnivoice:multiple") {
                 activeCategory = String(options[i].category || "voices")
                 return
             }
@@ -123,7 +125,7 @@ Control {
     }
 
     function togglePreview(voice) {
-        if (!previewEnabled || voice === "omnivoice:multiple" || voice === "omnivoice:clone")
+        if (!previewEnabled || voice === "omnivoice:multiple" || isClone(voice))
             return
         const value = String(voice || "")
         if (requestedVoice === value && previewState === "ready") {

@@ -95,6 +95,20 @@ ENGINE_PROFILE_BY_PACK = {
 }
 
 
+def _runtime_contract_matches(required: int, actual: object) -> bool:
+    # Contract 7 adds the isolated VieNeu entrypoint without changing the
+    # contract-6 recognition, translation, separation or OmniVoice commands.
+    # Unknown future contracts must still be rejected.
+    return not required or actual == required or (required == 6 and actual == 7)
+
+
+def _engine_required_commands(pack_id: str, runtime_contract: object) -> set[str]:
+    commands = set(ENGINE_REQUIRED_COMMANDS.get(pack_id, {"smoke_command", "rpc_command"}))
+    if runtime_contract == 7 and pack_id in {"engine-cpu-py313", "engine-cuda128-py313"}:
+        commands.add("vieneu_worker")
+    return commands
+
+
 @dataclass(frozen=True)
 class ResourcePackDefinition:
     pack_id: str
@@ -117,7 +131,10 @@ class ResourcePackDefinition:
 
 
 def _assets_by_component() -> dict[str, tuple[ModelAsset, ...]]:
+    from haizflow.services.model_bootstrap import vieneu_assets
+
     combined = {asset.relative_path: asset for asset in (*required_assets("cpu"), *required_assets("gpu"))}
+    combined.update({asset.relative_path: asset for asset in vieneu_assets()})
     grouped: dict[str, list[ModelAsset]] = {}
     for asset in combined.values():
         grouped.setdefault(asset.component, []).append(asset)
@@ -273,6 +290,7 @@ def built_in_pack_definitions() -> tuple[ResourcePackDefinition, ...]:
             ("demucs",),
             (),
         ),
+        model_pack("model-vieneu", "VieNeu CPU / GPU", "voice", "voice", ("vieneu",), ()),
         model_pack("model-demucs-cpu", "Demucs CPU", "separation", "separation", ("demucs",), ("engine-cpu-py313",)),
         model_pack("model-demucs-gpu", "Demucs GPU NVIDIA", "separation", "separation", ("demucs",), ("engine-cuda128-py313",)),
         model_pack(
@@ -493,12 +511,12 @@ class ResourcePackManager:
             and engine.get("profile") == ENGINE_PROFILE_BY_PACK.get(definition.pack_id)
             and engine.get("version") == definition.version
             and engine.get("protocol_version") == definition.protocol_version
-            and (not definition.runtime_contract or engine.get("runtime_contract") == definition.runtime_contract)
+            and _runtime_contract_matches(definition.runtime_contract, engine.get("runtime_contract"))
         )
         if not marker_valid or not engine_valid:
             return False
         root = marker.parent.resolve()
-        for command_name in ENGINE_REQUIRED_COMMANDS.get(definition.pack_id, {"smoke_command", "rpc_command"}):
+        for command_name in _engine_required_commands(definition.pack_id, engine.get("runtime_contract")):
             command = engine.get(command_name)
             if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
                 return False
@@ -713,8 +731,9 @@ class ResourcePackManager:
         if str(capability) == "voice" and provider == "edge":
             return []
         voice_device = "gpu" if provider.endswith("-gpu") else "cpu"
-        voice_packs = [f"engine-{'cuda128-py313' if voice_device == 'gpu' else 'cpu-py313'}", "model-omnivoice"]
-        if context.get("voice_clone") and not any(
+        voice_packs = [f"engine-{'cuda128-py313' if voice_device == 'gpu' else 'cpu-py313'}",
+                       "model-vieneu" if provider.startswith("vieneu") else "model-omnivoice"]
+        if context.get("voice_clone") and not provider.startswith("vieneu") and not any(
             self.status(pack) in {"installed", "bundled"} for pack in ("model-whisper-small", "model-whisper-turbo")
         ):
             voice_packs.append("model-whisper-small")
@@ -812,6 +831,8 @@ class ResourcePackManager:
             return [*base, "--hymt2-worker", "--server"]
         if command_name == "omnivoice_worker":
             return [*base, "--omnivoice-worker"]
+        if command_name == "vieneu_worker":
+            return [*base, "--vieneu-worker"]
         if command_name == "omnivoice_server":
             return [*base, "--omnivoice-server"]
         if command_name == "demucs":
@@ -835,6 +856,8 @@ class ResourcePackManager:
         try:
             payload = json.loads((root / "engine.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            return []
+        if command_name == "vieneu_worker" and payload.get("runtime_contract") != 7:
             return []
         command = payload.get(str(command_name))
         if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
@@ -906,6 +929,10 @@ class ResourcePackManager:
         elif pack_id == "model-omnivoice":
             verify_omnivoice_model(root / "omnivoice")
             verify_omnivoice_sdk(root / "omnivoice")
+        elif pack_id == "model-vieneu":
+            from haizflow.pipeline.vieneu_tts import verify_assets
+
+            verify_assets(root / "vieneu")
         elif pack_id.startswith("model-demucs"):
             verify_demucs_model(root / "demucs")
         elif pack_id == "model-subtitle-ocr":
@@ -1012,10 +1039,10 @@ class ResourcePackManager:
             or payload.get("profile") != ENGINE_PROFILE_BY_PACK.get(definition.pack_id)
             or payload.get("version") != definition.version
             or payload.get("protocol_version") != definition.protocol_version
-            or (definition.runtime_contract and payload.get("runtime_contract") != definition.runtime_contract)
+            or not _runtime_contract_matches(definition.runtime_contract, payload.get("runtime_contract"))
         ):
             raise ResourcePackError("Phiên bản hoặc giao thức của gói bộ xử lý không tương thích.")
-        for command_name in sorted(ENGINE_REQUIRED_COMMANDS.get(definition.pack_id, {"smoke_command", "rpc_command"})):
+        for command_name in sorted(_engine_required_commands(definition.pack_id, payload.get("runtime_contract"))):
             command = payload.get(command_name)
             if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
                 raise ResourcePackError(f"Gói bộ xử lý không khai báo {command_name}.")
@@ -1291,6 +1318,22 @@ class ResourcePackManager:
                 shutil.rmtree(root)
             return removed
         root = models_dir()
+        if pack_id == "model-vieneu":
+            # This pack owns its versioned SDK extraction as well as weights.
+            # Do not leave an apparently installed/untracked runtime behind.
+            target = (root / "vieneu").resolve()
+            if target.parent != root.resolve():
+                raise ResourcePackError("Vị trí gói VieNeu không hợp lệ.")
+            try:
+                no_links(root / "vieneu")
+                for path in target.rglob("*"):
+                    no_links(path)
+            except UpdateError as error:
+                raise ResourcePackError("Gói VieNeu chứa liên kết hoặc junction; không thể gỡ.") from error
+            if target.is_dir():
+                removed = sum(path.stat().st_size for path in target.rglob("*") if path.is_file())
+                shutil.rmtree(target)
+            return removed
         candidates = [candidate for asset in definition.assets for candidate in
                       (root / asset.relative_path, (root / asset.relative_path).with_name(Path(asset.relative_path).name + ".part"))]
         receipt = root / "demucs/profiles" / f"{pack_id}.json" if pack_id in {"model-demucs-cpu", "model-demucs-gpu"} else None

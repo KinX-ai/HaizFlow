@@ -115,6 +115,8 @@ def _warm(capability: str, context: dict) -> None:
 
         warm_hymt2_worker()
     elif capability == "voice":
+        if str(context.get("provider") or "").startswith("vieneu"):
+            return  # Loaded once per generation, never duplicate speculative GPU weights.
         from haizflow.pipeline.omnivoice_tts import warm_runtime
 
         warm_runtime(str(context.get("language") or "vi"))
@@ -439,6 +441,11 @@ def main(argv: list[str] | None = None) -> int:
 
         index = remaining.index("--hymt2-worker")
         return worker(remaining[index + 1 :])
+    if "--vieneu-worker" in remaining:
+        from haizflow.pipeline.vieneu_tts import main as worker
+
+        index = remaining.index("--vieneu-worker")
+        return worker(remaining[index + 1:])
     if "--omnivoice-worker" in remaining or "--omnivoice-server" in remaining:
         from haizflow.pipeline.omnivoice_tts import main as worker
 

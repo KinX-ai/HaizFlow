@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,13 +31,21 @@ def directory_size(path: Path) -> int:
 
 
 def expected_packages() -> dict[str, str]:
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    configuration = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = configuration["project"]
+    source_pins = configuration.get("tool", {}).get("haizflow", {}).get("source-dependencies", {})
     expected = {}
     for value in project.get("dependencies", []):
         requirement = Requirement(value)
         if requirement.marker and not requirement.marker.evaluate():
             continue
         exact_versions = [item.version for item in requirement.specifier if item.operator == "=="]
+        if requirement.url:
+            pin = source_pins.get(canonicalize_name(requirement.name), {})
+            pinned_url = str(pin.get("url", "")) + "#sha256=" + str(pin.get("sha256", ""))
+            if requirement.url != pinned_url or not pin.get("version"):
+                raise RuntimeError(f"Runtime source dependency must match its reviewed pin: {value}")
+            exact_versions = [pin["version"]]
         if len(exact_versions) != 1:
             raise RuntimeError(f"Runtime dependency must have one exact version: {value}")
         expected[requirement.name] = exact_versions[0]

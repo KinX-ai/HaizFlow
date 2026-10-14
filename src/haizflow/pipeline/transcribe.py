@@ -842,6 +842,68 @@ def _alignment_intrusion_detail(
     return None
 
 
+def _resolve_context_alignments(groups: list[tuple[list[dict], list[dict] | None]], video_id: str) -> list[dict]:
+    """Validate group boundaries against corrected neighbours, not rough ASR spans.
+
+    Splitting a long Whisper span proportionally can put a neighbour's end
+    inside the next real sentence. Rejecting against that provisional boundary
+    would throw away an entire good alignment group. Resolve all locally valid
+    candidates together; a rejected group falls back before checking again.
+    """
+    accepted = [candidate for _source, candidate in groups]
+    while True:
+        check_cancellation(video_id)
+        rejected = []
+        for index, (source, _candidate) in enumerate(groups):
+            candidate = accepted[index]
+            if candidate is None:
+                continue
+            neighbours = [segment for other, (original, _aligned) in enumerate(groups)
+                          if other != index for segment in (accepted[other] or original)]
+            detail = _alignment_intrusion_detail(source, candidate, neighbours)
+            if detail:
+                rejected.append(index)
+                log_to_video(video_id, f"WARNING: Rejected context alignment at {source[0]['start']:.3f}s "
+                             f"against resolved neighbouring sentences ({detail}). Preserving Whisper timing.")
+        if not rejected:
+            break
+        for index in rejected:
+            accepted[index] = None
+    return [segment for (source, _candidate), candidate in zip(groups, accepted) for segment in (candidate or source)]
+
+
+def _repair_alignment_group_boundary(previous_source, previous_aligned, source, aligned,
+                                     audio, align_model, metadata, device, video_id):
+    """Jointly align only the two sentences at a disputed same-language boundary."""
+    if float(previous_aligned[-1]["end"]) <= float(aligned[0]["start"]) + 0.05:
+        return
+    start = max(0.0, float(previous_aligned[-1]["start"]) - 1.0)
+    end = min(len(audio) / _AUDIO_SAMPLE_RATE, float(aligned[0]["end"]) + 1.0)
+    if len(previous_aligned) > 1:
+        start = max(start, float(previous_aligned[-2]["end"]))
+    if len(aligned) > 1:
+        end = min(end, float(aligned[1]["start"]))
+    if end <= start or end - start > _ALIGNMENT_GROUP_MAX_SECONDS:
+        return
+    check_cancellation(video_id)
+    boundary_source = [previous_source[-1], source[0]]
+    result = _align_without_nltk_download(
+        [{"start": start, "end": end, "text": " ".join(item["text"] for item in boundary_source)}],
+        align_model, metadata, audio, device, return_char_alignments=False,
+    )
+    boundary, _detail = _split_context_alignment(boundary_source, result.get("segments", []), start, end)
+    if not boundary:
+        return
+    if len(previous_aligned) > 1 and boundary[0]["start"] < previous_aligned[-2]["end"] - 0.05:
+        return
+    if len(aligned) > 1 and boundary[1]["end"] > aligned[1]["start"] + 0.05:
+        return
+    previous_aligned[-1] = boundary[0]
+    aligned[0] = boundary[1]
+    log_to_video(video_id, f"Resolved context-group boundary with joint sentence alignment "
+                 f"at {boundary[0]['end']:.3f}-{boundary[1]['start']:.3f}s; kept both groups' word timing.")
+
+
 def _alignment_quality(source_segment: dict, aligned_segments: list[dict]) -> tuple[bool, str]:
     """Reject aligners that return legal-looking but physically impossible timing."""
     if not aligned_segments:
@@ -991,6 +1053,8 @@ def _align_segments_by_language(audio, segments, device: str, video_id: str, pro
         [sentence for source_segment in segments for sentence in _split_segment_proportionally(source_segment)]
     )
     context_groups = _alignment_groups(sentence_segments)
+    previous_groups = {id(group): context_groups[index - 1] if index else None
+                       for index, group in enumerate(context_groups)}
     grouped_segments = {}
     ordered_languages = []
     for group in context_groups:
@@ -1000,7 +1064,7 @@ def _align_segments_by_language(audio, segments, device: str, video_id: str, pro
             ordered_languages.append(language)
         grouped_segments[language].append(group)
 
-    aligned_segments = []
+    alignment_candidates = []
     for language in ordered_languages:
         check_cancellation(video_id)
         language_groups = grouped_segments[language]
@@ -1011,7 +1075,7 @@ def _align_segments_by_language(audio, segments, device: str, video_id: str, pro
                 "using the available ASR sentence timing.",
             )
             for group in language_groups:
-                aligned_segments.extend(group)
+                alignment_candidates.append((group, None))
             continue
         align_model = None
         try:
@@ -1059,25 +1123,25 @@ def _align_segments_by_language(audio, segments, device: str, video_id: str, pro
                         search_start,
                         search_end,
                     )
-                    intrusion_detail = (
-                        _alignment_intrusion_detail(
-                            group,
-                            context_aligned,
-                            sentence_segments,
-                        )
-                        if context_aligned
-                        else None
-                    )
-                    if context_aligned and not intrusion_detail:
-                        aligned_segments.extend(context_aligned)
+                    if context_aligned:
+                        previous_group = previous_groups[id(group)]
+                        previous_candidate = next((candidate for source, candidate in alignment_candidates
+                                                   if source is previous_group), None)
+                        if previous_candidate and previous_group[0].get("language") == language:
+                            try:
+                                _repair_alignment_group_boundary(previous_group, previous_candidate, group,
+                                    context_aligned, audio, align_model, metadata, device, video_id)
+                            except Exception as exc:
+                                if is_cancelled(video_id):
+                                    raise
+                                log_to_video(video_id, f"WARNING: Joint group-boundary alignment unavailable: {exc}")
+                        alignment_candidates.append((group, context_aligned))
                         log_to_video(
                             video_id,
                             f"Aligned '{language}' source sentences {group_start_index}-{group_end_index} "
                             f"with surrounding speech context ({quality_detail}).",
                         )
                         continue
-                    if intrusion_detail:
-                        quality_detail = intrusion_detail
                     log_to_video(
                         video_id,
                         f"WARNING: Rejected '{language}' context alignment for source sentences "
@@ -1093,7 +1157,7 @@ def _align_segments_by_language(audio, segments, device: str, video_id: str, pro
                         f"{group_start_index}-{group_end_index}. "
                         f"Preserving Whisper timing: {exc}",
                     )
-                aligned_segments.extend(group)
+                alignment_candidates.append((group, None))
         except Exception as exc:
             if is_cancelled(video_id):
                 raise
@@ -1103,12 +1167,14 @@ def _align_segments_by_language(audio, segments, device: str, video_id: str, pro
                 f"Preserving Whisper spans with proportional sentence boundaries: {exc}",
             )
             for group in language_groups:
-                aligned_segments.extend(group)
+                if not any(source is group for source, _candidate in alignment_candidates):
+                    alignment_candidates.append((group, None))
         finally:
             if align_model is not None:
                 del align_model
             _release_cuda(video_id, f"{language} alignment")
 
+    aligned_segments = _resolve_context_alignments(alignment_candidates, video_id)
     aligned_segments.sort(key=lambda segment: float(segment.get("start", 0.0)))
     return aligned_segments
 

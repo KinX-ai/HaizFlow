@@ -28,6 +28,25 @@ def test_new_project_defaults_match_app_device(device):
     for attribute, value in project_model_defaults(device).items():
         assert getattr(host, attribute) == value
     assert recognition_context(host._speech_recognition_model, device)["device"] == device
+    assert host._tts_voice == "vieneu:Hải Đăng"
+
+
+@pytest.mark.parametrize("device,language,provider", [("gpu", "vi", "vieneu-gpu"),
+    ("cpu", "vi", "vieneu"), ("gpu", "en", "omnivoice-gpu"), ("cpu", "zh", "omnivoice")])
+def test_voice_defaults_follow_supported_output_language_and_device(device, language, provider):
+    assert project_model_defaults(device, target_language=language)["_tts_provider"] == provider
+
+
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+def test_vieneu_gpu_is_first_picker_entry_but_cpu_mode_cannot_select_it(device):
+    host = SimpleNamespace(_settings_processing_device=device, _hardware_capabilities=None)
+    options = HaizFlowController._tts_provider_options_for_language(host, "vi")
+    assert options[0]["provider"] == "vieneu-gpu"
+    assert options[0]["available"] is (device == "gpu")
+    assert options[1]["provider"] == "vieneu" and options[1]["available"]
+    for item in HaizFlowController._tts_provider_options_for_language(host, "en"):
+        if item["provider"].startswith("vieneu"):
+            assert item["available"] is (not item["provider"].endswith("-gpu") or device == "gpu")
 
 
 @pytest.mark.parametrize("device, expected", [("gpu", "large-v3-turbo"), ("cpu", "small-cpu")])
@@ -37,13 +56,13 @@ def test_legacy_automatic_recognition_follows_device_but_explicit_choices_surviv
         assert project_recognition_choice(explicit, device) == explicit
 
 
-def test_four_gb_gpu_defaults_keep_omnivoice_on_gpu_without_full_translation():
+def test_four_gb_gpu_defaults_keep_vieneu_on_gpu_without_full_translation():
     choices = project_model_defaults("gpu", total_vram_bytes=4 * 1024**3)
     assert choices == {"_speech_recognition_model": "small-gpu", "_translation_model": "q4",
-                       "_tts_provider": "omnivoice-gpu"}
+                       "_tts_provider": "vieneu-gpu"}
     assert project_model_defaults("gpu", total_vram_bytes=8 * 1024**3) == {
         "_speech_recognition_model": "large-v3-turbo", "_translation_model": "full",
-        "_tts_provider": "omnivoice-gpu"}
+        "_tts_provider": "vieneu-gpu"}
 
 
 @pytest.mark.parametrize("device,vram,expected", [("cpu", 0, "q4"), ("gpu", 4, "q4"),
@@ -156,14 +175,41 @@ def model_host():
         ttsProviderOptionsChanged=Mock(), ttsVoiceOptionsChanged=Mock(), batchChanged=Mock(), selectedVideoChanged=Mock())
 
 
+def test_device_switch_keeps_a_compatible_native_vieneu_preset():
+    host = model_host()
+    host._tts_voice = "vieneu:Trúc Ly"
+    host.ttsVoiceChanged = Mock()
+    HaizFlowController._sync_project_model_defaults(host)
+    assert host._tts_provider == "vieneu-gpu" and host._tts_voice == "vieneu:Trúc Ly"
+    host.ttsVoiceChanged.emit.assert_not_called()
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_auto_language_choice_rejects_chinese_and_keeps_english_vieneu(language):
+    from haizflow.desktop.presenters import voice_options_for_language
+
+    host = SimpleNamespace(_target_language="vi", _tts_provider="vieneu-gpu", _tts_voice="vieneu:Hải Đăng",
+        appAlertRequested=Mock(),
+        _audio_preview=Mock(), targetLanguageChanged=Mock(), languageOptionsChanged=Mock(),
+        ttsVoiceChanged=Mock(), ttsProviderChanged=Mock(), ttsProviderOptionsChanged=Mock(), ttsVoiceOptionsChanged=Mock(),
+        _voice_options_for_language=lambda code, provider: voice_options_for_language(code, "vi", provider))
+    host._normalized_voice_for_language = HaizFlowController._normalized_voice_for_language.__get__(host)
+    for _ in range(2):
+        HaizFlowController.targetLanguage.fset(host, language)
+    assert host._target_language == ("vi" if language == "zh" else "en")
+    assert host._tts_provider == "vieneu-gpu" and host._tts_voice == "vieneu:Hải Đăng"
+    assert host.appAlertRequested.emit.call_count == (2 if language == "zh" else 0)
+    assert host._audio_preview.invalidate.call_count == (0 if language == "zh" else 1)
+
+
 def test_device_change_updates_empty_defaults_and_selected_gpu_models():
     host = model_host()
     HaizFlowController._sync_project_model_defaults(host)
-    assert host._tts_provider == "omnivoice-gpu"
+    assert host._tts_provider == "vieneu-gpu"
     host._selected_video_id = "saved-video"
     host._settings_processing_device = "cpu"
     HaizFlowController._sync_project_model_defaults(host)
-    assert host._tts_provider == "omnivoice"
+    assert host._tts_provider == "vieneu"
     assert host._speech_recognition_model == "small-cpu"
     assert host._translation_model == "q4"
 
@@ -173,16 +219,17 @@ def test_switch_does_not_change_models_until_runtime_is_confirmed():
     host._device_switching = True
     HaizFlowController._sync_project_model_defaults(host)
     assert host._draft_processing_device == "cpu"
-    assert host._tts_provider == "omnivoice"
+    assert host._tts_provider == "vieneu"
     host._device_switching = False
     host._active_processing_device = "cpu"  # Failed GPU probe restores CPU.
     HaizFlowController._sync_project_model_defaults(host)
-    assert host._tts_provider == "omnivoice"
+    assert host._tts_provider == "vieneu"
 
 
 def test_confirmed_cpu_switch_persists_only_model_fields_for_current_owner():
     host = model_host()
     host.__dict__.update(project_model_defaults("gpu"))
+    host._tts_provider = "omnivoice-gpu"  # An existing explicit choice is not replaced by the new default.
     host._settings_processing_device = host._active_processing_device = "cpu"
     host._draft_processing_device = "gpu"
     host._selected_video_id = host._settings_owner_video_id = "video"
@@ -244,12 +291,12 @@ def test_runtime_switch_commits_cpu_models_only_after_success(probe_ok):
           patch("haizflow.desktop.qml_controller.video_store.update_video", return_value=None) as save):
         RuntimeDeviceController(host)._switch_processing_device("cpu")
         host.settingsChanged.emit()
-        assert host._tts_provider == "omnivoice-gpu"
+        assert host._tts_provider == "vieneu-gpu"
         save.assert_not_called()
         worker.call_args.kwargs["target"]()
         assert not host._device_switching
         assert host._active_processing_device == ("cpu" if probe_ok else "gpu")
-        assert host._tts_provider == ("omnivoice" if probe_ok else "omnivoice-gpu")
+        assert host._tts_provider == ("vieneu" if probe_ok else "vieneu-gpu")
         assert configure.called is probe_ok
         assert save.called is probe_ok
 
@@ -377,3 +424,40 @@ def test_api_guide_navigates_to_single_owner_before_opening():
     assert events == [("navigate", "zernio"), ("guide", "zernio")]
     HaizFlowController.requestApiKeyGuide(host, "unknown")
     assert len(events) == 2
+
+
+@pytest.mark.parametrize("provider", ["vieneu", "vieneu-gpu"])
+@pytest.mark.parametrize("language", ["zh"])
+def test_vieneu_language_guard_blocks_manual_before_saving_or_running(provider, language):
+    video = SimpleNamespace(video_id="video", project_type="manual", target_language="vi", subtitle_language=language)
+    host = SimpleNamespace(_project_type="manual", _selected_video=lambda: video,
+        _processing_queue=SimpleNamespace(contains=lambda _: False),
+        _normalized_tts_provider=lambda _language, value: value, appAlertRequested=Mock(),
+        runManualTool=Mock(), _settings_language="vi")
+    with patch("haizflow.desktop.qml_controller.video_store.update_video") as save:
+        assert not HaizFlowController.configureAndRunManualVoice(
+            host, provider, "vieneu:Hải Đăng", "all", "", "single")
+    save.assert_not_called()
+    host.runManualTool.assert_not_called()
+    host.appAlertRequested.emit.assert_called_once()
+
+
+@pytest.mark.parametrize("provider", ["vieneu", "vieneu-gpu"])
+def test_vieneu_chinese_batch_config_is_rejected_before_staging_assets(provider):
+    from haizflow.services.batch_settings import config_for
+    with pytest.raises(ValueError, match="tiếng Trung"):
+        config_for({"targetLanguage": "zh", "ttsProvider": provider,
+                    "ttsVoice": "vieneu:Hải Đăng"})
+    assert config_for({"targetLanguage": "vi", "ttsProvider": provider,
+                       "ttsVoice": "vieneu:Hải Đăng"}).tts_provider == provider
+
+
+@pytest.mark.parametrize("provider", ["vieneu", "vieneu-gpu"])
+def test_stored_unsupported_vieneu_config_blocks_preflight_without_mutation(provider):
+    host = SimpleNamespace(_settings_processing_device="cpu", _settings_language="vi",
+        appAlertRequested=Mock(), _processing_queue=SimpleNamespace(contains=lambda _: False))
+    video = SimpleNamespace(video_id="video", status="pending", target_language="zh", tts_provider=provider)
+    with patch("haizflow.desktop.project_commands_controller.video_store.update_video") as save:
+        assert not ProjectCommandsController._resources_ready_for_videos(host, [video])
+    save.assert_not_called()
+    host.appAlertRequested.emit.assert_called_once()

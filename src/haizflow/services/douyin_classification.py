@@ -17,6 +17,7 @@ class Outcome(StrEnum):
     METADATA = "invalid_metadata"
     MEDIA_EXPIRED = "media_expired"
     CHALLENGE = "verification_required"
+    PAGINATION = "continuation_withheld"
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ MESSAGES = {
     Outcome.METADATA: "Douyin returned unusable video data.",
     Outcome.MEDIA_EXPIRED: "The Douyin video link expired. Retry to refresh it.",
     Outcome.CHALLENGE: "Douyin requires verification. HaizFlow does not solve verification challenges.",
+    Outcome.PAGINATION: "Douyin withheld the next profile page for this session.",
 }
 
 

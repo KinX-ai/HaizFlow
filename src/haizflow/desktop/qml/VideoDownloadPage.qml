@@ -8,10 +8,19 @@ Item {
 
     required property var downloader
 
+    function restoreVideoUrl() {
+        const form = root.downloader.workspaceState;
+        const value = String(form.videoUrl !== undefined ? form.videoUrl : root.downloader.videoPreviewUrl || "");
+        if (videoLink.text !== value)
+            videoLink.text = value;
+    }
+
+    Component.onCompleted: restoreVideoUrl()
+
     Connections {
         target: root.downloader
         function onWorkspaceChanged() {
-            videoLink.text = String(root.downloader.workspaceState.videoUrl || root.downloader.videoPreviewUrl || "");
+            root.restoreVideoUrl();
         }
     }
 
@@ -46,10 +55,10 @@ Item {
                         selectByMouse: true
                         accessibleName: qsTr("Liên kết video")
                         enabled: !root.downloader.videoPreviewBusy
-                        text: String(root.downloader.workspaceState.videoUrl || root.downloader.videoPreviewUrl || "")
                         onTextEdited: {
+                            const editedUrl = text;
+                            root.downloader.saveWorkspaceState({videoUrl: editedUrl});
                             root.downloader.clearVideoPreview();
-                            root.downloader.saveWorkspaceState({videoUrl: text});
                         }
                     }
 
@@ -78,65 +87,15 @@ Item {
                         }
                     }
 
-                    Rectangle {
+                    DownloadLinkPreview {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 112
+                        Layout.preferredHeight: implicitHeight
                         visible: root.downloader.videoPreviewReady
-                        radius: Theme.radiusSmall
-                        color: Theme.surfaceElevated
-                        border.width: 1
-                        border.color: Theme.outline
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.margins: Theme.space12
-                            spacing: Theme.space12
-
-                            Rectangle {
-                                Layout.preferredWidth: 132
-                                Layout.preferredHeight: 76
-                                radius: Theme.radiusTiny
-                                color: Theme.surfaceStrong
-                                clip: true
-
-                                Image {
-                                    id: previewThumbnail
-                                    anchors.fill: parent
-                                    source: root.downloader.videoPreviewThumbnail
-                                    sourceSize.width: 264
-                                    sourceSize.height: 152
-                                    asynchronous: true
-                                    fillMode: Image.PreserveAspectCrop
-                                    visible: status === Image.Ready
-                                }
-                                ThumbnailFallback {
-                                    anchors.fill: parent
-                                    visible: root.downloader.videoPreviewThumbnail.length === 0 || previewThumbnail.status === Image.Error
-                                }
-                            }
-
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: Theme.space4
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: root.downloader.videoPreviewTitle
-                                    color: Theme.text
-                                    font.pixelSize: Theme.body
-                                    font.weight: Font.DemiBold
-                                    elide: Text.ElideRight
-                                    textFormat: Text.PlainText
-                                }
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: [root.downloader.videoPreviewPlatform, root.downloader.videoPreviewUploader, root.downloader.videoPreviewDuration].filter(function(value) { return value.length > 0 }).join(" | ")
-                                    color: Theme.textMuted
-                                    font.pixelSize: Theme.caption
-                                    elide: Text.ElideRight
-                                    textFormat: Text.PlainText
-                                }
-                            }
-                        }
+                        title: root.downloader.videoPreviewTitle
+                        platform: root.downloader.videoPreviewPlatform
+                        uploader: root.downloader.videoPreviewUploader
+                        duration: root.downloader.videoPreviewDuration
+                        thumbnail: root.downloader.videoPreviewThumbnail
                     }
 
                     DownloadDestinationRow {
@@ -152,7 +111,8 @@ Item {
                         Layout.fillWidth: true
                         url: videoLink.text
                         visible: requiresSession
-                        operationBusy: root.downloader.videoPreviewBusy || root.downloader.hasWork
+                        operationBusy: root.downloader.videoPreviewBusy || root.downloader.audioPreviewBusy
+                            || root.downloader.hasWork
                     }
 
                     RowLayout {

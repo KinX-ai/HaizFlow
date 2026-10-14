@@ -45,7 +45,7 @@ class RuntimeDeviceController:
         host = self._host
         background_work = (
             host._processing_queue.has_work
-            or host._url_importer.busy
+            or (getattr(host, "_project_url_imports", None) or host._url_importer).busy
             or host._channel_importer.busy
             or (getattr(host, "_media_downloader", None) and host._media_downloader.hasWork)
             or getattr(host, "_media_import_busy", False)
@@ -111,7 +111,7 @@ class RuntimeDeviceController:
                     step_detail="Waiting to be started after the application exited",
                 )
 
-        host._url_importer.shutdown()
+        (getattr(host, "_project_url_imports", None) or host._url_importer).shutdown()
         host._channel_importer.shutdown()
         media_downloader = getattr(host, "_media_downloader", None)
         if media_downloader:

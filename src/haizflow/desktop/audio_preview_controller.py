@@ -64,7 +64,7 @@ class AudioPreviewController:
             effective_language,
             selected_video_id=str(selected_video_id or ""),
         )
-        draft_reference = effective_voice == "omnivoice:clone" and bool(voice_reference_path)
+        draft_reference = effective_voice in {"omnivoice:clone", "vieneu:clone"} and bool(voice_reference_path)
         if draft_reference:
             packaged_voice_path = voice_reference_path if self._valid_media(voice_reference_path) else ""
         if voice_only:
@@ -140,6 +140,8 @@ class AudioPreviewController:
         provider = str(provider or "").strip().lower()
         if provider == "omnivoice-gpu":
             provider = "omnivoice"
+        elif provider == "vieneu-gpu":
+            provider = "vieneu"
         voice = str(voice or "").strip()
         language = str(target_language or "").strip().lower()
         if not voice:
@@ -150,7 +152,7 @@ class AudioPreviewController:
             return packaged
 
         selected = video_store.get_video(selected_video_id) if selected_video_id else None
-        if voice == "omnivoice:clone":
+        if voice in {"omnivoice:clone", "vieneu:clone"}:
             reference = str(((selected.files if selected else {}) or {}).get("voice_reference") or "")
             return reference if self._valid_media(reference) else ""
 
@@ -215,7 +217,17 @@ class AudioPreviewController:
 
     @classmethod
     def _packaged_sample_path(cls, provider: str, voice: str, language: str) -> str:
-        safe_voice = re.sub(r"[^a-zA-Z0-9._-]+", "_", voice).strip("_")
+        if provider == "vieneu":
+            from haizflow.core.vieneu_voices import sample_voice_id
+
+            if language != "vi":
+                return ""
+            try:
+                safe_voice = sample_voice_id(voice)
+            except ValueError:
+                return ""
+        else:
+            safe_voice = re.sub(r"[^a-zA-Z0-9._-]+", "_", voice).strip("_")
         candidates = [
             cls._PACKAGED_SAMPLE_DIR / provider / safe_voice / f"{language}.mp3",
         ]

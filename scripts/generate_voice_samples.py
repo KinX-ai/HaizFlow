@@ -68,7 +68,8 @@ def main() -> int:
                     "provider": "omnivoice", "voice": voice, "language": language,
                     "category": category, "path": output.relative_to(SAMPLE_ROOT).as_posix(),
                 })
-    manifest["samples"] = generated
+    # Regenerating OmniVoice must not discard optional Edge/VieNeu catalogs.
+    manifest["samples"] = generated + [item for item in manifest["samples"] if item["provider"] != "omnivoice"]
     MANIFEST_PATH.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0
 

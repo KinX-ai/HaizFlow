@@ -291,6 +291,17 @@ class ProcessingLifecycleController:
                 # generated voice is audible immediately, without waiting for
                 # a later volume edit or reopening the project.
                 finished_video = video_store.get_video(finished_video_id)
+                if (finished_video_id == str(host._selected_video_id or "") and finished_video
+                        and getattr(finished_video, "subtitle_language", "") == "zh"
+                        and str(getattr(host, "_tts_provider", "")).startswith("vieneu")
+                        and str(getattr(finished_video, "tts_provider", "")).startswith("omnivoice")):
+                    host._tts_provider, host._tts_voice = finished_video.tts_provider, finished_video.tts_voice
+                    host.ttsProviderChanged.emit()
+                    host.ttsVoiceChanged.emit()
+                    host.ttsProviderOptionsChanged.emit()
+                    host.ttsVoiceOptionsChanged.emit()
+                    host.appAlertRequested.emit("Đã đổi công cụ giọng đọc",
+                        "Phụ đề vừa tạo là tiếng Trung. VieNeu đã được chuyển sang OmniVoice để tạo giọng.", "warning")
                 if (
                     finished_video_id == str(host._selected_video_id or "")
                     and finished_video

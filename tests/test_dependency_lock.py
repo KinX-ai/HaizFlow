@@ -1,12 +1,47 @@
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class DependencyLockTests(unittest.TestCase):
+    def _load_script(self, name):
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(name.replace("-", "_"), root / "scripts" / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_source_client_is_exactly_pinned_and_included_in_license_inventory(self):
+        verifier = self._load_script("verify-dependency-lock")
+        requirement, version = verifier._locked_requirements()["edge-tts"]
+        self.assertEqual(version, "7.3.1")
+        self.assertEqual(requirement.url, verifier._source_pins()["edge-tts"]["url"])
+        notices = self._load_script("generate-third-party-notices")
+        self.assertIn("edge-tts", notices._locked_distributions(verifier.LOCK_PATH))
+        runtime = self._load_script("verify-runtime")
+        self.assertEqual(runtime.expected_packages()["edge-tts"], "7.3.1")
+
+    def test_source_lock_rejects_changed_hash_commit_branch_and_unreviewed_source(self):
+        verifier = self._load_script("verify-dependency-lock")
+        pin = verifier._source_pins()["edge-tts"]
+        valid = f"edge-tts @ {pin['url']} --hash=sha256:{pin['sha256']}"
+        invalid = (
+            valid.replace(pin["sha256"], "0" * 64),
+            valid.replace(pin["url"].rsplit("/", 1)[1], "0" * 40),
+            valid.replace(pin["url"].rsplit("/", 1)[1], "main"),
+            valid.replace("edge-tts @", "unreviewed @"),
+            valid + " --hash=sha256:" + "0" * 64,
+        )
+        for entry in invalid:
+            with self.subTest(entry=entry), patch.object(verifier, "_logical_requirements", return_value=[entry]):
+                with self.assertRaisesRegex(RuntimeError, "not exact"):
+                    verifier._locked_requirements()
+
     def test_release_lock_and_manifest_are_current(self):
         root = Path(__file__).resolve().parents[1]
         completed = subprocess.run(

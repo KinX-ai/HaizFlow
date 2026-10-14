@@ -1,5 +1,25 @@
 # Duration-guided translation
 
+## Recognition group boundaries
+
+Long-source recognition aligns bounded groups of sentences to the audio. Group
+intrusion checks compare locally validated word timing with corrected neighbouring
+groups, not their provisional proportional Whisper boundaries. If two adjacent
+same-language groups overlap, only their two boundary sentences are jointly
+aligned once with the already loaded alignment model. The window excludes the
+other already aligned neighbours, so a short boundary word cannot lock onto
+similar sounds in an earlier/later sentence. Missing words, low scores,
+new overlap with other sentences, or failed alignment retain the conservative
+fallback; recognized text is never rewritten or removed by this repair.
+
+Recognition timing contract v17 changes the recognition cache key for subsequent
+runs. Opening a saved project does not rewrite its subtitles or voice, and OCR,
+media, and voice cache contracts are unchanged. Timing repair must be applied by
+running recognition again; previously generated voice still follows its saved
+subtitle timing until regenerated.
+
+## Translation guidance
+
 HY-MT2 Q4, HY-MT2 full and Gemini receive per-sentence speech duration in the
 initial translation request. Prompts ask for concise, natural spoken equivalents
 without extra explanation or filler, preserving essential meaning, negation,

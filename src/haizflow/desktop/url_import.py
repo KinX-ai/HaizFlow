@@ -42,6 +42,7 @@ class VideoUrlImportCoordinator(QObject):
         self._threads: set[threading.Thread] = set()
         self._threads_lock = threading.Lock()
         self._request_guard = None
+        self.import_target = None
         self._metadataResolved.connect(self._handle_metadata)
         self._progressResolved.connect(self._handle_progress)
         self._downloadResolved.connect(self._handle_download)
@@ -324,3 +325,39 @@ class VideoUrlImportCoordinator(QObject):
         self._state = "idle" if cancelled else ("retry" if self._metadata else "error")
         self._status = "Import cancelled" if cancelled else str(message)
         self.changed.emit()
+
+
+class ProjectUrlImportRegistry:
+    """Project-local UI/workers, with completion routed to the captured owner."""
+
+    def __init__(self, parent, guard, ready_callback, finished_callback):
+        self._parent = parent
+        self._guard = guard
+        self._ready_callback = ready_callback
+        self._finished_callback = finished_callback
+        self._items = {}
+
+    def for_project(self, project_key):
+        key = str(project_key or "")
+        if key not in self._items:
+            importer = VideoUrlImportCoordinator(self._parent)
+            importer.set_request_guard(self._guard)
+            importer.downloadReady.connect(
+                lambda path, workspace, mode, owner=importer: self._ready_callback(owner, path, workspace, mode))
+            importer.importFinished.connect(lambda owner=importer: self._finished_callback(owner))
+            self._items[key] = importer
+        return self._items[key]
+
+    def existing(self, project_key):
+        return self._items.get(str(project_key or ""))
+
+    @property
+    def busy(self):
+        return any(importer.busy for importer in self._items.values())
+
+    def shutdown(self, timeout_seconds=5.0):
+        deadline = time.monotonic() + max(0, timeout_seconds)
+        for importer in self._items.values():
+            importer.cancel()
+        return all([importer.shutdown(max(0, deadline - time.monotonic()))
+                    for importer in self._items.values()])

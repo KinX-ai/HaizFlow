@@ -175,6 +175,7 @@ class ManualEditorSessionTests(unittest.TestCase):
                 "remove_original_subtitles",
                 "original_subtitle_removal_mode",
                 "output_format",
+                "output_speed",
                 "crop",
                 "enable_audio_separation",
                 "original_video_volume",

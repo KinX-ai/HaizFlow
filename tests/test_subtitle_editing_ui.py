@@ -468,7 +468,7 @@ CopyrightDialog { id: dialog; Component.onCompleted: open(); }
         from haizflow.schemas.video import SubtitleStyle
 
         source = (QML_DIR / "BatchSettingsDialog.qml").read_text(encoding="utf-8")
-        properties = re.findall(r"^    property (?:string|bool|int|var) draft\w+:.*$", source, re.M)
+        properties = re.findall(r"^    property (?:string|bool|int|real|var) draft\w+:.*$", source, re.M)
         current_draft = re.search(r"    function currentDraft\(\) \{.*?\n    \}", source, re.S)
         self.assertIsNotNone(current_draft)
         window = self.create_window("\n".join(properties) + "\n" + current_draft.group() + '''

@@ -138,6 +138,12 @@ class ProjectImportController:
         host = self._host
         if not self._can_import_in_background():
             return False
+        context = dict(context)
+        if context.get("url_import"):
+            owner = context["url_import"]
+            context["url_importer"] = context.get("url_importer") or (
+                owner if hasattr(owner, "complete_import") else host._url_importer)
+            context["url_import"] = True
         self._next_task_id += 1
         task_id = self._next_task_id
         self._tasks[task_id] = context
@@ -297,9 +303,17 @@ class ProjectImportController:
                 host._background_music_import_status = "Background music imported"
                 host.batchBackgroundMusicDraftReady.emit(destination)
                 return
+            if self.is_replacing_video(str(task.get("video_id") or "")):
+                host._background_music_import_status = "Nguồn video đang được thay. Hãy nhập lại nhạc nền sau khi hoàn tất."
+                return
             selected = video_store.get_video(str(task.get("video_id") or ""))
             if not selected:
                 host._background_music_import_status = "The selected video is no longer available."
+                return
+            if ("source_generation" in task and (
+                    task["source_generation"] != int((selected.manual_tool_generations or {}).get("source", 0))
+                    or task.get("source_created_at") != selected.created_at)):
+                host._background_music_import_status = "Nguồn video đã thay đổi. Hãy nhập lại nhạc nền."
                 return
             if host._processing_queue.contains(selected.video_id):
                 host._background_music_import_status = (
@@ -362,6 +376,10 @@ class ProjectImportController:
         task_id = uuid.uuid4().hex
         self._background_music_cancel = threading.Event()
         selected = video_store.get_video(host._selected_video_id)
+        if selected is None or self.is_replacing_video(host._selected_video_id):
+            host._background_music_import_status = "Chờ nguồn video sẵn sàng trước khi nhập nhạc nền."
+            host.backgroundMusicImportChanged.emit()
+            return False
         capture_snapshot = getattr(host, "_capture_video_asset_snapshot", None)
         history_before = (
             capture_snapshot(selected, preserve=True)
@@ -374,6 +392,8 @@ class ProjectImportController:
             "video_id": host._selected_video_id,
             "url": normalized_url,
             "history_before": history_before,
+            "source_generation": int((getattr(selected, "manual_tool_generations", {}) or {}).get("source", 0)),
+            "source_created_at": getattr(selected, "created_at", ""),
         }
         host._background_music_import_busy = True
         host._background_music_import_status = "Downloading background music"
@@ -502,7 +522,7 @@ class ProjectImportController:
             host.refreshVideos()
         if context.get("url_import"):
             message = "" if created_ids else (errors[0] if errors else "The video was downloaded but could not be added to the project.")
-            host._url_importer.complete_import(bool(created_ids), message)
+            (context.get("url_importer") or host._url_importer).complete_import(bool(created_ids), message)
         if context.get("channel_import"):
             host._channel_importer.complete_video(
                 context["session_id"],
@@ -567,30 +587,39 @@ class ProjectImportController:
         if not host._url_importer.start_download(host._selected_project_root()):
             host._url_import_target = None
 
-    def handle_url_download_ready(self, path, _workspace, mode) -> None:
+    def handle_url_download_ready(self, path, _workspace, mode, *, importer=None) -> None:
         host = self._host
-        target = host._url_import_target
-        host._url_import_target = None
-        if self._can_import_in_background():
-            if self._queue_downloaded_video(path, mode, target):
+        owner = importer or host._url_importer
+        if importer is not None:
+            target = owner.import_target
+            owner.import_target = None
+            if not target:
+                owner.complete_import(False, "The destination project is no longer available.")
                 return
-            host._url_importer.complete_import(False, "The video was downloaded but could not be added to the project.")
+        else:
+            target = host._url_import_target
+            host._url_import_target = None
+        if self._can_import_in_background():
+            if self._queue_downloaded_video(path, mode, target, importer=owner):
+                return
+            owner.complete_import(False, "The video was downloaded but could not be added to the project.")
             return
         imported = self.import_downloaded_video(path, mode, target)
         message = "" if imported else "The video was downloaded but could not be added to the project."
-        host._url_importer.complete_import(imported, message)
+        owner.complete_import(imported, message)
 
-    def _queue_downloaded_video(self, path: str, mode: str, target) -> bool:
+    def _queue_downloaded_video(self, path: str, mode: str, target, *, importer=None) -> bool:
         host = self._host
+        url_import = importer or True
         if not target:
             if mode == "batch":
-                return self._queue_batch_paths([path], url_import=True)
+                return self._queue_batch_paths([path], url_import=url_import)
             if host._selected_video_id:
-                return self._queue_replace(host._selected_video_id, path, None, url_import=True)
-            return self._queue_project_video(path, url_import=True)
+                return self._queue_replace(host._selected_video_id, path, None, url_import=url_import)
+            return self._queue_project_video(path, url_import=url_import)
         target_video_id = target.get("selected_video_id")
         if mode != "batch" and target_video_id:
-            return self._queue_replace(target_video_id, path, target.get("media_source"), url_import=True)
+            return self._queue_replace(target_video_id, path, target.get("media_source"), url_import=url_import)
         config = target.get("config")
         known_project_keys = {project.get("key") for project in project_store.list_projects()}
         if not isinstance(config, VideoConfig) or target.get("project_key") not in known_project_keys:
@@ -615,6 +644,7 @@ class ProjectImportController:
                 "project_key": str(target.get("project_key") or ""),
                 "as_batch": mode == "batch",
                 "url_import": True,
+                "url_importer": importer,
             },
         )
 
@@ -979,20 +1009,32 @@ class ProjectImportController:
         if not video or host._processing_queue.contains(video_id) or not os.path.isfile(path):
             return False
         provider = str(provider or host._tts_provider)
-        if provider not in {"omnivoice", "omnivoice-gpu"}:
+        if provider not in {"omnivoice", "omnivoice-gpu", "vieneu", "vieneu-gpu"}:
             return False
-        previous = (host._tts_provider, host._tts_voice)
-        host._tts_provider, host._tts_voice = provider, "omnivoice:clone"
+        from haizflow.core.vieneu_voices import unsupported_language_notice
+        from haizflow.services.subtitle_language import manual_subtitle_language
+
+        language = manual_subtitle_language(video) if video.project_type == "manual" else video.target_language
+        notice = unsupported_language_notice(provider, language)
+        if notice:
+            host._show_app_alert(*notice, "warning")
+            return False
+        previous = (host._tts_provider, host._tts_voice, getattr(host, "_speaker_mode", "single"))
+        host._tts_provider, host._tts_voice = provider, "vieneu:clone" if provider.startswith("vieneu") else "omnivoice:clone"
+        host._speaker_mode = "single"
         # Saves the owner's configuration synchronously and removes an older
         # captured draft which could otherwise overwrite it after navigation.
         if not host.persistVideoSettingsFor(video_id):
-            host._tts_provider, host._tts_voice = previous
+            host._tts_provider, host._tts_voice, host._speaker_mode = previous
             host.ttsProviderChanged.emit()
             host.ttsVoiceChanged.emit()
             return False
         host.ttsProviderChanged.emit()
         host.ttsVoiceChanged.emit()
         host.ttsVoiceOptionsChanged.emit()
+        signal = getattr(host, "speakerModeChanged", None)
+        if signal is not None:
+            signal.emit()
         preview = getattr(host, "_audio_preview", None)
         if preview is not None:
             preview.invalidate()
@@ -1063,8 +1105,8 @@ class ProjectImportController:
         except OSError as exc:
             host._show_app_alert("Voice cloning", str(exc), "warning")
             return False
-        if host._tts_voice == "omnivoice:clone":
-            host._tts_voice = "omnivoice:female"
+        if host._tts_voice in {"omnivoice:clone", "vieneu:clone"}:
+            host._tts_voice = "vieneu:Hải Đăng" if host._tts_provider.startswith("vieneu") else "omnivoice:female"
             host.ttsVoiceChanged.emit()
         host._edit_history_recording_suspended += 1
         try:
@@ -1163,10 +1205,11 @@ class ProjectImportController:
                 total_vram_bytes=(getattr(getattr(host, "_hardware_capabilities", None), "total_vram_bytes", None)
                                   if getattr(host, "_startup_hardware_resolved", False) else None),
             ),
-            "_tts_voice": "omnivoice:female",
+            "_tts_voice": "vieneu:Hải Đăng",
             "_speaker_mode": "single",
             "_enable_audio_separation": True,
             "_output_format": "keep_ratio",
+            "_output_speed": 1.0,
             "_original_volume": 60,
             "_background_music_volume": 30,
             "_background_music_loop": True,
@@ -1200,6 +1243,7 @@ class ProjectImportController:
             "_speaker_mode": "speakerModeChanged",
             "_enable_audio_separation": "enableAudioSeparationChanged",
             "_output_format": "outputFormatChanged",
+            "_output_speed": "outputSpeedChanged",
             "_original_volume": "originalVolumeChanged",
             "_background_music_volume": "backgroundMusicVolumeChanged",
             "_background_music_loop": "audioMixOptionsChanged",
@@ -1621,7 +1665,7 @@ class ProjectImportController:
                         "project_name": host._project_name,
                         "project_directory": host._project_directory,
                         "project_key_value": host._selected_project_key,
-                        "move_input": url_import,
+                        "move_input": bool(url_import),
                     },
                 }
             ],
@@ -1642,7 +1686,7 @@ class ProjectImportController:
                     "project_name": host._project_name,
                     "project_directory": host._project_directory,
                     "project_key_value": host._selected_project_key,
-                    "move_input": url_import,
+                    "move_input": bool(url_import),
                 },
             }
             for path in valid_paths
@@ -1677,7 +1721,7 @@ class ProjectImportController:
                 }
             ],
             {"operation": "replace", "video_id": video_id,
-             "project_key": host._selected_project_key, "url_import": url_import},
+             "project_key": str(getattr(video, "project_key", "") or host._selected_project_key), "url_import": url_import},
         )
 
     def _release_replacement_preview(self, video_id: str) -> None:

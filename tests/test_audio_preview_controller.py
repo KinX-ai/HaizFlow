@@ -1,14 +1,16 @@
-import tempfile
-import unittest
+import hashlib
 import json
 import subprocess
+import tempfile
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from haizflow.core.edge_voices import EDGE_VOICES
+from haizflow.core.vieneu_voices import VIENEU_VOICES, sample_voice_id
 from haizflow.desktop.audio_preview_controller import AudioPreviewController
 from haizflow.desktop.catalog import OMNIVOICE_TTS_VOICES, POPULAR_TARGET_LANGUAGES
-from haizflow.core.edge_voices import EDGE_VOICES
 from haizflow.utils.ffmpeg import _binary
 
 
@@ -41,7 +43,8 @@ class AudioPreviewControllerTests(unittest.TestCase):
             source = Path(directory) / "source.mp4"
             for path in (reference, other, source):
                 path.write_bytes(b"media")
-            video = SimpleNamespace(project_type="batch", files={"voice_reference": str(other), "video_input": str(source)})
+            video = SimpleNamespace(project_type="batch",
+                                    files={"voice_reference": str(other), "video_input": str(source)})
             host = _host(_selected_video_id="selected", _tts_voice="omnivoice:clone")
             preview = AudioPreviewController(host)
             with patch("haizflow.desktop.audio_preview_controller.video_store.get_video", return_value=video), \
@@ -68,7 +71,8 @@ class AudioPreviewControllerTests(unittest.TestCase):
         self.assertEqual(len([item for item in manifest["samples"] if item["provider"] == "omnivoice"]),
                          len(languages) * len(OMNIVOICE_TTS_VOICES))
         self.assertEqual(len(manifest["samples"]),
-                         len(languages) * len(OMNIVOICE_TTS_VOICES) + sum(map(len, EDGE_VOICES.values())))
+                         len(languages) * len(OMNIVOICE_TTS_VOICES) + sum(map(len, EDGE_VOICES.values()))
+                         + len(VIENEU_VOICES))
         self.assertEqual(set(manifest["sentences"]), set(languages))
         packaged_audio = list(AudioPreviewController._PACKAGED_SAMPLE_DIR.rglob("*.mp3"))
         self.assertEqual(len(packaged_audio), len(manifest["samples"]))
@@ -107,6 +111,43 @@ class AudioPreviewControllerTests(unittest.TestCase):
                         )
                         self.assertEqual(decoded.returncode, 0, decoded.stderr.decode(errors="replace"))
             synthesize.assert_not_called()
+
+    def test_all_vieneu_voices_have_exact_offline_cpu_gpu_samples_and_decode_completely(self):
+        host = _host()
+        preview = AudioPreviewController(host)
+        manifest = json.loads((preview._PACKAGED_SAMPLE_DIR / "samples.json").read_text(encoding="utf-8"))
+        entries = {item["voice"]: item for item in manifest["samples"] if item["provider"] == "vieneu"}
+        self.assertEqual(len(entries), len(VIENEU_VOICES))
+        self.assertEqual(len({entry["sha256"] for entry in entries.values()}), len(VIENEU_VOICES))
+        paths = set()
+        with patch("haizflow.pipeline.vieneu_tts.synthesize_to_mp3") as synthesize:
+            for name, _gender, _region in VIENEU_VOICES:
+                voice = "vieneu:" + name
+                with self.subTest(voice=voice):
+                    path = Path(preview.voice_sample_path("vieneu", voice, "vi"))
+                    self.assertEqual(path, preview._PACKAGED_SAMPLE_DIR / entries[voice]["path"])
+                    self.assertEqual(path.parent.name, sample_voice_id(voice))
+                    self.assertEqual(path.stat().st_size, entries[voice]["bytes"])
+                    self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), entries[voice]["sha256"])
+                    paths.add(path)
+                    for provider in ("vieneu", "vieneu-gpu"):
+                        self.assertTrue(preview.has_voice_sample(provider, voice, "vi"))
+                        self.assertEqual(preview.voice_sample_path(provider, voice, "vi"), str(path))
+                        self.assertTrue(preview.start(provider=provider, voice=voice,
+                                                      target_language="vi", voice_only=True))
+                        self.assertEqual(host._audio_preview_source, path.as_uri())
+                        self.assertEqual(host._audio_preview_state, "ready")
+                        self.assertFalse(preview.has_voice_sample(provider, voice, "en"))
+                        self.assertFalse(preview.has_voice_sample(provider, voice, "zh"))
+                    decoded = subprocess.run(
+                        [_binary("ffmpeg"), "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
+                        capture_output=True, timeout=20,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    self.assertEqual(decoded.returncode, 0, decoded.stderr.decode(errors="replace"))
+            synthesize.assert_not_called()
+        self.assertEqual(len(paths), len(VIENEU_VOICES))
+        self.assertFalse(preview.has_voice_sample("vieneu", "vieneu:Missing", "vi"))
 
     def test_invalidate_clears_all_previous_player_sources(self):
         host = _host(

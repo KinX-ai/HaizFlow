@@ -602,11 +602,13 @@ def create_download_workspace(project_root: str) -> str:
 def cleanup_download_workspace(workspace: str) -> None:
     if not workspace:
         return
-    workspace_path = Path(workspace).resolve()
+    workspace_path = Path(os.path.abspath(workspace))
     parent = workspace_path.parent
     if parent.name != ".downloads":
         return
-    shutil.rmtree(workspace_path, ignore_errors=True)
+    from haizflow.services.temporary_cleanup import discard_tree
+
+    discard_tree(workspace_path)
     try:
         parent.rmdir()
     except OSError:

@@ -79,7 +79,7 @@ from haizflow.desktop.settings_controller import SettingsController
 from haizflow.desktop.smart_warmup_controller import SmartWarmupController
 from haizflow.desktop.social_publish_controller import SocialPublishController
 from haizflow.desktop.subtitle_overlay_renderer import SubtitleOverlayRenderer
-from haizflow.desktop.url_import import VideoUrlImportCoordinator
+from haizflow.desktop.url_import import ProjectUrlImportRegistry
 from haizflow.desktop.voice_clone_recorder import VoiceCloneRecorder
 from haizflow.desktop.video_export_controller import VideoExportController
 from haizflow.pipeline.process_registry import pause_video
@@ -132,6 +132,7 @@ class HaizFlowController(QObject):
         "remove_original_subtitles",
         "original_subtitle_removal_mode",
         "output_format",
+        "output_speed",
         "crop",
         "enable_audio_separation",
         "original_video_volume",
@@ -179,6 +180,7 @@ class HaizFlowController(QObject):
     subtitleSettingsChanged = Signal()
     cropSettingsChanged = Signal()
     outputFormatChanged = Signal()
+    outputSpeedChanged = Signal()
     backgroundMusicChanged = Signal()
     backgroundMusicImportChanged = Signal()
     batchBackgroundMusicDraftReady = Signal(str)
@@ -263,11 +265,12 @@ class HaizFlowController(QObject):
         self._target_language = "vi"
         self._speech_recognition_model = "small"
         self._translation_model = "q4"
-        self._tts_provider = "omnivoice"
-        self._tts_voice = "omnivoice:female"
+        self._tts_provider = "vieneu-gpu"
+        self._tts_voice = "vieneu:Hải Đăng"
         self._speaker_mode = "single"
         self._enable_audio_separation = True
         self._output_format = "keep_ratio"
+        self._output_speed = 1.0
         self._original_volume = 60
         self._background_music_volume = 30
         self._background_music_loop = True
@@ -452,6 +455,9 @@ class HaizFlowController(QObject):
         self.hardwareChanged.connect(self.ttsProviderOptionsChanged.emit)
         self._app_updates = AppUpdateController(self)
         self._video_exports = VideoExportController(self)
+        from haizflow.services.temporary_cleanup import resume_pending_cleanup
+
+        resume_pending_cleanup()
         self.exportStateChanged.connect(self.appUpdateChanged.emit)
         self._app_updates.changed.connect(self.appUpdateChanged.emit)
         for signal in (self.processingChanged, self.resourcePacksChanged, self.mediaImportChanged,
@@ -491,14 +497,15 @@ class HaizFlowController(QObject):
         self._thumbnail_retry_failures: dict[str, tuple[str, int, float]] = {}
         self._thumbnail_retry_lock = threading.Lock()
         self._dimension_probe = VideoDimensionProbe(self._on_video_dimensions_ready)
-        self._url_importer = VideoUrlImportCoordinator(self)
         from haizflow.desktop.douyin_session_controller import DouyinSessionController
         self._douyin_session = DouyinSessionController(self)
-        self._url_importer.set_request_guard(self._douyin_session.request_error)
+        self._project_url_imports = ProjectUrlImportRegistry(
+            self, self._douyin_session.request_error,
+            lambda owner, path, workspace, mode: HaizFlowController._project_import_for(self).handle_url_download_ready(
+                path, workspace, mode, importer=owner),
+            lambda owner: self.urlImportFinished.emit() if owner is self._url_importer else None,
+        )
         self._media_downloader.set_request_guard(self._douyin_session.request_error)
-        self._url_import_target = None
-        self._url_importer.downloadReady.connect(self._handle_url_download_ready)
-        self._url_importer.importFinished.connect(self.urlImportFinished.emit)
         self._channel_importer = ChannelImportCoordinator(self)
         self._channel_importer.set_worker_limit_provider(lambda: 1 if self._processing_queue.active_video_id else 2)
         self._channel_import_targets = {}
@@ -1337,8 +1344,12 @@ class HaizFlowController(QObject):
         language_changed = self._target_language != language
         current_provider = getattr(self, "_tts_provider", "omnivoice")
         normalized_provider = HaizFlowController._normalized_tts_provider(language, current_provider)
+        manual = getattr(self, "_project_type", "single") == "manual"
+        voice_language = HaizFlowController._selected_voice_language(self) if manual else language
+        if not manual and not HaizFlowController.validateTtsProviderForLanguage(self, language, normalized_provider):
+            return
         provider_changed = current_provider != normalized_provider
-        normalized_voice = self._normalized_voice_for_language(language, self._tts_voice, normalized_provider)
+        normalized_voice = self._normalized_voice_for_language(voice_language, self._tts_voice, normalized_provider)
         voice_changed = self._tts_voice != normalized_voice
         if not language_changed and not provider_changed and not voice_changed:
             return
@@ -1475,24 +1486,27 @@ class HaizFlowController(QObject):
 
     @ttsProvider.setter
     def ttsProvider(self, value):
-        provider = self._normalized_tts_provider(self._target_language, value)
+        language = HaizFlowController._selected_voice_language(self)
+        provider = self._normalized_tts_provider(language, value)
+        if not HaizFlowController.validateTtsProviderForLanguage(self, language, provider):
+            return
         if provider.endswith("-gpu") and getattr(self, "_settings_processing_device", "cpu") != "gpu":
-            self._show_app_alert("Đang dùng chế độ CPU", "Chọn OmniVoice CPU hoặc chuyển sang GPU trong Cài đặt → Chung.", "warning")
+            self._show_app_alert("Đang dùng chế độ CPU", "Chọn backend CPU hoặc chuyển sang GPU trong Cài đặt → Chung.", "warning")
             return
         if provider.endswith("-gpu"):
             if not self._ensure_hardware_ready_for_action():
                 return
             if not HaizFlowController._project_gpu_available(self):
-                self._show_app_alert("Máy không đáp ứng", "OmniVoice GPU cần GPU NVIDIA tương thích.", "warning")
+                self._show_app_alert("Máy không đáp ứng", "Backend GPU cần GPU NVIDIA tương thích.", "warning")
                 return
-        normalized_voice = self._normalized_voice_for_language(self._target_language, self._tts_voice, provider)
+        normalized_voice = self._normalized_voice_for_language(language, self._tts_voice, provider)
         provider_changed = self._tts_provider != provider
         voice_changed = self._tts_voice != normalized_voice
         if not provider_changed and not voice_changed:
             return
         self._tts_provider = provider
         self._tts_voice = normalized_voice
-        speaker_changed = not provider.startswith("omnivoice") and getattr(self, "_speaker_mode", "single") != "single"
+        speaker_changed = not provider.startswith(("omnivoice", "vieneu")) and getattr(self, "_speaker_mode", "single") != "single"
         if speaker_changed:
             self._speaker_mode = "single"
         preview = getattr(self, "_audio_preview", None)
@@ -1509,11 +1523,37 @@ class HaizFlowController(QObject):
 
     @Property("QVariantList", notify=ttsProviderOptionsChanged)
     def ttsProviderOptions(self):
-        return self._tts_provider_options_for_language(self._target_language)
+        return self._tts_provider_options_for_language(HaizFlowController._selected_voice_language(self))
+
+    def _selected_voice_language(self):
+        if getattr(self, "_project_type", "single") != "manual":
+            return self._target_language
+        from haizflow.services.subtitle_language import manual_subtitle_language
+
+        video = self._selected_video()
+        if not video:
+            return "vi"
+        model = getattr(self, "_manual_subtitles", None)
+        segments = model.segments if model is not None and model.video_id == video.video_id else None
+        return manual_subtitle_language(video, segments)
+
+    @Property(str, notify=manualSubtitleDocumentChanged)
+    def manualVoiceLanguage(self):
+        return HaizFlowController._selected_voice_language(self)
 
     @Slot(str, result="QVariantList")
     def ttsProviderOptionsForLanguage(self, language_code: str):
         return self._tts_provider_options_for_language(str(language_code or "vi"))
+
+    @Slot(str, str, result=bool)
+    def validateTtsProviderForLanguage(self, language_code, provider):
+        from haizflow.core.vieneu_voices import unsupported_language_notice
+
+        notice = unsupported_language_notice(provider, language_code, getattr(self, "_settings_language", "vi"))
+        if notice:
+            HaizFlowController._show_app_alert(self, *notice, "warning")
+            return False
+        return True
 
     @Slot()
     def enableInAppAlerts(self) -> None:
@@ -1556,7 +1596,7 @@ class HaizFlowController(QObject):
     @ttsVoice.setter
     def ttsVoice(self, value):
         normalized_voice = self._normalized_voice_for_language(
-            self._target_language, value, getattr(self, "_tts_provider", "omnivoice")
+            HaizFlowController._selected_voice_language(self), value, getattr(self, "_tts_provider", "omnivoice")
         )
         if self._tts_voice != normalized_voice:
             self._tts_voice = normalized_voice
@@ -1574,7 +1614,7 @@ class HaizFlowController(QObject):
     def speakerMode(self, value):
         normalized = (
             "multiple"
-            if self._tts_provider.startswith("omnivoice")
+            if self._tts_provider.startswith(("omnivoice", "vieneu"))
             and str(value or "").strip().lower() == "multiple"
             else "single"
         )
@@ -1584,7 +1624,8 @@ class HaizFlowController(QObject):
 
     @Property("QVariantList", notify=ttsVoiceOptionsChanged)
     def ttsVoiceOptions(self):
-        options = self._voice_options_for_language(self._target_language, self._tts_provider)
+        language = HaizFlowController._selected_voice_language(self)
+        options = self._voice_options_for_language(language, self._tts_provider)
         # Selecting the clone entry opens its setup dialog.  Do not disable the
         # entry before a sample exists, otherwise the user has no path to add
         # an authorised reference recording.
@@ -1595,7 +1636,7 @@ class HaizFlowController(QObject):
                 "previewAvailable": self._audio_preview.has_voice_sample(
                     self._tts_provider,
                     item.get("voice", ""),
-                    self._target_language,
+                    language,
                     selected_video_id=str(self._selected_video_id or ""),
                 ),
             }
@@ -1619,7 +1660,7 @@ class HaizFlowController(QObject):
         return [
             {
                 **item,
-                "available": item.get("voice") != "omnivoice:clone",
+                "available": item.get("voice") not in {"omnivoice:clone", "vieneu:clone"},
                 "previewAvailable": self._audio_preview.has_voice_sample(
                     "omnivoice", item.get("voice", ""), language
                 ),
@@ -1641,7 +1682,7 @@ class HaizFlowController(QObject):
         return [
             {
                 **item,
-                "available": item.get("voice") != "omnivoice:clone",
+                "available": item.get("voice") not in {"omnivoice:clone", "vieneu:clone"},
                 "previewAvailable": self._audio_preview.has_voice_sample(
                     effective_provider, item.get("voice", ""), str(language_code or "vi")
                 ),
@@ -1652,30 +1693,31 @@ class HaizFlowController(QObject):
     @Slot(str, result="QVariantList")
     def manualVoiceOptionsForProvider(self, provider: str):
         """Return voice choices for the Manual dialog without mutating its draft."""
-        effective_provider = self._normalized_tts_provider(self._target_language, provider)
+        language = HaizFlowController._selected_voice_language(self)
+        effective_provider = self._normalized_tts_provider(language, provider)
         reference_available = bool(self.voiceCloneReferencePath)
         return [
             {
                 **item,
                 "available": (
-                    item.get("voice") != "omnivoice:clone" or reference_available
+                    item.get("voice") not in {"omnivoice:clone", "vieneu:clone"} or reference_available
                 ),
                 "previewAvailable": self._audio_preview.has_voice_sample(
                     effective_provider,
                     item.get("voice", ""),
-                    self._target_language,
+                    language,
                     selected_video_id=str(self._selected_video_id or ""),
                 ),
             }
             for item in self._voice_options_for_language(
-                self._target_language,
+                language,
                 effective_provider,
             )
         ]
 
     @Property(int, notify=ttsVoiceOptionsChanged)
     def ttsVoiceIndex(self):
-        voices = self._voice_options_for_language(self._target_language, self._tts_provider)
+        voices = self._voice_options_for_language(HaizFlowController._selected_voice_language(self), self._tts_provider)
         for index, item in enumerate(voices):
             if item["voice"] == self._tts_voice:
                 return index
@@ -1692,6 +1734,42 @@ class HaizFlowController(QObject):
         if self.outputFormat != value:
             self._output_format = value
             self.outputFormatChanged.emit()
+
+    @Property(float, notify=outputSpeedChanged)
+    def outputSpeed(self):
+        return getattr(self, "_output_speed", 1.0)
+
+    @outputSpeed.setter
+    def outputSpeed(self, value):
+        value = VideoConfig(output_speed=value).output_speed
+        if self.outputSpeed != value:
+            self._output_speed = value
+            self.outputSpeedChanged.emit()
+
+    @Slot(float, result=bool)
+    def setManualOutputSpeed(self, value, record_history=True):
+        value = VideoConfig(output_speed=value).output_speed
+        video = video_store.get_video(str(self._selected_video_id or ""))
+        if (not video or video.project_type != "manual"
+                or self._processing_queue.contains(video.video_id)
+                or getattr(self, "videoExportBusy", False)
+                or str(self._settings_owner_video_id or "") != video.video_id):
+            return False
+        before = float(getattr(video, "output_speed", 1.0))
+        if before != value:
+            video_store.update_video(video.video_id, output_speed=value)
+            manual_artifacts.deactivate(video.video_id, {"export"})
+            if record_history:
+                self._record_video_settings_change(video.video_id, {"output_speed": before},
+                                                   {"output_speed": value}, "Tốc độ đầu ra")
+        self._selected_video_snapshot = video_store.get_video(video.video_id)
+        self.outputSpeed = value
+        draft = self._manual_settings_drafts.get(video.video_id)
+        if draft is not None:
+            self._manual_settings_drafts[video.video_id] = draft.model_copy(update={"output_speed": value})
+        # No selectedVideoChanged, settingsCommitted, subtitle/audio reload or
+        # preview scheduling: output speed changes only the next export.
+        return True
 
     @Property(bool, notify=enableAudioSeparationChanged)
     def enableAudioSeparation(self):
@@ -2370,6 +2448,10 @@ class HaizFlowController(QObject):
         from haizflow.services.video_export import render_path
 
         rendered_video_source = existing_url(render_path(video))
+        if getattr(video, "output_speed", 1.0) != 1.0:
+            # An export runs on a scaled clock; editor proxies/audio remain
+            # on the original timeline and must never fall back to this mix.
+            rendered_video_source = ""
         voice_source = existing_url(
             files.get("voice_output") or "",
             os.path.join(video_dir, "temp", "voice_final.wav"),
@@ -2434,6 +2516,7 @@ class HaizFlowController(QObject):
         )
         return {
             "renderedVideoSource": rendered_video_source,
+            "outputSpeed": getattr(video, "output_speed", 1.0),
             "finalMixSource": final_mix_source,
             "voiceSource": voice_source if not use_final_mix else "",
             "backgroundSource": separated_background_source if use_separated_background else "",
@@ -2849,7 +2932,19 @@ class HaizFlowController(QObject):
 
         return MODELS_DIR
 
-    @Property(QObject, constant=True)
+    @property
+    def _url_importer(self):
+        return self._project_url_imports.for_project(self._selected_project_key)
+
+    @property
+    def _url_import_target(self):
+        return self._url_importer.import_target
+
+    @_url_import_target.setter
+    def _url_import_target(self, value):
+        self._url_importer.import_target = value
+
+    @Property(QObject, notify=projectSetupChanged)
     def urlImporter(self):
         return self._url_importer
 
@@ -3725,7 +3820,7 @@ class HaizFlowController(QObject):
                 return
             from haizflow.core.model_choices import project_model_defaults
 
-            legacy = project_model_defaults("gpu")
+            legacy = project_model_defaults("gpu", target_language=getattr(self, "_target_language", "vi"))
             if any(getattr(self, name, None) != value for name, value in legacy.items()):
                 return
         from haizflow.core.model_choices import models_for_device, project_model_defaults
@@ -3742,7 +3837,8 @@ class HaizFlowController(QObject):
                 recognition=self._speech_recognition_model, translation=self._translation_model,
                 voice=self._tts_provider, total_vram_bytes=vram).items()}
         else:
-            values = project_model_defaults(device, total_vram_bytes=vram)
+            values = project_model_defaults(device, total_vram_bytes=vram,
+                                            target_language=getattr(self, "_target_language", "vi"))
         changed = {}
         for attribute, value in values.items():
             if getattr(self, attribute) != value:
@@ -3752,6 +3848,17 @@ class HaizFlowController(QObject):
                  "_translation_model": self.translationModelChanged,
                  "_tts_provider": self.ttsProviderChanged}[attribute].emit()
         if changed:
+            # Only empty-project defaults can change backend families here.
+            # Existing project choices and compatible presets stay untouched.
+            if not self._selected_video_id and "tts_provider" in changed and hasattr(self, "_tts_voice"):
+                from haizflow.core.model_choices import default_tts_voice
+
+                family = "vieneu:" if self._tts_provider.startswith("vieneu") else "omnivoice:"
+                if not str(self._tts_voice).startswith(family):
+                    self._tts_voice = default_tts_voice(self._tts_provider)
+                    signal = getattr(self, "ttsVoiceChanged", None)
+                    if signal:
+                        signal.emit()
             preview = getattr(self, "_audio_preview", None)
             if preview:
                 preview.invalidate()
@@ -4354,7 +4461,7 @@ class HaizFlowController(QObject):
             "voice": ("voice",),
         }.get(tool_id, ())
         pack_context = {
-            "voice_clone": str(getattr(effective_config, "tts_voice", "")) == "omnivoice:clone",
+            "voice_clone": str(getattr(effective_config, "tts_voice", "")) in {"omnivoice:clone", "vieneu:clone"},
             "speaker_mode": str(getattr(effective_config, "speaker_mode", "single") or "single"),
             "device": str(getattr(self, "_settings_processing_device", "cpu") or "cpu"),
             "model": str(getattr(effective_config, "speech_recognition_model", "small") or "small"),
@@ -4560,9 +4667,12 @@ class HaizFlowController(QObject):
             )
             return False
 
-        selected_provider = self._normalized_tts_provider(video.target_language, provider)
+        language = HaizFlowController._selected_voice_language(self)
+        selected_provider = self._normalized_tts_provider(language, provider)
+        if not HaizFlowController.validateTtsProviderForLanguage(self, language, selected_provider):
+            return False
         selected_voice = self._normalized_voice_for_language(
-            video.target_language,
+            language,
             voice,
             selected_provider,
         )
@@ -4579,7 +4689,7 @@ class HaizFlowController(QObject):
             )
             return False
 
-        if selected_voice == "omnivoice:clone" and not self.voiceCloneReferencePath:
+        if selected_voice in {"omnivoice:clone", "vieneu:clone"} and not self.voiceCloneReferencePath:
             self.appAlertRequested.emit(
                 "Chưa có mẫu giọng",
                 "Thêm mẫu giọng được phép sử dụng trước khi chọn giọng đã nhân bản.",
@@ -4608,7 +4718,7 @@ class HaizFlowController(QObject):
             self._tts_voice = selected_voice
             self._speaker_mode = (
                 "multiple"
-                if selected_provider.startswith("omnivoice")
+                if selected_provider.startswith(("omnivoice", "vieneu"))
                 and str(speaker_mode or "").strip().lower() == "multiple"
                 else "single"
             )
@@ -6804,6 +6914,7 @@ class HaizFlowController(QObject):
             "remove_original_subtitles": video.remove_original_subtitles,
             "original_subtitle_removal_mode": video.original_subtitle_removal_mode,
             "output_format": video.output_format,
+            "output_speed": getattr(video, "output_speed", 1.0),
             "crop": video.crop,
             "enable_audio_separation": video.enable_audio_separation,
             "original_video_volume": video.original_video_volume,
@@ -6837,6 +6948,8 @@ class HaizFlowController(QObject):
         video = video_store.get_video(video_id)
         if not video or self._processing_queue.contains(video_id):
             return False
+        if set(snapshot) == {"output_speed"} and video.project_type == "manual":
+            return HaizFlowController.setManualOutputSpeed(self, float(snapshot["output_speed"]), False)
         ocr_fields = {"remove_original_subtitles", "original_subtitle_removal_mode",
                       "original_subtitle_region_override"}
         if snapshot and set(snapshot) <= ocr_fields:
@@ -7057,6 +7170,7 @@ class HaizFlowController(QObject):
             remove_original_subtitles=self._remove_original_subtitles,
             original_subtitle_removal_mode=self._original_subtitle_removal_mode,
             output_format=getattr(self, "_output_format", "keep_ratio"),
+            output_speed=getattr(self, "_output_speed", 1.0),
             crop=self._crop_settings,
             enable_audio_separation=self._enable_audio_separation,
             original_video_volume=self._original_volume,
@@ -7219,6 +7333,7 @@ class HaizFlowController(QObject):
             "remove_original_subtitles": config.remove_original_subtitles,
             "original_subtitle_removal_mode": config.original_subtitle_removal_mode,
             "output_format": config.output_format,
+            "output_speed": config.output_speed,
             "crop": config.crop,
             "enable_audio_separation": config.enable_audio_separation,
             "original_video_volume": config.original_video_volume,
@@ -7316,6 +7431,9 @@ class HaizFlowController(QObject):
                     manual_audio_tracks_to_sync.add("music")
                 if changed("tts_volume", config.tts_volume):
                     manual_audio_tracks_to_sync.add("voice")
+            if changed("output_speed", config.output_speed):
+                invalidated.add("render")
+                manual_artifacts_to_deactivate.add("export")
             if any(
                 (
                     changed("output_format", config.output_format),
@@ -7465,13 +7583,14 @@ class HaizFlowController(QObject):
     @staticmethod
     def _normalized_tts_provider(language_code, provider):
         provider = str(provider or "omnivoice").lower()
-        return provider if provider in {"omnivoice", "omnivoice-gpu", "edge"} else "omnivoice"
+        return provider if provider in {"omnivoice", "omnivoice-gpu", "edge", "vieneu", "vieneu-gpu"} else "omnivoice"
 
     def _tts_provider_options_for_language(self, language_code):
         return [{"provider": provider, "label": label,
-                 "available": provider != "omnivoice-gpu" or HaizFlowController._project_gpu_available(self)}
+                 "available": (not provider.endswith("-gpu") or HaizFlowController._project_gpu_available(self))}
                 for provider, label in (
-            ("omnivoice", "OmniVoice · CPU"), ("omnivoice-gpu", "OmniVoice · GPU"),
+            ("vieneu-gpu", "VieNeu · GPU · Việt tốt"), ("vieneu", "VieNeu · CPU · Việt tốt"),
+            ("omnivoice", "OmniVoice · CPU · Anh/Trung tốt"), ("omnivoice-gpu", "OmniVoice · GPU · Anh/Trung tốt"),
             ("edge", "Edge TTS · Online"),
         )]
 

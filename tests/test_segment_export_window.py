@@ -39,12 +39,13 @@ def test_intersection_keeps_original_coordinates_and_does_not_change_document():
 
 @pytest.mark.parametrize("edited", [False, True])
 @pytest.mark.parametrize("window", [(0, 1500), (1500, 3000)])
-def test_real_bounded_render_without_any_full_export_or_audio_cache(tmp_path, monkeypatch, edited, window):
+@pytest.mark.parametrize("speed", [0.5, 1.0, 2.0])
+def test_real_bounded_render_without_any_full_export_or_audio_cache(tmp_path, monkeypatch, edited, window, speed):
     source = tmp_path / "source.mp4"
     subprocess.run([_binary("ffmpeg"), "-y", "-v", "error", "-f", "lavfi", "-i",
         "testsrc2=size=64x64:rate=20:duration=4", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
         "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(source)], check=True, capture_output=True)
-    config = VideoConfig()
+    config = VideoConfig(output_speed=speed)
     video = SimpleNamespace(**{name: getattr(config, name) for name in VideoConfig.model_fields},
         video_id="bounded-export", files={"video_input": str(source)}, active_artifacts={}, export_history=[],
         export_preset="source")
@@ -86,7 +87,7 @@ def test_real_bounded_render_without_any_full_export_or_audio_cache(tmp_path, mo
     progress = []
     output = tmp_path / "result.mp4"
     segment_export.render_segment(video, document, window, output, threading.Event(), progress.append)
-    assert abs(get_video_duration(str(output)) - 1.5) < .1
+    assert abs(get_video_duration(str(output)) - 1.5 / speed) < .1
     assert set(get_media_stream_types(str(output))) >= {"video", "audio"}
     expected_source_start = (2 if window[0] == 0 else 0) if edited else window[0] / 1000
     assert calls[0]["source_start_seconds"] == expected_source_start

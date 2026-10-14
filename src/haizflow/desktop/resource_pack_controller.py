@@ -298,6 +298,9 @@ class ResourcePackController(QObject):
         elif pack_id == "model-omnivoice":
             capability = "voice"
             context["provider"] = "omnivoice-gpu" if context["provider"] == "omnivoice-gpu" else "omnivoice"
+        elif pack_id == "model-vieneu":
+            capability = "voice"
+            context["provider"] = "vieneu-gpu" if context["provider"] == "vieneu-gpu" else "vieneu"
         elif pack_id.startswith("model-demucs"):
             capability = "separation"
             if pack_id != "model-demucs":
@@ -320,7 +323,7 @@ class ResourcePackController(QObject):
         vi = getattr(self._host, "_settings_language", "vi") == "vi"
         ordered_ids = [
             "model-whisper-small", "model-whisper-turbo",
-            "model-hymt2-cpu", "model-hymt2-gpu", "model-omnivoice",
+            "model-hymt2-cpu", "model-hymt2-gpu", "model-omnivoice", "model-vieneu",
             "model-demucs-cpu", "model-demucs-gpu", "model-subtitle-ocr",
             "browser-douyin-chromium",
         ]
@@ -331,6 +334,7 @@ class ResourcePackController(QObject):
             "model-hymt2-cpu": "Dịch cục bộ bằng bản Q4, dùng CPU.",
             "model-hymt2-gpu": "Dịch bằng model đầy đủ trên GPU NVIDIA.",
             "model-omnivoice": "Giọng đọc và nhân bản giọng. Dùng chung cho OmniVoice CPU và GPU.",
+            "model-vieneu": "25 giọng tiếng Việt cục bộ. Một gói dùng chung cho VieNeu CPU và GPU ít VRAM.",
             "model-demucs-cpu": "Tách giọng nói khỏi nhạc trên CPU.",
             "model-demucs-gpu": "Tách giọng nói khỏi nhạc trên GPU NVIDIA.",
             "model-subtitle-ocr": "Nhận diện vị trí phụ đề gốc trong video.",

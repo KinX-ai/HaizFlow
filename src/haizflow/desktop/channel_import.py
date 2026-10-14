@@ -359,7 +359,17 @@ class ChannelImportCoordinator(QObject):
             self._refresh_active_model()
             return
 
+        previous = self._active_session()
         session = new_session(self._active_project_key, self._active_project_root, request)
+        if (previous and previous.candidates
+                and normalize_remote_url(previous.channel_url) == normalize_remote_url(request.url)
+                and all(previous.request.get(key) == getattr(request, key)
+                        for key in ("platform", "ranking", "duration_filter"))):
+            # Keep a detached, project-owned fallback until the rescan succeeds.
+            # Never carry results across another channel or different filters.
+            session.platform = previous.platform
+            session.channel_name = previous.channel_name
+            session.candidates = [candidate.model_copy(deep=True) for candidate in previous.candidates]
         self._sessions[session.session_id] = session
         self._project_sessions[session.project_key] = session.session_id
         self._active_session_id = session.session_id
@@ -388,6 +398,7 @@ class ChannelImportCoordinator(QObject):
                         "channel_name": channel_name,
                         "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
                         "warning": getattr(candidates, "warning", ""),
+                        "scan_progress": getattr(candidates, "scan_progress", 100),
                     },
                 )
             except DownloadCancelled as exc:
@@ -596,6 +607,8 @@ class ChannelImportCoordinator(QObject):
         self._notify(self.stateChanged, self.statusChanged)
 
     def complete_video(self, session_id: str, remote_video_id: str, success: bool, message: str = "") -> None:
+        workspace = self._workspaces.pop((session_id, remote_video_id), "")
+        cleanup_channel_workspace(workspace)
         session = self._sessions.get(session_id)
         if not session:
             return
@@ -611,9 +624,6 @@ class ChannelImportCoordinator(QObject):
             project_keys = self._existing_remote_keys.setdefault(session.project_key, set())
             project_keys.add(f"{candidate.platform.lower()}:{candidate.remote_video_id.lower()}")
             project_keys.add(normalize_remote_url(candidate.source_url))
-        workspace = self._workspaces.pop((session_id, remote_video_id), "")
-        if success:
-            cleanup_channel_workspace(workspace)
         self._finalize_session_if_idle(session)
         self._save_session(session)
         if session_id == self._active_session_id:
@@ -675,19 +685,26 @@ class ChannelImportCoordinator(QObject):
             for candidate in payload.get("candidates") or []
         ]
         self._rebuild_session_cache(session)
-        session.state = "ready"
-        session.status = str(payload.get("warning") or f"{len(session.candidates)} videos ready to review")
+        warning = str(payload.get("warning") or "")
+        session.state = "partial" if warning else "ready"
+        session.status = warning or f"{len(session.candidates)} videos ready to review"
         self._save_session(session)
-        self._scan_progress = 100
         if session.session_id == self._active_session_id:
+            self._scan_progress = max(0, min(95, int(payload.get("scan_progress", 0)))) if warning else 100
             self._refresh_active_model()
 
     def _handle_scan_rejected(self, session_id, message, cancelled):
         session = self._sessions.get(session_id)
         if not session:
             return
-        session.state = "idle" if cancelled else "error"
-        session.status = "Channel inspection cancelled" if cancelled else self._safe_message(message)
+        if session.candidates:
+            session.state = "partial"
+            reason = "Đã hủy quét lại" if cancelled else self._safe_message(message)
+            session.status = (f"{reason}\nGiữ {len(session.candidates)} video từ lần quét trước. "
+                              "Bạn vẫn có thể tải danh sách này.")
+        else:
+            session.state = "idle" if cancelled else "error"
+            session.status = "Channel inspection cancelled" if cancelled else self._safe_message(message)
         self._save_session(session)
         if session_id == self._active_session_id:
             self._notify(self.stateChanged, self.statusChanged, self.progressChanged)
@@ -719,6 +736,10 @@ class ChannelImportCoordinator(QObject):
         if not session:
             cleanup_channel_workspace(self._workspaces.pop((session_id, candidate.remote_video_id), ""))
             return
+        cancellation = self._cancel_events.get(session_id)
+        if cancellation is not None and cancellation.is_set():
+            self._handle_download_rejected(session_id, candidate.remote_video_id, "Channel import cancelled.", True)
+            return
         stored = self._candidate_for(session, candidate.remote_video_id)
         if stored:
             before = self._candidate_contribution(stored)
@@ -737,6 +758,7 @@ class ChannelImportCoordinator(QObject):
             self._notify(self.stateChanged, self.statusChanged, self.countsChanged, self.progressChanged)
 
     def _handle_download_rejected(self, session_id, remote_video_id, message, cancelled):
+        cleanup_channel_workspace(self._workspaces.pop((session_id, remote_video_id), ""))
         session = self._sessions.get(session_id)
         if not session:
             return

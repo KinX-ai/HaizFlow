@@ -26,6 +26,7 @@ class ProfileCandidates(list):
     """Usable pages with an explicit incomplete-scan notice, never false EOF."""
 
     warning = ""
+    scan_progress = 0
 
 
 def _check_cancel(cancel_event):
@@ -176,6 +177,18 @@ class DouyinAdapter:
                 mode = signed.mode
                 response = self.session.transport.get(signed.url, signed.headers, cancel_event)
                 last = classify(response, list_endpoint=path == POSTS_PATH)
+                if (continuation and path == POSTS_PATH and response.status == 200
+                        and last.outcome == Outcome.RISK):
+                    try:
+                        bare = json.loads(response.body)
+                    except (ValueError, RecursionError):
+                        bare = None
+                    # Live anonymous probes return this exact envelope on page
+                    # two with native signing, SDK signing and in-page fetch.
+                    # The envelope is a refusal, not EOF or proof of a
+                    # permanent guest limit. Allow short same-cursor retries.
+                    if bare == {"status_code": 0} and type(bare["status_code"]) is int:
+                        last = Verdict(Outcome.PAGINATION, True)
                 # Probe only: Douyin's structured "unknown aweme" response to
                 # ID 0 verifies endpoint/identity handling without reading a
                 # random user's video. HTTP 200/empty HTML is NOT enough.
@@ -216,6 +229,8 @@ class DouyinAdapter:
                 break
             from haizflow.services.video_download import _wait_for_retry
             delay = 0.6 * attempt
+            if continuation and last.outcome == Outcome.PAGINATION:
+                delay = float(attempt)
             if continuation and last.outcome in {Outcome.RISK, Outcome.RATE_LIMIT}:
                 delay = 6.0 * attempt
             if last.outcome == Outcome.RATE_LIMIT:
@@ -265,7 +280,7 @@ class DouyinAdapter:
             self._request_succeeded()
             return detail
 
-    def profile_posts(self, url, *, limit=20, cancel_event=None, progress_callback=None):
+    def profile_posts(self, url, *, limit=20, cancel_event=None, progress_callback=None, count_videos=False):
         from haizflow.services.douyin_channel_worker import _candidate
 
         with _session_guard(self.session.lock, cancel_event):
@@ -277,38 +292,88 @@ class DouyinAdapter:
             # Count raw posts, including photos, so a profile full of photos cannot
             # trigger an unbounded scan. The UI's 'all' scope has a desktop cap.
             scanned = 0
+            # A scan gets two cooldowns in total, not two for every page. This
+            # recovers transient continuation throttles without an endless job.
+            recovery_rounds = 0
             budget = min(max(int(limit or 1000), 1), 1000)
+            target_count = budget if count_videos else 0
+            # The profile endpoint accepts 40 posts per page. Use a stable
+            # page size for its cursor, instead of forcing every scan to 20
+            # or changing the count on the final continuation request.
+            page_size = min(40, budget)
+            if count_videos:
+                budget = 1000
+
+            def scan_progress():
+                current = len(candidates) if target_count else scanned
+                return min(95, round(current * 95 / (target_count or budget)))
             cache_key = (match[1], self.session.generation)
             cached = self._profile_pages.get(cache_key)
-            if budget > 20 and cached and cached["scanned"] <= budget and time.monotonic() - cached["updated"] < 300:
+            if (budget > 20 and cached and cached.get("page_size", 20) == page_size
+                    and cached.get("count_videos", False) == bool(count_videos)
+                    and cached["scanned"] <= budget and time.monotonic() - cached["updated"] < 300):
                 candidates = list(cached["candidates"])
                 seen = {row["remote_video_id"] for row in candidates}
                 cursor, scanned, channel_name = cached["cursor"], cached["scanned"], cached["name"]
                 if cached["complete"]:
                     return channel_name, candidates
-            while scanned < budget:
+            while scanned < budget and (not target_count or len(candidates) < target_count):
                 if scanned or self._posts_cooldown_until > time.monotonic():
                     # Popular scans read multiple pages. A burst of continuation
                     # requests can be throttled even with a valid guest identity.
                     from haizflow.services.video_download import _wait_for_retry
+                    delay = max(3.0 if scanned else 0, self._posts_cooldown_until - time.monotonic())
                     if progress_callback:
-                        progress_callback(min(95, round(scanned * 95 / budget)), "Đang chờ Douyin cho phép quét tiếp…")
-                    _wait_for_retry(cancel_event, max(3.0 if scanned else 0,
-                                                     self._posts_cooldown_until - time.monotonic()))
+                        summary = (f"Tìm thấy {len(candidates)}/{target_count} video. " if target_count
+                                   else f"Đã quét {scanned}/{budget} bài đăng. ")
+                        progress_callback(scan_progress(), summary +
+                                          f"Chờ {max(1, round(delay))} giây rồi tự động quét tiếp…")
+                    _wait_for_retry(cancel_event, delay)
+                    _check_cancel(cancel_event)
                 try:
                     page = self._api(POSTS_PATH, {
-                        "sec_user_id": match[1], "max_cursor": cursor, "count": str(min(20, budget - scanned)),
+                        "sec_user_id": match[1], "max_cursor": cursor, "count": str(page_size),
                         "publish_video_strategy_type": "2", "from_user_page": "1", "locate_query": "false",
                         "need_time_list": "1", "show_live_replay_strategy": "1", "time_list_query": "0",
                         "pc_libra_divert": "Windows", "whale_cut_token": "",
                     }, cancel_event, continuation=bool(scanned))
                 except DouyinError as exc:
-                    if exc.outcome not in {Outcome.RATE_LIMIT, Outcome.RISK, Outcome.NETWORK} or not candidates:
+                    if not candidates:
                         raise
-                    self._posts_cooldown_until = time.monotonic() + 30
+                    if exc.outcome not in {Outcome.RATE_LIMIT, Outcome.RISK, Outcome.NETWORK, Outcome.PAGINATION}:
+                        partial = ProfileCandidates(candidates)
+                        partial.scan_progress = scan_progress()
+                        reason = {
+                            Outcome.CHALLENGE: "Douyin yêu cầu xác minh ở trang tiếp theo",
+                            Outcome.SIGNATURE: "Douyin từ chối phiên ở trang tiếp theo",
+                            Outcome.UNAVAILABLE: "Trang tiếp theo không còn truy cập được",
+                        }.get(exc.outcome, "Douyin trả dữ liệu không hợp lệ ở trang tiếp theo")
+                        partial.warning = (f"Quét chưa hoàn tất: {len(candidates)} video, {scanned}/{budget} bài đăng. "
+                                           f"{reason}. Bạn vẫn có thể tải các video đã quét.")
+                        return channel_name, partial
+                    if exc.outcome == Outcome.PAGINATION:
+                        partial = ProfileCandidates(candidates)
+                        partial.scan_progress = scan_progress()
+                        partial.warning = (f"Quét chưa hoàn tất: {len(candidates)} video, {scanned}/{budget} bài đăng. "
+                                           "Douyin không trả trang tiếp theo cho phiên ẩn danh này. "
+                                           "Bạn vẫn có thể tải các video đã quét.")
+                        return channel_name, partial
+                    if recovery_rounds < 2:
+                        recovery_rounds += 1
+                        self._posts_cooldown_until = time.monotonic() + 30 * recovery_rounds
+                        logger.info("douyin profile continuation cooldown=%d scanned=%d budget=%d",
+                                    30 * recovery_rounds, scanned, budget)
+                        # Keep the verified identity, candidates and exact
+                        # cursor. No first-page restart or browser rotation.
+                        continue
+                    self._posts_cooldown_until = time.monotonic() + 60
                     partial = ProfileCandidates(candidates)
-                    partial.warning = (f"Đã quét {scanned}/{budget} bài đăng. Douyin tạm giới hạn quét tiếp; "
-                                       "danh sách được xếp theo dữ liệu đã quét. Chờ một lúc rồi Quét lại để tiếp tục.")
+                    partial.scan_progress = scan_progress()
+                    reason = ("Kết nối Douyin bị gián đoạn" if exc.outcome == Outcome.NETWORK
+                              else "Douyin vẫn đang giới hạn quét tiếp")
+                    partial.warning = (f"Quét chưa hoàn tất: đã quét {scanned}/{budget} bài đăng. {reason}; "
+                                       "danh sách chỉ được xếp theo dữ liệu đã quét. "
+                                       "Bạn có thể tải các video hiện có hoặc chờ một lúc rồi Quét lại để tiếp tục.")
                     return channel_name, partial
                 for item in page["aweme_list"]:
                     if scanned >= budget:
@@ -323,23 +388,37 @@ class DouyinAdapter:
                         candidates.append(candidate)
                         channel_name = channel_name or candidate["uploader"]
                 if progress_callback:
-                    progress_callback(min(95, round(scanned * 95 / budget)),
-                                      f"Reading video details {scanned}/{budget}")
+                    progress_callback(scan_progress(),
+                                      f"Tìm thấy {len(candidates)}/{target_count} video" if target_count
+                                      else f"Reading video details {scanned}/{budget}")
                 complete = not page["has_more"]
                 next_cursor = str(page["max_cursor"])
-                if not complete and (next_cursor == cursor or not page["aweme_list"]):
-                    raise DouyinError(Outcome.METADATA)
+                invalid_cursor = not complete and (next_cursor == cursor or not page["aweme_list"])
                 self._profile_pages[cache_key] = {
-                    "updated": time.monotonic(), "candidates": list(candidates), "cursor": next_cursor,
+                    "updated": time.monotonic(), "candidates": list(candidates),
+                    "cursor": cursor if invalid_cursor else next_cursor,
                     "scanned": scanned, "name": channel_name, "complete": complete,
+                    "page_size": page_size,
+                    "count_videos": bool(count_videos),
                 }
                 while len(self._profile_pages) > 4:
                     del self._profile_pages[next(iter(self._profile_pages))]
+                if invalid_cursor:
+                    partial = ProfileCandidates(candidates)
+                    partial.scan_progress = scan_progress()
+                    partial.warning = (f"Quét chưa hoàn tất: {len(candidates)} video, {scanned}/{budget} bài đăng. "
+                                       "Douyin không cung cấp mốc phân trang tiếp theo hợp lệ. "
+                                       "Bạn vẫn có thể tải các video đã quét.")
+                    return channel_name, partial
                 if complete:
                     break
                 cursor = next_cursor
-            if not candidates:
-                raise RuntimeError("The Douyin profile returned no public videos.")
+            if target_count and len(candidates) < target_count and scanned >= budget:
+                partial = ProfileCandidates(candidates)
+                partial.scan_progress = scan_progress()
+                partial.warning = (f"Tìm thấy {len(candidates)}/{target_count} video sau {scanned} bài đăng. "
+                                   "Đã chạm giới hạn quét an toàn; bạn vẫn có thể tải danh sách hiện có.")
+                return channel_name, partial
             return channel_name, candidates
 
     def create_browser_session(self, cancel_event=None, status_callback=None):

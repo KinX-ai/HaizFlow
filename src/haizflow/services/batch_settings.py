@@ -13,6 +13,7 @@ from haizflow.core.storage_ownership import owned_path
 
 FIELDS = {
     "outputFormat": "output_format",
+    "outputSpeed": "output_speed",
     "workflowMode": "mode", "targetLanguage": "target_language",
     "speechRecognitionModel": "speech_recognition_model", "translationModel": "translation_model",
     "ttsProvider": "tts_provider", "ttsVoice": "tts_voice", "speakerMode": "speaker_mode",
@@ -74,7 +75,12 @@ def config_for(values: dict) -> VideoConfig:
     if payload.get("target_language", "vi") not in {"vi", "en", "zh"}:
         raise ValueError("Choose English, Vietnamese or Chinese.")
     config = VideoConfig.model_validate(payload)
-    if config.tts_voice == "omnivoice:clone" and not values.get("voiceReferencePath"):
+    from haizflow.core.vieneu_voices import unsupported_language_notice
+
+    notice = unsupported_language_notice(config.tts_provider, config.target_language)
+    if notice:
+        raise ValueError(notice[1])
+    if config.tts_voice in {"omnivoice:clone", "vieneu:clone"} and not values.get("voiceReferencePath"):
         raise ValueError("Choose a reference sample before applying the cloned voice.")
     return config
 

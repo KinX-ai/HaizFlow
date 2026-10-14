@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtCore import QObject, QPointF, QUrl, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlComponent, QQmlEngine
+from PySide6.QtQuick import QQuickItem
 from PySide6.QtTest import QSignalSpy, QTest
 
 from haizflow.desktop.qml_controller import HaizFlowController
@@ -56,7 +57,7 @@ ApplicationWindow {{
     try:
         QTest.qWait(40)
         toolbar = window.findChild(QObject, "toolbar")
-        button = window.findChild(QObject, "manualExportButton")
+        button = window.findChild(QQuickItem, "manualExportButton")
         spy = QSignalSpy(toolbar.exportRequested)
         progress_spy = QSignalSpy(toolbar.exportProgressRequested)
         geometry = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()

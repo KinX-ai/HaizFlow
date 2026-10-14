@@ -8,6 +8,7 @@ GridLayout {
     property bool editable: true
     property string outputFormat: "keep_ratio"
     signal outputFormatEdited(string value)
+    signal outputSpeedEdited(real value)
     property bool cpuOnly: false
     property bool hasSource: false
     property bool showCloneAction: false
@@ -24,6 +25,7 @@ GridLayout {
     property string targetLanguage: "vi"
     property var targetLanguageOptions: []
     property string ttsProvider: "omnivoice"
+    property real outputSpeed: 1.0
     property var ttsProviderOptions: []
     property int ttsProviderIndex: 0
     property string ttsVoice: ""
@@ -156,7 +158,10 @@ GridLayout {
                 textRole: "label"
                 valueRole: "provider"
                 currentIndex: root.ttsProviderIndex
-                onActivated: root.ttsProviderEdited(currentValue)
+                onActivated: {
+                    root.ttsProviderEdited(currentValue);
+                    currentIndex = Qt.binding(function() { return root.ttsProviderIndex; });
+                }
             }
             SettingLabel {
                 Layout.fillWidth: true
@@ -176,8 +181,8 @@ GridLayout {
                 enabled: root.editable
                 model: root.ttsVoiceOptions
                 currentValue: root.speakerMode === "multiple" ? "omnivoice:multiple" : root.ttsVoice
-                allowMultipleSpeakers: root.ttsProvider.indexOf("omnivoice") === 0
-                allowVoiceClone: root.showCloneAction && root.ttsProvider.indexOf("omnivoice") === 0
+                allowMultipleSpeakers: root.ttsProvider.indexOf("omnivoice") === 0 || root.ttsProvider.indexOf("vieneu") === 0
+                allowVoiceClone: root.showCloneAction && (root.ttsProvider.indexOf("omnivoice") === 0 || root.ttsProvider.indexOf("vieneu") === 0)
                 previewSource: root.voicePreviewSource
                 previewState: root.voicePreviewState
                 onSelected: function(voice) {
@@ -221,6 +226,9 @@ GridLayout {
                 compact: true
                 editable: root.editable
                 outputFormat: root.outputFormat
+                showSpeed: true
+                outputSpeed: root.outputSpeed
+                onSpeedEdited: function(value) { root.outputSpeedEdited(value); }
                 onEdited: function(value) { root.outputFormatEdited(value); }
             }
 

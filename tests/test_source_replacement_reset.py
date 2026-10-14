@@ -2,6 +2,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+import pytest
 
 from haizflow.desktop.project_import_controller import ProjectImportController
 from haizflow.schemas.editor import EditorClip, EditorTrack
@@ -66,3 +67,112 @@ def test_source_generation_advances_on_every_replacement(tmp_path, monkeypatch):
     second = video_store.replace_video_input(video.video_id, str(source))
     assert first.manual_tool_generations == {"source": 1}
     assert second.manual_tool_generations == {"source": 2}
+
+
+def test_locked_old_temp_outputs_cannot_be_migrated_into_new_source(tmp_path, monkeypatch):
+    import shutil
+    from haizflow.pipeline import manual_tools
+    monkeypatch.setattr(project_store, "PROJECT_INDEX_PATH", str(tmp_path / "projects.json"))
+    monkeypatch.setattr(video_store, "LEGACY_VIDEO_WORKSPACES_DIR", str(tmp_path / "legacy"))
+    video = video_store.create_video(f"locked-{tmp_path.name}", "old.mp4",
+        VideoConfig(project_type="manual", project_directory=str(tmp_path)))
+    temp = Path(video_store.get_video_dir(video.video_id)) / 'temp'
+    temp.mkdir(exist_ok=True)
+    stale = temp / 'vi_segments.json'
+    stale.write_text('[{"start": 0, "end": 1, "text": "OLD SOURCE"}]', encoding='utf-8')
+    source = tmp_path / 'new.mp4'
+    source.write_bytes(b'new source')
+    original = shutil.rmtree
+    def locked(path, *args, **kwargs):
+        if Path(path).name.startswith('.replace-input-'):
+            return  # Simulate deferred cleanup of the quarantined old files.
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(video_store.shutil, 'rmtree', locked)
+    replaced = video_store.replace_video_input(video.video_id, str(source))
+    assert not stale.exists() and replaced.active_artifacts == {} and replaced.checkpoints == {}
+    assert list(temp.parent.glob('.replace-input-*/old-temp/vi_segments.json'))
+    assert replaced.manual_artifact_migration_version == 1
+    assert not manual_tools.migrate_legacy_artifacts(video.video_id)
+    assert video_store.get_video(video.video_id).active_artifacts == {}
+    monkeypatch.setattr(editor_documents, 'get_video_duration', lambda _: 1)
+    document = editor_documents.ensure(replaced)
+    assert not any(clip.kind in {'subtitle', 'voice'} for clip in document.clips)
+
+
+def test_temp_rename_lock_rolls_back_source_metadata_and_music(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setattr(project_store, 'PROJECT_INDEX_PATH', str(tmp_path / 'projects.json'))
+    monkeypatch.setattr(video_store, 'LEGACY_VIDEO_WORKSPACES_DIR', str(tmp_path / 'legacy'))
+    video = video_store.create_video(f'rollback-{tmp_path.name}', 'old.mp4',
+        VideoConfig(project_directory=str(tmp_path)))
+    original_input = Path(video.files['video_input'])
+    original_input.write_bytes(b'OLD VIDEO')
+    music = original_input.parent / 'background_music.wav'
+    music.write_bytes(b'OLD MUSIC')
+    video.files['background_music'] = str(music)
+    video.status = 'done'
+    video_store.save_video(video)
+    temp = original_input.parent.parent / 'temp'
+    temp.mkdir(exist_ok=True)
+    old_segments = temp / 'vi_segments.json'
+    old_segments.write_text('[]', encoding='utf-8')
+    source = tmp_path / 'new.mp4'
+    source.write_bytes(b'NEW VIDEO')
+    original_replace = os.replace
+    def locked(old, new):
+        if Path(old) == temp:
+            raise PermissionError(32, 'isolated Windows sharing violation')
+        return original_replace(old, new)
+    monkeypatch.setattr(video_store.os, 'replace', locked)
+    with pytest.raises(PermissionError):
+        video_store.replace_video_input(video.video_id, str(source))
+    restored = video_store.get_video(video.video_id)
+    assert restored.status == 'done' and restored.original_filename == 'old.mp4'
+    assert original_input.read_bytes() == b'OLD VIDEO' and music.read_bytes() == b'OLD MUSIC'
+    assert old_segments.exists() and restored.files['background_music'] == str(music)
+
+
+@pytest.mark.parametrize('project_type', ['single', 'manual'])
+def test_replaced_source_mixes_without_stale_music_then_accepts_new_music(tmp_path, monkeypatch, project_type):
+    import subprocess
+    from pydub import AudioSegment
+    from pydub.generators import Sine
+    from haizflow.pipeline import audio_timeline, process_video
+    from haizflow.services.desktop_videos import set_desktop_background_music
+    from haizflow.utils.ffmpeg import _binary
+    monkeypatch.setattr(project_store, 'PROJECT_INDEX_PATH', str(tmp_path / 'projects.json'))
+    monkeypatch.setattr(video_store, 'LEGACY_VIDEO_WORKSPACES_DIR', str(tmp_path / 'legacy'))
+    video = video_store.create_video(f'mix-{tmp_path.name}', 'old.mp4',
+        VideoConfig(project_type=project_type, project_directory=str(tmp_path)))
+    Path(video.files['video_input']).write_bytes(b'old input')
+    music = tmp_path / 'music.wav'
+    Sine(880, sample_rate=48000).to_audio_segment(duration=500).export(music, format='wav')
+    old_music = set_desktop_background_music(video, str(music))
+    video = video_store.get_video(video.video_id)
+    video.checkpoints = {'timeline': 'OLD', 'voice': 'OLD', 'translation': 'OLD'}
+    video.active_artifacts = {'tts_manifest': 'OLD', 'ocr_region': 'OLD'}
+    video_store.save_video(video)
+    source = tmp_path / 'new.mp4'
+    subprocess.run([_binary('ffmpeg'), '-v', 'error', '-y', '-f', 'lavfi', '-i',
+        'color=blue:size=128x72:rate=5:duration=1', '-f', 'lavfi', '-i',
+        'sine=frequency=440:sample_rate=48000:duration=1', '-c:v', 'libx264', '-c:a', 'aac',
+        '-shortest', str(source)], check=True, capture_output=True, timeout=20)
+    replaced = video_store.replace_video_input(video.video_id, str(source))
+    assert 'background_music' not in replaced.files and not Path(old_music).exists()
+    assert not process_video._checkpoint_valid(replaced, 'timeline', 'OLD', [replaced.files['voice_output']])
+    assert replaced.processing_configuration == {} and replaced.active_artifacts == {}
+    segments = tmp_path / 'segments.json'
+    segments.write_text('[]', encoding='utf-8')
+    monkeypatch.setattr(AudioSegment, 'converter', _binary('ffmpeg'))
+    # Real FFmpeg decode and real audio mixing, with no expensive AI models.
+    for add_music in (False, True):
+        if add_music:
+            set_desktop_background_music(replaced, str(music))
+            replaced = video_store.get_video(video.video_id)
+        output = tmp_path / f'mix-{add_music}.wav'
+        audio_timeline.build_audio_timeline(str(segments), str(tmp_path / 'voice-parts'),
+            replaced.files['video_input'], str(output), replaced.video_id,
+            background_audio_path=replaced.files['video_input'],
+            background_music_path=replaced.files.get('background_music'), require_voice_parts=False)
+        audio = AudioSegment.from_wav(output)
+        assert 900 <= len(audio) <= 1100 and audio.rms > 100

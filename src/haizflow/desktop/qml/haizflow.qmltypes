@@ -1536,7 +1536,7 @@ Module {
             index: 119
             isReadonly: true
         }
-        Property { name: "urlImporter"; type: "QObject"; read: "urlImporter"; index: 120; isReadonly: true }
+        Property { name: "urlImporter"; type: "QObject"; read: "urlImporter"; notify: "projectSetupChanged"; index: 120; isReadonly: true }
         Property { name: "douyinSession"; type: "QObject"; read: "douyinSession"; isReadonly: true }
         Property {
             name: "settingsTheme"
@@ -1710,6 +1710,14 @@ Module {
         Signal { name: "speakerModeChanged" }
         Signal { name: "enableAudioSeparationChanged" }
         Signal { name: "outputFormatChanged" }
+        Signal { name: "outputSpeedChanged" }
+        Property {
+            name: "outputSpeed"
+            type: "double"
+            read: "outputSpeed"
+            write: "outputSpeed"
+            notify: "outputSpeedChanged"
+        }
         Property {
             name: "outputFormat"
             type: "QString"
@@ -1819,6 +1827,12 @@ Module {
             name: "ttsProviderOptionsForLanguage"
             type: "QVariantList"
             Parameter { name: "a1"; type: "QString" }
+        }
+        Method {
+            name: "validateTtsProviderForLanguage"
+            type: "bool"
+            Parameter { name: "a1"; type: "QString" }
+            Parameter { name: "a2"; type: "QString" }
         }
         Method { name: "enableInAppAlerts" }
         Method {
@@ -2326,6 +2340,8 @@ Module {
         Method { name: "setManualExportPreset"; type: "bool"; Parameter { name: "a1"; type: "QString" } }
         Method { name: "chooseVideoExportDestination"; type: "QString"; Parameter { name: "a1"; type: "QString" } }
         Method { name: "exportSelectedSrt"; type: "bool" }
+        Method { name: "setManualOutputSpeed"; type: "bool"; Parameter { name: "value"; type: "double" } }
+        Property { name: "manualVoiceLanguage"; type: "string"; isReadonly: true }
         Method { name: "exportDestinationExists"; type: "bool"; Parameter { name: "a1"; type: "QString" } }
         Method { name: "exportVideoTo"; type: "bool"; Parameter { name: "a1"; type: "QString" } Parameter { name: "a2"; type: "QString" } Parameter { name: "a3"; type: "QString" } Parameter { name: "a4"; type: "bool" } }
         Method { name: "exportBatchVideos"; type: "bool" }

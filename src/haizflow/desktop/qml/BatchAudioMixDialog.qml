@@ -61,7 +61,7 @@ AppDialog {
     }
 
     function requestPreview() {
-        if (root.ttsVoice === "omnivoice:clone" && root.voiceReferencePath.length > 0) {
+        if (root.ttsVoice.endsWith(":clone") && root.voiceReferencePath.length > 0) {
             AppController.previewBatchAudioMixWithReference(root.targetLanguage, root.ttsProvider, root.ttsVoice,
                 root.audioSeparationEnabled, root.originalVolume, root.backgroundMusicVolume, root.ttsVolume,
                 root.backgroundMusicPath, root.voiceReferencePath);

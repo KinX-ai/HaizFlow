@@ -11,7 +11,8 @@ FloatingToolDialog {
     expandedWidth: 600
     expandedHeight: 470 + (hasSample ? 40 : 0) + (recordingError.length > 0 ? 50 : 0)
     toolTitle: qsTr("Nhân bản giọng")
-    toolSubtitle: ""
+    toolSubtitle: preferredProvider.indexOf("vieneu") === 0
+        ? qsTr("VieNeu · Mẫu 3–8 giây, một người nói, ít nhạc hoặc tiếng ồn") : ""
 
     property string screen: "record"
     property var inputDevices: []

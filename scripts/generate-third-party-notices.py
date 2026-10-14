@@ -71,7 +71,7 @@ def _locked_distributions(lock_path: Path) -> set[str]:
     names = {
         canonicalize_name(match.group(1))
         for match in re.finditer(
-            r"(?m)^([A-Za-z0-9][A-Za-z0-9_.-]*)==[^\s\\]+",
+            r"(?m)^([A-Za-z0-9][A-Za-z0-9_.-]*)(?:==[^\s\\]+|\s+@\s+https://[^\s\\]+)",
             lock_path.read_text(encoding="utf-8"),
         )
     }

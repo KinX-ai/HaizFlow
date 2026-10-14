@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -90,10 +91,15 @@ ApplicationWindow {{
             QTest.qWait(40)
             assert combo.property("count") == 3 and combo.property("currentIndex") == 1
             combo_right = combo.mapToScene(QPointF(combo.width(), 0)).x()
-            assert combo_right <= group.x() - 4
+            combo_left = combo.mapToScene(QPointF()).x()
+            assert group.x() + group.width() <= combo_left - 4
             assert combo.width() >= 90
             assert combo.width() <= 160
             assert group.x() + group.width() < export.mapToScene(QPointF()).x()
+            speed_button = toolbar.findChild(QObject, "manualOutputSpeedButton")
+            assert combo.parentItem() is speed_button.parentItem()
+            assert abs(speed_button.mapToScene(QPointF()).x() - combo_right - 8) < 1
+            assert group.x() + group.width() < speed_button.mapToScene(QPointF()).x()
         toolbar.setProperty("outputFormat", "tiktok_9_16_crop")
         QTest.qWait(20)
         assert combo.property("currentIndex") == 2 and spy.count() == 0
@@ -207,12 +213,134 @@ def test_source_panel_no_longer_contains_output_framing():
 
 def test_initial_manual_frame_does_not_wait_for_preview_cache_to_apply_ratio():
     workspace = (QML_DIR / "ManualWorkspace.qml").read_text(encoding="utf-8")
-    assert '|| (String(AppController.editorPreviewSource || "").length === 0 && !AppController.hasSelectedOutput)' in workspace
+    assert '|| (String(AppController.editorPreviewSource || "").length === 0 && !root.hasTimelineOutput)' in workspace
+    assert 'Number(root.previewMedia.outputSpeed || 1) === 1' in workspace
     assert 'resultThumbnailOutputFormat: String(root.previewMedia.liveOutputFormat || "keep_ratio")' in workspace
     pane = (QML_DIR / "ManualComparePreview.qml").read_text(encoding="utf-8")
     assert "showThumbnail: !pane.framePresented" in pane
     assert "thumbnailOutputFormat: pane === resultPane ? root.resultThumbnailOutputFormat" in pane
 
 
+def _check_cold_ratio_switch():
+    from PySide6.QtCore import QCoreApplication, QEvent, QObject, QUrl
+    from PySide6.QtGui import QColor, QGuiApplication, QImage
+    from PySide6.QtMultimedia import QVideoFrame
+    from PySide6.QtQml import QQmlComponent, QQmlEngine, QQmlExpression
+    from PySide6.QtQuick import QQuickWindow
+    from PySide6.QtTest import QTest
+
+    app = QGuiApplication.instance() or QGuiApplication([])
+    engine = QQmlEngine()
+    component = QQmlComponent(engine)
+    component.setData(f'''import QtQuick
+import "{QML_DIR.as_uri()}"
+Window {{
+    width: 1280; height: 720; visible: true
+    OutputFramePreview {{ objectName: "frame"; anchors.fill: parent }}
+}}'''.encode(), QUrl())
+    assert component.isReady(), [error.toString() for error in component.errors()]
+    window = component.create()
+    assert isinstance(window, QQuickWindow)
+    frame = window.findChild(QObject, 'frame')
+    loader = frame.findChild(QObject, 'outputBackgroundLoader')
+    def ready(item):
+        return QQmlExpression(engine.rootContext(), item, 'status === 1').evaluate()[0]
+    image = QImage(3840, 2160, QImage.Format_RGB32)
+    image.fill(QColor('green'))
+    sink = frame.property('videoSink')
+    sink.setVideoFrame(QVideoFrame(image))
+    QTest.qWait(60)
+    try:
+        assert not loader.property('active')
+        start = time.perf_counter()
+        frame.setProperty('outputFormat', 'blur_background_9_16')
+        for _ in range(100):
+            app.processEvents()
+            if ready(loader):
+                break
+            QTest.qWait(10)
+        assert ready(loader)
+        cold_ms = (time.perf_counter() - start) * 1000
+        item = loader.property('item')
+        assert item is not None
+        capture = item.findChild(QObject, 'outputBackgroundCapture')
+        size = capture.property('textureSize')
+        assert 0 < size.width() <= 270 and 0 < size.height() <= 480
+        assert size.width() * size.height() <= 270 * 480
+        assert not capture.property('live')
+        assert frame.property('videoSink') is sink  # No decoder/sink replacement.
+        QTest.qWait(120)
+        if os.environ.get('HAIZFLOW_FRAME_PIXEL_QA') == '1':
+            shot = window.grabWindow()
+            assert not shot.isNull()
+            QTest.qWait(30)
+            prerequisite = item.findChild(QObject, 'outputBlurPrerequisite')
+            effect_loader = item.findChild(QObject, 'outputBlurEffectLoader')
+            assert ready(prerequisite) and ready(effect_loader)
+            effect = item.findChild(QObject, 'outputBackgroundBlur')
+            assert effect.property('blur') == 1 and effect.property('blurMax') == 16
+            # The source picture only occupies the middle of the portrait
+            # canvas. Green here must come from the actual GPU background.
+            color = shot.pixelColor(shot.width() // 2, round(50 * shot.height() / window.height()))
+            assert color.green() > 80, color.name()
+        # Toggle before incubation completes, including hidden/reopened panes.
+        for index in range(60):
+            frame.setProperty('outputFormat', 'keep_ratio')
+            frame.setProperty('outputFormat', 'blur_background_9_16')
+            frame.setProperty('visible', index % 3 != 0)
+            window.setWidth(1200 + index % 5 * 10)
+            sink.setVideoFrame(QVideoFrame(image))
+            frame.setProperty('outputFormat', 'tiktok_9_16_crop')
+            frame.setProperty('outputFormat', 'blur_background_9_16')
+            QTest.qWait(2)
+        frame.setProperty('visible', True)
+        QTest.qWait(120)
+        assert ready(loader) and sink.videoFrame().isValid()
+        item = loader.property('item')
+        prerequisite = item.findChild(QObject, 'outputBlurPrerequisite')
+        effect_loader = item.findChild(QObject, 'outputBlurEffectLoader')
+        assert ready(prerequisite) and ready(effect_loader)
+        # A missing/unready internal component must never enter the unchecked
+        # native MultiEffect initialization path; the decoder remains valid.
+        prerequisite.setProperty('source', QUrl('qrc:/data/missing-blur-test.qml'))
+        QTest.qWait(30)
+        assert not effect_loader.property('active') and effect_loader.property('item') is None
+        assert sink.videoFrame().isValid()
+        prerequisite.setProperty('source', QUrl('qrc:/data/BlurItem.qml'))
+        QTest.qWait(120)
+        assert ready(prerequisite) and ready(effect_loader)
+        frame.setProperty('outputFormat', 'keep_ratio')
+        QTest.qWait(30)
+        assert not loader.property('active') and loader.property('item') is None
+        print(f'Cold 4K ratio switch: {cold_ms:.1f} ms; 60 rapid switches survived')
+    finally:
+        window.close()
+        window.deleteLater()
+        engine.deleteLater()
+        app.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def test_first_ratio_switch_and_rapid_teardown_in_cold_qt_process():
+    env = {**os.environ, 'QML_DISABLE_DISK_CACHE': '1'}
+    result = subprocess.run([sys.executable, '-X', 'faulthandler', str(Path(__file__).resolve()), '--cold'],
+                            env=env, capture_output=True, text=True, timeout=40)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '60 rapid switches survived' in result.stdout
+    assert 'Component is not ready' not in result.stderr
+
+
+def test_original_background_waits_for_native_blur_component_before_creation():
+    preview = (QML_DIR / 'OutputFramePreview.qml').read_text(encoding='utf-8')
+    background = (QML_DIR / 'OutputFrameBackground.qml').read_text(encoding='utf-8')
+    assert 'MultiEffect' in background and 'blurMax: 16' in background
+    assert 'source: "qrc:/data/BlurItem.qml"' in background
+    assert 'blurPrerequisite.status === Loader.Ready' in background
+    assert 'asynchronous: true' in preview and 'interval: 33' in background
+
+
 if __name__ == "__main__":
-    _check_live_frame_ui()
+    if '--cold' in sys.argv:
+        _check_cold_ratio_switch()
+    else:
+        _check_live_frame_ui()

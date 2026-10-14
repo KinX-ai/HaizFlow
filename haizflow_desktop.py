@@ -70,6 +70,7 @@ _INTERNAL_STREAM_MODES = {
     "--hymt2-worker",
     "--omnivoice-server",
     "--omnivoice-worker",
+    "--vieneu-worker",
     "--runtime-probe",
     "--release-smoke",
     "--app-update-worker",
@@ -88,6 +89,12 @@ if "--hymt2-worker" in sys.argv:
 
     worker_args = [argument for argument in sys.argv[1:] if argument != "--hymt2-worker"]
     raise SystemExit(run_hymt2_worker(worker_args))
+
+if "--vieneu-worker" in sys.argv:
+    from haizflow.pipeline.vieneu_tts import main as run_vieneu_worker
+
+    worker_index = sys.argv.index("--vieneu-worker")
+    raise SystemExit(run_vieneu_worker(sys.argv[worker_index + 1:worker_index + 2]))
 
 if "--omnivoice-worker" in sys.argv:
     from haizflow.pipeline.omnivoice_tts import main as run_omnivoice_worker

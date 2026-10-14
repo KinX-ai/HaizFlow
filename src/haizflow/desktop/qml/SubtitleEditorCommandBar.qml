@@ -26,15 +26,7 @@ Rectangle {
         anchors.rightMargin: Theme.space12
         spacing: Theme.space8
 
-        Text {
-            Layout.fillWidth: true
-            text: qsTr("Tự động lưu thay đổi") + "  ·  " + qsTr("Lăn chuột để thu phóng · Shift+lăn để di chuyển")
-            color: Theme.textMuted
-            font.family: Theme.fontFamily
-            font.pixelSize: TypeScale.label
-            textFormat: Text.PlainText
-            elide: Text.ElideRight
-        }
+        Item { Layout.fillWidth: true }
 
         StudioButton {
             text: qsTr("Hoàn tác")

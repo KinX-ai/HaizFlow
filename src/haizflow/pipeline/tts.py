@@ -15,7 +15,14 @@ def resolve_tts_provider(provider: str, target_language: str) -> str:
     normalized = str(provider or "omnivoice").strip().lower()
     if normalized == "edge":
         return "edge"
-    if normalized in {"omnivoice", "omnivoice-gpu", "auto", "vieneu"}:
+    if normalized in {"vieneu", "vieneu-gpu"}:
+        from haizflow.core.vieneu_voices import unsupported_language_notice
+
+        notice = unsupported_language_notice(normalized, target_language)
+        if notice:
+            raise ValueError(notice[1])
+        return "vieneu"
+    if normalized in {"omnivoice", "omnivoice-gpu", "auto"}:
         return "omnivoice"
     raise ValueError(f"Unsupported TTS provider: {provider}")
 
@@ -272,19 +279,26 @@ def generate_voice_parts(
                               process_registry_id=process_registry_id, on_completed=report_completed)
         log_to_video(video_id, "Edge TTS generated and verified every requested voice segment.")
         return
-    voice = normalize_voice(voice)
-    from haizflow.pipeline.omnivoice_tts import synthesize_batch_to_mp3
+    current_video = get_video(video_id)
+    current_files = dict((current_video.files if current_video else {}) or {})
+    speaker_mode = str(getattr(current_video, "speaker_mode", "single") or "single")
+    if backend == "vieneu":
+        from haizflow.core.vieneu_voices import native_voice, speaker_voice
+        from haizflow.pipeline.vieneu_tts import synthesize_batch_to_mp3
+
+        if speaker_mode != "multiple":
+            voice = "vieneu:" + native_voice(voice) if voice != "vieneu:clone" else voice
+    else:
+        voice = normalize_voice(voice)
+        from haizflow.pipeline.omnivoice_tts import synthesize_batch_to_mp3
     pending = []
     pending_by_segment = {}
     composite_segments = {}
     composition_work = None
-    current_video = get_video(video_id)
-    current_files = dict((current_video.files if current_video else {}) or {})
-    speaker_mode = str(getattr(current_video, "speaker_mode", "single") or "single")
     session_voice = "per-speaker" if speaker_mode == "multiple" else voice
     log_to_video(video_id, f"[TTS][SESSION_START] provider={backend} backend=local device={device} "
                  f"speaker_mode={speaker_mode} voice={session_voice}")
-    if speaker_mode == "multiple" and voice == "omnivoice:clone":
+    if speaker_mode == "multiple" and voice in {"omnivoice:clone", "vieneu:clone"}:
         raise ValueError("Hãy chọn Giọng nhân bản hoặc Nhận diện nhiều người nói, không dùng cả hai cùng lúc.")
     clone_reference = str(current_files.get("voice_reference") or "")
     clone_transcript = str(current_files.get("voice_reference_transcript") or "")
@@ -306,7 +320,7 @@ def generate_voice_parts(
                 source_segments = loaded_source_segments
         if not source_segments or not os.path.isfile(source_audio_path):
             raise RuntimeError(
-                "Multiple-speaker OmniVoice mode requires the current source speech and timestamped source transcript."
+                "Multiple-speaker mode requires the current source speech and timestamped source transcript."
             )
         from haizflow.pipeline.speaker_identity import IDENTITY_VERSION, _valid_map, prepare_speakers
 
@@ -331,6 +345,14 @@ def generate_voice_parts(
         if not _valid_map(identified, source_segments):
             raise RuntimeError("Không xác định được giọng từng người nói. Hãy chạy lại nhận diện người nói.")
         source_segments = identified
+        if backend == "vieneu":
+            # Copy mappings in memory only: the source-identity cache and
+            # existing OmniVoice target assignments remain unmodified.
+            source_segments = [{**entry, "speaker_voice": speaker_voice(entry["speaker_voice"]),
+                                **({"speaker_turns": [{**turn, "speaker_voice": speaker_voice(turn["speaker_voice"])}
+                                                       for turn in entry["speaker_turns"]]}
+                                   if entry.get("speaker_turns") else {})}
+                               for entry in source_segments]
         diagnostic_turns = [turn for source in source_segments for turn in (source.get('speaker_turns') or [source])]
         log_to_video(video_id, f"[SPEAKERS][POLICY] version={IDENTITY_VERSION}")
         voice_map = dict((s["speaker_id"], s["speaker_voice"]) for s in diagnostic_turns)
@@ -342,8 +364,9 @@ def generate_voice_parts(
         ))
         backends = sorted({str(s.get("speaker_profile_backend") or "legacy") for s in diagnostic_turns})
         fallback_count = sum(bool(s.get("speaker_voice_fallback")) for s in diagnostic_turns)
+        fallback_voice = "vieneu:Trúc Ly" if backend == "vieneu" else "omnivoice:female_gentle"
         log_to_video(video_id, f"[SPEAKERS][TIMBRE] backend={','.join(backends)} "
-                     f"fallback_turns={fallback_count} fallback_voice=omnivoice:female_gentle")
+                     f"fallback_turns={fallback_count} fallback_voice={fallback_voice}")
         log_to_video(video_id,f"[SPEAKERS][SUBTURNS] source_clips={len(source_segments)} turns={len(diagnostic_turns)} "
                      f"mixed_clips={sum(bool(s.get('speaker_turns')) for s in source_segments)} "
                      f"childlike_turns={sum(s.get('speaker_timbre_style')=='child-like' for s in diagnostic_turns)}")
@@ -353,10 +376,10 @@ def generate_voice_parts(
         if uncertain:
             log_to_video(video_id, f"[SPEAKERS][LOW_CONFIDENCE] {uncertain}/{len(diagnostic_turns)} turns are ambiguous; "
                          "short, overlapping or distorted source speech may require manual voice correction.")
-    if voice == "omnivoice:clone" and (
+    if voice in {"omnivoice:clone", "vieneu:clone"} and (
         not clone_reference or not os.path.isfile(clone_reference)
     ):
-        raise RuntimeError("OmniVoice voice cloning requires an authorised reference sample.")
+        raise RuntimeError("Voice cloning requires an authorised reference sample.")
 
     exact_source_windows = {}
     for source in source_segments:
@@ -450,7 +473,7 @@ def generate_voice_parts(
                     "voice": str(utterance['voice']),
                     "output_path": piece_path,
                     "index": str(index),
-                    "reference_path": clone_reference if voice == "omnivoice:clone" else "",
+                    "reference_path": clone_reference if voice in {"omnivoice:clone", "vieneu:clone"} else "",
                     "reference_text": clone_transcript if voice == "omnivoice:clone" else "",
                     # Identity came from source, pronunciation from the target
                     # preset. Never leak source dialogue via cross-language cloning.
@@ -458,7 +481,8 @@ def generate_voice_parts(
                     "speaker_id": str(utterance.get('speaker_id') or source_reference.get("speaker_id") or ""),
                     "source_start": str(utterance.get('source_start',source_reference.get("start", ""))),
                     "source_end": str(utterance.get('source_end',source_reference.get("end", ""))),
-                    "source_text": str(utterance.get('source_text',source_reference.get("text", ""))),
+                    "source_text": str(utterance.get('source_text',source_reference.get("text")
+                                                                 or segment.get("source_text") or "")),
                 })
                 pieces.append({**utterance,'output_path':piece_path})
             pending_by_segment[index] = pieces
@@ -538,6 +562,15 @@ def generate_single_voice(
 
         return synthesize_to_mp3(preprocess_text_for_tts(text), voice, output_path, video_id,
                                  language_id=target_language)
+    if backend == "vieneu":
+        from haizflow.pipeline.vieneu_tts import synthesize_to_mp3
+
+        video = get_video(video_id) if voice == "vieneu:clone" else None
+        reference = str(((video.files if video else {}) or {}).get("voice_reference") or "")
+        return synthesize_to_mp3(preprocess_text_for_tts(text), voice, output_path, video_id,
+                                 language_id=target_language,
+                                 reference_path=reference,
+                                 device="gpu" if provider.endswith("-gpu") else "cpu")
     device = "gpu" if provider.endswith("-gpu") else "cpu"
     voice = normalize_voice(voice)
     from haizflow.pipeline.omnivoice_tts import synthesize_to_mp3

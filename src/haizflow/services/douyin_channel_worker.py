@@ -57,17 +57,21 @@ def _candidate(aweme: dict) -> dict | None:
             if timestamp is not None
             else ""
         )
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OverflowError, OSError):
         published_at = ""
     try:
         duration = int(video.get("duration") or aweme.get("duration") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         duration = 0
     duration //= 1000
+    if duration > 2**31 - 1:
+        duration = 0  # Invalid upstream number must not overflow a Qt int role.
     raw_view_count = statistics.get("play_count")
     try:
         view_count = int(raw_view_count) if raw_view_count is not None else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        view_count = None
+    if view_count is not None and not 0 <= view_count <= 2**63 - 1:
         view_count = None
     return {
         "remote_video_id": remote_id,
@@ -87,8 +91,9 @@ def inspect_profile(payload: dict) -> dict:
     from haizflow.services.douyin_adapter import get_douyin_adapter
     adapter = get_douyin_adapter(payload)
     budget = payload.get("scan_scope") if payload.get("ranking") == "popular" else payload.get("limit", 20)
-    name, candidates = adapter.profile_posts(str(payload.get("url") or ""), limit=int(budget or 1000))
-    return {"channel_name": name, "candidates": candidates}
+    name, candidates = adapter.profile_posts(str(payload.get("url") or ""), limit=int(budget or 1000),
+                                             count_videos=payload.get("ranking", "newest") != "popular")
+    return {"channel_name": name, "candidates": candidates, "warning": getattr(candidates, "warning", "")}
 
 
 def main() -> int:

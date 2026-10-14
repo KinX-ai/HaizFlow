@@ -5,21 +5,26 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 
-from haizflow.pipeline import omnivoice_tts as voice
 from haizflow.pipeline import manual_tools, process_video
+from haizflow.pipeline import omnivoice_tts as voice
 from haizflow.pipeline.tts_quality import (
-    short_phrase_generation_options, short_phrase_units, validate_short_phrase_audio,
-    spoken_text_for_omnivoice, validate_speech_waveform,
-    active_speech_rms, match_quiet_speech_level, uses_spoken_number_normalization,
+    active_speech_rms,
+    match_quiet_speech_level,
+    short_phrase_generation_options,
+    short_phrase_units,
+    spoken_text_for_omnivoice,
+    uses_spoken_number_normalization,
+    validate_short_phrase_audio,
+    validate_speech_waveform,
 )
-from test_omnivoice_batching import fake_torch, fake_speech_wave
+from test_omnivoice_batching import fake_speech_wave, fake_torch
 
 
 def test_short_phrase_policy_protects_final_phonemes_and_leaves_long_text_unchanged():
     options = short_phrase_generation_options("Đồ ngốc!", "Vietnamese")
     assert "duration" not in options
     assert "postprocess_output" not in options
-    assert options["fade_duration"] == .005
+    assert options["fade_duration"] == 0.0
     assert short_phrase_units("Đồ ngốc!", "vi") == 2
     assert short_phrase_units("快走！", "Chinese") == 2
     assert short_phrase_generation_options("Đây là một câu nói bình thường dài hơn.", "vi") == {}
@@ -59,33 +64,35 @@ def test_short_policy_invalidates_only_short_local_clips_not_edge_or_long_cache(
         assert process_video._voice_checkpoint_signature(video, "same-document", segments=segments[1:]) == long_auto
 
 
-@pytest.mark.parametrize("permanently_incomplete", [False, True])
-def test_worker_retries_short_audio_once_and_never_publishes_partial(tmp_path, permanently_incomplete):
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+@pytest.mark.parametrize("speaker_mode", ["single", "multiple"])
+@pytest.mark.parametrize("text", ["Đồ ngốc!", "90.000 đô la.", "Xin lỗi, coo nhỏ.",
+                                  "Đây là một câu nói dài bình thường vẫn cần giữ đầy đủ âm cuối."])
+def test_worker_preserves_legacy_generation_and_does_not_gate_short_speech_on_asr(tmp_path, device, speaker_mode, text):
     calls, writes, statuses = [], [], []
     def generate(**kwargs):
         calls.append(kwargs)
-        return [fake_speech_wave(4800 if permanently_incomplete or len(calls) == 1 else 24000)]
+        return [fake_speech_wave(4800)]
     model = SimpleNamespace(generate=generate, sampling_rate=24000)
     torch = fake_torch()
     runtime = {"modules": (np, SimpleNamespace(write=lambda *args, **kwargs: writes.append(args)), torch, Mock()),
-               "model": model, "model_key": ("model", "cpu")}
-    request = {"site_packages": str(tmp_path), "model_root": "model", "device": "cpu", "language": "Vietnamese",
-               "speaker_mode": "multiple", "status_path": str(tmp_path / "status.json"),
-               "items": [{"text": "Đồ ngốc!", "voice": "omnivoice:female", "wav_path": str(tmp_path / "voice.wav")}]}
+               "model": model, "model_key": ("model", device)}
+    request = {"site_packages": str(tmp_path), "model_root": "model", "device": device, "language": "vi",
+               "speaker_mode": speaker_mode, "status_path": str(tmp_path / "status.json"),
+               "quality_model_root": "obsolete-request-must-not-load", "inference_steps": 32,
+               "items": [{"text": text, "voice": "omnivoice:female", "wav_path": str(tmp_path / "voice.wav")}]}
     path = tmp_path / "request.json"
     path.write_text(json.dumps(request), encoding="utf-8")
     with patch.object(voice, "_write_status_file", side_effect=lambda _path, payload: statuses.append(payload)):
-        if permanently_incomplete:
-            with pytest.raises(RuntimeError, match="incomplete"):
-                voice._worker_main(str(path), runtime)
-        else:
-            assert voice._worker_main(str(path), runtime) == 0
-    assert len(calls) == 2
-    assert "duration" not in calls[0]
-    assert 'duration' not in calls[1] and calls[1]['speed'] == .85
-    assert calls[0]["voice_clone_prompt"] is calls[1]["voice_clone_prompt"]
-    assert len(writes) == (0 if permanently_incomplete else 1)
-    assert any(s["stage"] == "retrying_short_utterance" for s in statuses)
+        assert voice._worker_main(str(path), runtime) == 0
+    assert len(calls) == 1 and len(writes) == 1
+    assert calls[0]["text"] == text
+    assert calls[0]["fade_duration"] == 0.0
+    assert calls[0]["num_step"] == 32 and calls[0]["normalize_text"] is False
+    assert calls[0]["audio_chunk_duration"] == 10.0 and calls[0]["audio_chunk_threshold"] == 8.0
+    assert not {'duration', 'speed', 'pad_duration'} & calls[0].keys()
+    assert not any(s["stage"] in {'retrying_short_utterance', 'loading_short_speech_verifier',
+                                  'creating_short_voice_reference', 'validating_short_speech'} for s in statuses)
 
 
 @pytest.mark.parametrize("written,spoken", [
@@ -159,9 +166,9 @@ def test_worker_retries_beeps_once_without_changing_voice_or_publishing_bad_audi
     assert len(calls) == 2 and len(writes) == (0 if permanently_bad else 1)
     assert calls[0][1] != calls[1][1]
     for settings, _seed in calls:
-        assert settings["text"] == "Chín mươi nghìn đô la."
+        assert settings["text"] == "90.000 đô la."
         assert settings["voice_clone_prompt"] is prompt
-        assert settings["num_step"] == 32 and "duration" not in settings
+        assert settings["num_step"] == 32 and not {'duration', 'speed', 'pad_duration'} & settings.keys()
     assert request["items"][0]["text"] == "90.000 đô la."
 
 

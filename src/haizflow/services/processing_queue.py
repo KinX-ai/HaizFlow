@@ -31,6 +31,8 @@ class SerialProcessingQueue:
         self._worker: threading.Thread | None = None
         self._shutdown_requested = False
         self._lock = threading.RLock()
+        self._run_serial = 0
+        self._run_tokens: dict[str, int] = {}
 
     @property
     def active_video_id(self) -> str | None:
@@ -57,6 +59,8 @@ class SerialProcessingQueue:
             if self._shutdown_requested or video_id == self._active_video_id or video_id in self._pending:
                 return False
             self._pending.append(video_id)
+            self._run_serial += 1
+            self._run_tokens[video_id] = self._run_serial
             if not self._worker or not self._worker.is_alive():
                 self._worker = threading.Thread(target=self._run, name="haizflow-processing-queue", daemon=True)
                 self._worker.start()
@@ -69,7 +73,23 @@ class SerialProcessingQueue:
                 self._pending.remove(video_id)
             except ValueError:
                 return False
+            self._run_tokens.pop(video_id, None)
             return True
+
+    def token_for(self, video_id: str) -> int | None:
+        """Identity of this enqueue, not merely the video shared by later runs."""
+        with self._lock:
+            return self._run_tokens.get(video_id)
+
+    def detach_owned(self, tokens: dict[str, int], on_active=None) -> tuple[str | None, list[str]]:
+        with self._lock:
+            targets = {key for key, token in tokens.items() if self._run_tokens.get(key) == token}
+            active, removed = self.detach_pending(targets)
+            # Keep the enqueue identity stable until cancellation is signalled.
+            # The runner cannot retire/re-enqueue this ID between these steps.
+            if active is not None and on_active is not None:
+                on_active(active)
+            return active, removed
 
     def detach_pending(self, video_ids) -> tuple[str | None, list[str]]:
         """Atomically remove matching waiters and snapshot the active item.
@@ -83,6 +103,8 @@ class SerialProcessingQueue:
             removed = [video_id for video_id in self._pending if video_id in targets]
             if removed:
                 self._pending = deque(video_id for video_id in self._pending if video_id not in targets)
+                for video_id in removed:
+                    self._run_tokens.pop(video_id, None)
             return active, removed
 
     def shutdown(self, *, timeout_seconds: float = 10.0) -> bool:
@@ -95,6 +117,8 @@ class SerialProcessingQueue:
         with self._lock:
             self._shutdown_requested = True
             self._pending.clear()
+            self._run_tokens = {key: token for key, token in self._run_tokens.items()
+                                if key == self._active_video_id}
             worker = self._worker
         if worker is None or worker is threading.current_thread():
             return worker is None
@@ -132,6 +156,7 @@ class SerialProcessingQueue:
                 with self._lock:
                     if self._active_video_id == video_id:
                         self._active_video_id = None
+                        self._run_tokens.pop(video_id, None)
                 if self._on_finished:
                     try:
                         self._on_finished(video_id)

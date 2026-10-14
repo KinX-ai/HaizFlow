@@ -16,7 +16,9 @@ from haizflow.pipeline.process_registry import check_cancellation
 from haizflow.services.video_store import log_to_video
 from haizflow.utils.ffmpeg import get_video_duration
 
+# Transport/token upgrades must not discard already verified narration.
 EDGE_CACHE_VERSION = "edge-7.2.8-verified-v1"
+EDGE_CLIENT_MIN_VERSION = (7, 3, 1)
 ATTEMPT_TIMEOUT = 45.0
 RETRY_DELAYS = (1.0, 3.0)
 MAX_CONCURRENCY = 2
@@ -119,6 +121,11 @@ async def _watch(awaitable, registry_id: str, timeout: float):
 
 async def _download(text: str, voice: str, path: Path):
     import edge_tts
+
+    version = str(getattr(edge_tts, "__version__", "0.0.0"))
+    parts = tuple(int(part) for part in version.split(".")[:3] if part.isdigit())
+    if parts < EDGE_CLIENT_MIN_VERSION:
+        raise ValueError("Edge TTS cần bản 7.3.1 trở lên. Cập nhật dependency và khởi động lại ứng dụng.")
 
     # A Communicate is single-use. Never reuse an exhausted stream on retry.
     communicate = edge_tts.Communicate(text, voice, connect_timeout=10, receive_timeout=20)

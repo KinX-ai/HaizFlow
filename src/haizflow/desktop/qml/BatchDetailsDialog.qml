@@ -35,6 +35,7 @@ AppDialog {
         case "removeOriginalSubtitles": case "originalSubtitles": return qsTr("Che phụ đề");
         case "originalSubtitleRemovalMode": case "subtitleRemovalMode": return qsTr("Cách che phụ đề");
         case "subtitleStyle": case "subtitleLayout": return qsTr("Kiểu và vị trí phụ đề");
+        case "outputSpeed": return qsTr("Tốc độ đầu ra");
         case "watermarkText": return qsTr("Nội dung watermark");
         case "watermarkKind": return qsTr("Loại watermark");
         case "watermarkImagePath": return qsTr("Ảnh watermark");

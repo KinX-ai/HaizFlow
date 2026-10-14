@@ -36,7 +36,6 @@ FocusScope {
                 : AppController.modelSetupState === "cancelled"
                     ? qsTr("Đã tạm dừng tải model")
                     : qsTr("Đang tải model…")
-            subtitle: qsTr("Model được lưu trong thư mục dữ liệu của ứng dụng.")
         }
 
         RowLayout {

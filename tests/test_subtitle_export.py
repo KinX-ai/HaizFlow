@@ -112,6 +112,20 @@ def test_empty_workspace_is_blocked_with_warning_before_save_picker():
     assert host.appAlertRequested.emit.call_args.args[2] == "warning"
 
 
+@pytest.mark.parametrize("busy_field", ["isProcessing", "videoExportBusy", "mediaImportBusy", "queue"])
+def test_busy_export_is_blocked_before_reading_document_or_opening_picker(busy_field):
+    host = host_for(document())
+    if busy_field == "queue":
+        host._processing_queue = SimpleNamespace(has_work=True)
+    else:
+        setattr(host, busy_field, True)
+    host._selected_video = Mock(side_effect=AssertionError("Do not read a busy editor"))
+    with patch("haizflow.desktop.project_commands_controller.QFileDialog.getSaveFileName") as picker:
+        assert not ProjectCommandsController(host).export_selected_srt()
+    picker.assert_not_called()
+    assert host.appAlertRequested.emit.call_args.args[0] == "Đang xử lý"
+
+
 def test_export_uses_pending_text_and_current_timing_without_project_mutation(tmp_path, external_storage):
     doc = document()
     before = deepcopy(doc.model_dump())
@@ -153,5 +167,5 @@ def test_rejecting_overwrite_preserves_destination(tmp_path, external_storage):
 
 def test_workspace_action_is_directly_below_audio_and_does_not_start_a_pipeline_stage():
     workspace = (Path(__file__).parents[1] / "src/haizflow/desktop/qml/ManualWorkspace.qml").read_text(encoding="utf-8")
-    assert 'Object.assign({}, root.toolModel[5], {stageIndex: 5}),\n            {label: qsTr("Xuất SRT"), stageIndex: 8}' in workspace
+    assert 'Object.assign({}, root.toolModel[5], {stageIndex: 5}),\n            {label: qsTr("Xuất SRT"), stageIndex: 8,' in workspace
     assert "AppController.exportSelectedSrt();\n                return;" in workspace

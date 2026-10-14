@@ -192,9 +192,10 @@ def render_segment(video, document, range_ms, output, token, progress):
         apply_overlays(str(base), str(overlays), document, process_id, encoding_quality=quality,
                        timeline_offset_seconds=start / 1000, progress_callback=lambda value: report(85 + round(7 * value)))
         finish_export_resolution(str(overlays), str(output), video.export_preset, process_id,
+                                 output_speed=getattr(video, "output_speed", 1.0),
                                  progress_callback=lambda value: report(92 + round(5 * value)))
         validate_video_integrity(str(output))
-        if abs(get_video_duration(str(output)) - duration) > .25:
+        if abs(get_video_duration(str(output)) - duration / getattr(video, "output_speed", 1.0)) > .25:
             raise RuntimeError("Exported result segment duration does not match its timeline.")
         report(98)
     except Exception:

@@ -155,6 +155,36 @@ progress, cancellation, FFmpeg validation, project import and cleanup remain
 the existing HaizFlow implementations. Channel scans have a bounded raw-post
 budget, including photo posts, even if an upstream page exceeds requested size.
 
+Continuation throttles retain the exact cursor and verified session. After the
+ordinary three-attempt request retry, a scan can wait 30 seconds and then 60
+seconds to resume automatically. This recovery budget is shared across the
+whole scan, not reset for every page; waits are cancellation-aware. CAPTCHA
+and terminal failures never enter this recovery path. The scan status reports
+the scanned count and waiting period without pretending that work is complete.
+
+If recovery is exhausted, available candidates are returned as an explicitly
+incomplete scan, not a successful 100% scan or a failed download. Users can
+download the available rows or rescan. Popular ordering is applied to all
+collected rows before selecting the requested count, but cannot promise the
+most-viewed videos from unread pages. The cursor cache remains local to the
+same session for five minutes; saved project results and the incomplete notice
+survive restart, but the API cursor does not. A new session/restart must rescan.
+
+2026-10-13 anonymous live checks: native signing, browser SDK signing and
+in-page SDK fetch all returned `{"status_code":0}` without a list for a
+nonzero cursor. First pages contained 20/22 rows, including pinned posts.
+Repeated 30/60-second waits did not recover this channel. This exact bare
+continuation envelope now receives at most three same-cursor attempts with
+short one/two-second waits, then is reported as incomplete pagination,
+not mislabeled as a temporary HTTP rate limit or end-of-channel. A transient
+envelope can recover without replacing the anonymous identity; a persistent
+one never enters the long 30/60-second recovery loop. Genuine
+HTTP 429/network failures retain bounded recovery. A channel returning only
+zero/missing play counts is not advertised as successfully ranked by views.
+Anonymous-only access remains the user-selected boundary; no login, personal
+profile extraction or challenge solver is added. More than the readable first
+page and accurate view ranking cannot be guaranteed when Douyin withholds them.
+
 ## Diagnostics
 
 Adapter logs include attempt, endpoint path, session generation, transport mode,
@@ -242,6 +272,59 @@ After the final queued-source guard, 85 focused tests and QML lint were rerun
 successfully. Live network checks are intentionally not mandatory in the suite.
 
 ## Remaining limitations and relative reliability
+
+Newest-count follow-up (2026-10-14): source had forced `count=20` on every
+profile request, including requests for 50/100 newest videos. Read-only probes
+against the same profile obtained 40 rows with `count=40`, and 41 rows with
+`count=50` or `100` (platform-selected/pinned rows can differ). The next page
+was still withheld, including an SDK-signed request using the same count.
+The adapter now requests up to 40 posts per page and keeps that count stable
+for the entire cursor chain. A cached 20-post cursor is not reused when the
+page size changes. Deterministic 50/100 multi-page tests pass; those tests are
+not evidence that the current anonymous live session can retrieve 50/100.
+
+Historical source comparison found a separate counting regression: newest
+scans used the requested video count as a raw-post budget. Photos, invalid
+posts and repeated pinned posts therefore reduced the usable video count.
+Newest scans now count unique usable videos, with a separate hard safety cap
+of 1,000 raw posts. Popular scans still respect their selected raw-post scope.
+The adapter retains whole received pages and their exact next cursor, so
+increasing 50 to 100 can reuse buffered rows without skipping the tail of a
+page. Newest ordering and final requested-count trimming remain in the channel
+service. Cursor caches cannot cross page-size, counting-mode or session changes.
+
+Additional read-only probes on 2026-10-14 tested the former query recipe,
+`cut_version=1`, disabled time-list queries, profile Referer and same-origin
+fetch headers. First pages returned 40 rows, but each continuation still
+returned the bare 17-byte envelope. Clock skew was about one second, not a
+large timezone/clock error. These probes do not establish why the same channel
+previously allowed 50/100 anonymous results. Live 100-video recovery remains
+unverified; passing fixture tests must not be presented as that evidence.
+
+## Audio link inspection
+
+The Downloads audio page inspects metadata before enabling its download action,
+matching the video page's title, author, duration and thumbnail presentation.
+Typing, pasting or checking a link never queues media. Downloading requires the
+same inspected URL; editing the URL invalidates its preview. Local-file audio
+extraction is unchanged. Audio preview checkpoints are separate from video
+previews and contain metadata only, never signed media URLs or authentication.
+Project switching invalidates late inspection callbacks, and shutdown drains
+both coordinators. The actual audio download still refreshes metadata instead
+of relying on a persisted CDN URL.
+
+Channel scans retain every usable result up to the requested download count,
+even when a later page requires verification, rejects the session, changes
+format or repeats its cursor. These cases return an incomplete-scan notice;
+they do not trigger challenge solving or treat the received rows as full EOF.
+A legitimate empty profile is a zero-result scan, with a 0/requested notice.
+Shortfalls after filters/scan scope are also reported explicitly.
+
+The desktop persists both partial rows and their notice. A failed/cancelled
+rescan of the same source/ranking/content filter retains a detached copy of
+the earlier list and labels it as previous results. Another channel or changed
+filters never inherits those rows. Deterministic checks cover 0, 1, 22, 50 and
+100 results, project reopening, terminal continuation errors and invalid cursors.
 
 Expected reliability is better than the earlier contradictory-UA/no-visitor
 approach: identity is coherent, protected signing is explicit, session/risk

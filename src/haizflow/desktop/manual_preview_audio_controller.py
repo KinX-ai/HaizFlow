@@ -99,29 +99,6 @@ def mix_frames(tracks, cursor, count, volumes, muted_ids=frozenset()):
     return np.clip(result, -32768, 32767).astype("<i2").tobytes()
 
 
-def mix_playback_frames(tracks, cursor, count, volumes, playback_rate, muted_ids=frozenset()):
-    """Resample only a small preview buffer; never rewrite cached/export audio.
-
-    Cursor is measured in timeline frames, whereas count is output frames at
-    48 kHz. Keep fractional source positions across partial device writes.
-    Non-unit rates change pitch, like playback without pitch compensation.
-    """
-    if count <= 0:
-        return b""
-    start = math.floor(cursor)
-    if playback_rate == 1.0 and cursor == start:
-        return mix_frames(tracks, start, count, volumes, muted_ids)
-    offsets = cursor - start + np.arange(count, dtype=np.float64) * playback_rate
-    indices = offsets.astype(np.int64)
-    source = np.frombuffer(
-        mix_frames(tracks, start, int(indices[-1]) + 2, volumes, muted_ids),
-        dtype="<i2",
-    ).reshape(-1, 2)
-    fraction = (offsets - indices)[:, None]
-    output = source[indices] * (1.0 - fraction) + source[indices + 1] * fraction
-    return np.clip(output, -32768, 32767).astype("<i2").tobytes()
-
-
 def apply_source_decisions(samples, decisions, allocate=None):
     """Map source PCM to sequence time, including silent gaps between clips."""
     if not decisions:
@@ -189,6 +166,7 @@ class ManualPreviewAudioController(QObject):
         self._reconciled_voice_state = None
         self._cursor = 0
         self._playback_rate = 1.0
+        self._tempo_stream = None
         self._position_seconds = 0.0
         self._playing = False
         self._muted = False
@@ -592,8 +570,11 @@ class ManualPreviewAudioController(QObject):
         )
         key = hashlib.sha256(json.dumps(config, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
         current = {str(s.get("segment_id", index)): str(s.get("text", "")) for index, s in enumerate(segments)}
-        self._muted_ids = {t["id"] for t in self._tracks if t["kind"] == "voice"
-                           and (not voice_enabled or current.get(t["id"]) != t.get("text"))}
+        muted_ids = {t["id"] for t in self._tracks if t["kind"] == "voice"
+                     and (not voice_enabled or current.get(t["id"]) != t.get("text"))}
+        if muted_ids != self._muted_ids and self._tempo_stream is not None:
+            self.seek(self._position_seconds)
+        self._muted_ids = muted_ids
         if key == self._key:
             return
         self._key = key
@@ -836,6 +817,7 @@ class ManualPreviewAudioController(QObject):
             if self._native_player is None:
                 self._native_output = QAudioOutput(QMediaDevices.defaultAudioOutput(), self)
                 self._native_player = QMediaPlayer(self)
+                self._native_player.setPitchCompensation(True)
                 self._native_player.setAudioOutput(self._native_output)
             elif self._native_source:
                 self._stop_streaming_source()
@@ -902,6 +884,8 @@ class ManualPreviewAudioController(QObject):
             self._finish_preparing()
             self.errorChanged.emit(error)
             return
+        if self._tempo_stream is not None:
+            self.seek(self._position_seconds)
         previous = {t["id"]: t.get("signature") for t in self._tracks}
         if self._playing:
             self._deferred_ids.update(t["id"] for t in tracks if t["kind"] == "voice"
@@ -914,6 +898,8 @@ class ManualPreviewAudioController(QObject):
 
     @Slot(int, int, int)
     def setVolumes(self, original, voice, music):
+        if self._tempo_stream is not None:
+            self.seek(self._position_seconds)
         self._volumes = {
             "source": max(0, min(100, original)) / 100,
             "voice": max(0, min(100, voice)) / 100,
@@ -930,7 +916,7 @@ class ManualPreviewAudioController(QObject):
     @Slot(float, float)
     def setPlaybackRate(self, rate, seconds):
         # Preview speed is independent of project settings and export speed.
-        if rate not in (.5, 1.0, 1.5, 2.0) or not math.isfinite(seconds):
+        if not math.isfinite(rate) or not .25 <= rate <= 3.0 or not math.isfinite(seconds):
             return
         if rate == self._playback_rate:
             return
@@ -979,6 +965,7 @@ class ManualPreviewAudioController(QObject):
         self._muted = muted
         if not playing:
             self._playing = False
+            self._reset_tempo()
             self._timer.stop()
             if self._sink:
                 self._sink.reset()
@@ -1027,6 +1014,7 @@ class ManualPreviewAudioController(QObject):
 
     @Slot(float)
     def seek(self, seconds):
+        self._reset_tempo()
         self._reset_clock_tracking()
         if self._native_source and not self._embedded_audio:
             self._native_player.setPosition(max(0, round(seconds * 1000)))
@@ -1050,6 +1038,7 @@ class ManualPreviewAudioController(QObject):
         # its constructor so resuming an existing sink does not raise and
         # stop both narration and the caption clock.
         if self._sink and self._sink_device_id != default.id():
+            self._reset_tempo()
             self._cursor = max(0, round(self._position_seconds * RATE))
             self._sink.stop()
             self._sink.deleteLater()
@@ -1086,17 +1075,46 @@ class ManualPreviewAudioController(QObject):
         count = min(PCM_BUFFER_FRAMES, self._sink.bytesFree() // 4)
         if count <= 0:
             return
-        data = (bytes(count * 4) if self._muted else
-                mix_playback_frames(self._tracks, self._cursor, count, self._volumes,
-                                    self._playback_rate, self._muted_ids | self._deferred_ids))
+        if self._playback_rate == 1.0:
+            data = mix_frames(self._tracks, round(self._cursor), count, self._volumes,
+                              self._muted_ids | self._deferred_ids)
+        else:
+            if self._tempo_stream is None:
+                from haizflow.desktop.preview_tempo import PreviewTempoStream
+
+                tracks = tuple(dict(track) for track in self._tracks)
+                volumes = dict(self._volumes)
+                muted_ids = frozenset(self._muted_ids | self._deferred_ids)
+                try:
+                    self._tempo_stream = PreviewTempoStream(
+                        lambda cursor, frames: mix_frames(tracks, cursor, frames, volumes, muted_ids),
+                        self._cursor, self._playback_rate, RATE,
+                    )
+                except OSError as exc:
+                    self._timer.stop()
+                    self.errorChanged.emit(str(exc))
+                    return
+            if self._tempo_stream.error:
+                self.errorChanged.emit(self._tempo_stream.error)
+                self._timer.stop()
+                self._reset_tempo()
+                return
+            data = self._tempo_stream.peek(count)
+            if not data:
+                return
+        if self._muted:
+            data = bytes(len(data))
         written = self._device.write(data)
         if written > 0:
+            if self._tempo_stream is not None:
+                self._tempo_stream.consume(written)
             self._cursor += (written // 4) * self._playback_rate
             buffered = max(0, (self._sink.bufferSize() - self._sink.bytesFree()) // 4)
             self._publish_position(max(0, self._cursor - buffered * self._playback_rate) / RATE)
 
     @Slot()
     def release(self):
+        self._reset_tempo()
         self._stop_streaming_source()
         self._generation += 1
         self._cancel_decode()
@@ -1127,6 +1145,11 @@ class ManualPreviewAudioController(QObject):
         self._progress = 0.0
         self.progressChanged.emit()
         self.busyChanged.emit()
+
+    def _reset_tempo(self):
+        if self._tempo_stream is not None:
+            self._tempo_stream.close()
+            self._tempo_stream = None
 
     def close(self):
         self._closed = True

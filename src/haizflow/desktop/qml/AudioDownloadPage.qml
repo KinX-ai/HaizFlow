@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
@@ -9,12 +10,18 @@ Item {
     required property var downloader
     property string sourceMode: String(downloader.workspaceState.audioMode || "link")
     readonly property bool fromLink: root.sourceMode === "link"
+    function restoreAudioUrl() {
+        const value = String(root.downloader.workspaceState.audioUrl || "");
+        if (audioLink.text !== value)
+            audioLink.text = value;
+    }
+    Component.onCompleted: restoreAudioUrl()
 
     Connections {
         target: root.downloader
         function onWorkspaceChanged() {
             root.sourceMode = String(root.downloader.workspaceState.audioMode || "link");
-            audioLink.text = String(root.downloader.workspaceState.audioUrl || "");
+            root.restoreAudioUrl();
         }
     }
 
@@ -60,11 +67,51 @@ Item {
                         placeholderText: qsTr("Dán liên kết video")
                         selectByMouse: true
                         accessibleName: qsTr("Liên kết video")
-                        text: String(root.downloader.workspaceState.audioUrl || "")
+                        enabled: !root.downloader.audioPreviewBusy
                         onTextEdited: {
-                            root.downloader.clearDownloadFeedback();
                             root.downloader.saveWorkspaceState({audioUrl: text});
+                            root.downloader.clearAudioPreview();
                         }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.fromLink
+                        StudioButton {
+                            objectName: "audioInspectButton"
+                            text: qsTr("Kiểm tra")
+                            variant: "secondary"
+                            enabled: audioLink.text.trim().length > 0 && !root.downloader.audioPreviewBusy
+                                && douyinAction.permitsRequest
+                            onClicked: root.downloader.inspectAudio(audioLink.text.trim())
+                        }
+                        StudioButton {
+                            text: qsTr("Hủy")
+                            variant: "danger"
+                            visible: root.downloader.audioPreviewBusy
+                            onClicked: root.downloader.cancelAudioPreview()
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            visible: root.downloader.audioPreview.status.length > 0
+                            text: root.downloader.audioPreviewReady ? qsTr("Sẵn sàng tải âm thanh")
+                                : I18n.runtimeStatus(root.downloader.audioPreview.status)
+                            color: root.downloader.audioPreviewReady ? Theme.success : Theme.textMuted
+                            wrapMode: Text.WordWrap
+                            textFormat: Text.PlainText
+                        }
+                    }
+
+                    DownloadLinkPreview {
+                        objectName: "audioLinkPreview"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: implicitHeight
+                        visible: root.fromLink && root.downloader.audioPreviewReady
+                        title: root.downloader.audioPreview.title
+                        platform: root.downloader.audioPreview.platform
+                        uploader: root.downloader.audioPreview.uploader
+                        duration: root.downloader.audioPreview.duration
+                        thumbnail: root.downloader.audioPreview.thumbnailSource
                     }
 
                     RowLayout {
@@ -93,18 +140,20 @@ Item {
                         url: root.fromLink ? audioLink.text : ""
                         visible: root.fromLink && requiresSession
                         operationBusy: root.downloader.hasWork || root.downloader.videoPreviewBusy
+                            || root.downloader.audioPreviewBusy
                     }
 
                     RowLayout {
                         Layout.fillWidth: true
                         Item { Layout.fillWidth: true }
                         StudioButton {
+                            objectName: "audioDownloadButton"
                             text: root.fromLink ? qsTr("Tải âm thanh") : qsTr("Tách âm thanh")
                             variant: "primary"
                             enabled: root.downloader.audioOutputDirectory.length > 0
-                                && (root.fromLink ? audioLink.text.trim().length > 0 : root.downloader.audioSource.length > 0)
+                                && (root.fromLink ? root.downloader.audioPreviewReady : root.downloader.audioSource.length > 0)
                                 && douyinAction.permitsRequest
-                            onClicked: root.fromLink ? root.downloader.downloadAudio(audioLink.text.trim()) : root.downloader.extractAudio()
+                            onClicked: root.fromLink ? root.downloader.downloadAudio(root.downloader.audioPreview.url) : root.downloader.extractAudio()
                         }
                     }
                 }

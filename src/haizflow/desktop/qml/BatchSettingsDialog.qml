@@ -23,6 +23,7 @@ FloatingToolDialog {
     property string draftSpeakerMode: "single"
     property bool draftEnableAudioSeparation: true
     property string draftOutputFormat: "keep_ratio"
+    property real draftOutputSpeed: 1.0
     property int draftOriginalVolume: 60
     property int draftBackgroundMusicVolume: 30
     property int draftTtsVolume: 100
@@ -90,16 +91,16 @@ FloatingToolDialog {
 
     function localizedVoiceOptions(languageCode, provider, interfaceLanguage) {
         const voices = AppController.voiceOptionsForLanguageAndProvider(languageCode, provider)
-            .filter(item => item.voice !== "omnivoice:clone");
-        if (root.draftVoiceReferencePath.length > 0)
-            voices.push({"voice": "omnivoice:clone", "label": qsTr("Giọng đã nhân bản"),
+            .filter(item => !item.voice.endsWith(":clone"));
+        if (root.draftVoiceReferencePath.length > 0 && provider !== "edge")
+            voices.push({"voice": provider.indexOf("vieneu") === 0 ? "vieneu:clone" : "omnivoice:clone", "label": qsTr("Giọng đã nhân bản"),
                 "category": "clone", "categoryLabel": qsTr("Giọng của tôi"), "available": true, "previewAvailable": false});
         return voices;
     }
 
     function normalizedDraftVoice(languageCode, provider, preferredVoice) {
-        if (preferredVoice === "omnivoice:clone" && root.draftVoiceReferencePath.length > 0)
-            return preferredVoice;
+        if (preferredVoice.endsWith(":clone") && root.draftVoiceReferencePath.length > 0 && provider !== "edge")
+            return provider.indexOf("vieneu") === 0 ? "vieneu:clone" : "omnivoice:clone";
         const options = AppController.voiceOptionsForLanguageAndProvider(languageCode, provider)
         for (let index = 0; index < options.length; ++index) {
             if (options[index].voice === preferredVoice && options[index].available !== false)
@@ -141,10 +142,11 @@ FloatingToolDialog {
         draftTranslationModel = settings.translationModel || "q4"
         draftTtsProvider = settings.ttsProvider || "omnivoice"
         draftTtsVoice = normalizedDraftVoice(draftTargetLanguage, draftTtsProvider, settings.ttsVoice || "")
-        draftSpeakerMode = draftTtsProvider.indexOf("omnivoice") === 0 && settings.speakerMode === "multiple"
+        draftSpeakerMode = (draftTtsProvider.indexOf("omnivoice") === 0 || draftTtsProvider.indexOf("vieneu") === 0) && settings.speakerMode === "multiple"
             ? "multiple" : "single"
         draftEnableAudioSeparation = settings.enableAudioSeparation !== undefined ? Boolean(settings.enableAudioSeparation) : true
         draftOutputFormat = settings.outputFormat || "keep_ratio"
+        draftOutputSpeed = settings.outputSpeed === undefined ? 1.0 : Number(settings.outputSpeed)
         draftOriginalVolume = Number(settings.originalVolume !== undefined ? settings.originalVolume : 60)
         draftBackgroundMusicVolume = Number(settings.backgroundMusicVolume !== undefined ? settings.backgroundMusicVolume : 30)
         draftTtsVolume = Number(settings.ttsVolume !== undefined ? settings.ttsVolume : 100)
@@ -177,6 +179,7 @@ FloatingToolDialog {
             "speakerMode": draftSpeakerMode,
             "enableAudioSeparation": draftEnableAudioSeparation,
             "outputFormat": draftOutputFormat,
+            "outputSpeed": draftOutputSpeed,
             "originalVolume": draftOriginalVolume,
             "backgroundMusicVolume": draftBackgroundMusicVolume,
             "ttsVolume": draftTtsVolume,
@@ -335,14 +338,16 @@ FloatingToolDialog {
                 ttsProviderIndex: root.draftTtsProviderIndex
                 ttsVoice: root.draftTtsVoice
                 ttsVoiceOptions: root.draftVoiceOptions
-                voicePreviewSource: root.draftPreviewVoice === "omnivoice:clone"
+                voicePreviewSource: root.draftPreviewVoice.endsWith(":clone")
                     ? draftController.localUrl(root.draftVoiceReferencePath) : AppController.audioPreviewSource
-                voicePreviewState: root.draftPreviewVoice === "omnivoice:clone" ? "ready" : AppController.audioPreviewState
+                voicePreviewState: root.draftPreviewVoice.endsWith(":clone") ? "ready" : AppController.audioPreviewState
                 speakerMode: root.draftSpeakerMode
                 removeOriginalSubtitles: root.draftRemoveOriginalSubtitles
                 subtitleRemovalMode: root.draftOriginalSubtitleRemovalMode
                 enableAudioSeparation: root.draftEnableAudioSeparation
                 outputFormat: root.draftOutputFormat
+                outputSpeed: root.draftOutputSpeed
+                onOutputSpeedEdited: function(value) { root.draftOutputSpeed = value; }
                 onOutputFormatEdited: function(value) { root.draftOutputFormat = value; }
                 backgroundMusicPath: root.draftBackgroundMusicPath
                 backgroundMusicLoop: root.draftBackgroundMusicLoop
@@ -365,19 +370,23 @@ FloatingToolDialog {
                     // qmllint enable missing-property
                 }
                 onTargetLanguageEdited: function(value) {
+                    if (!AppController.validateTtsProviderForLanguage(value, root.draftTtsProvider))
+                        return
                     root.draftTargetLanguage = value
                     root.draftTtsVoice = root.normalizedDraftVoice(value, root.draftTtsProvider, root.draftTtsVoice)
                 }
                 onTtsProviderEdited: function(value) {
+                    if (!AppController.validateTtsProviderForLanguage(root.draftTargetLanguage, value))
+                        return
                     root.draftTtsProvider = value
-                    if (value.indexOf("omnivoice") !== 0)
+                    if (value.indexOf("omnivoice") !== 0 && value.indexOf("vieneu") !== 0)
                         root.draftSpeakerMode = "single"
                     root.draftTtsVoice = root.normalizedDraftVoice(root.draftTargetLanguage, value, root.draftTtsVoice)
                 }
                 onTtsVoiceEdited: function(value) { root.draftTtsVoice = value }
                 onTtsVoicePreviewRequested: function(value) {
                     root.draftPreviewVoice = value;
-                    if (value !== "omnivoice:clone")
+                    if (!value.endsWith(":clone"))
                         AppController.previewVoiceSample(root.draftTtsProvider, value, root.draftTargetLanguage)
                 }
                 onCloneVoiceRequested: batchCloneDialogLoader.invoke("openForSelectedVideo", [])
@@ -435,7 +444,7 @@ FloatingToolDialog {
                 onClosed: batchCloneDialogLoader.release()
                 onReferenceAccepted: function(path) {
                     root.draftVoiceReferencePath = path;
-                    root.draftTtsVoice = "omnivoice:clone";
+                    root.draftTtsVoice = root.draftTtsProvider.indexOf("vieneu") === 0 ? "vieneu:clone" : "omnivoice:clone";
                     root.draftSpeakerMode = "single";
                 }
             }

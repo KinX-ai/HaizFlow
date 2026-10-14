@@ -205,9 +205,11 @@ Item {
         1,
         Number(previewRenderLayout.outputHeight || previewMedia.videoHeight || 1080)
     )
+    readonly property bool hasTimelineOutput: AppController.hasSelectedOutput
+        && Number(root.previewMedia.outputSpeed || 1) === 1
     readonly property url currentResultSource: String(AppController.editorPreviewSource || "").length > 0
         ? AppController.editorPreviewSource
-        : AppController.hasSelectedOutput
+        : root.hasTimelineOutput
             ? AppController.selectedOutputSource
             : AppController.selectedInputSource
     readonly property int previewSubtitleIndex: subtitleIndexAt(comparePreview.positionSeconds)
@@ -654,6 +656,11 @@ Item {
             comparing: root.comparing
             previewZoomPercent: root.previewZoomPercent
             outputFormat: AppController.outputFormat
+            outputSpeed: AppController.outputSpeed
+            onOutputSpeedEdited: function(value) {
+                if (!manualEditorToolbar.outputFormatEditable) return;
+                AppController.setManualOutputSpeed(value);
+            }
             outputFormatEditable: stageInspector.editable && !stageInspector.taskQueued
             onOutputFormatEdited: function(value) {
                 if (!manualEditorToolbar.outputFormatEditable) return;
@@ -768,7 +775,7 @@ Item {
                     resultSource: root.sourceReplacementPending ? "" : root.currentResultSource
                     resultBaseSource: root.sourceReplacementPending ? "" : AppController.editorPreviewBaseSource
                     resultOutputFormat: String(AppController.editorPreviewBaseSource).length > 0
-                        || (String(AppController.editorPreviewSource || "").length === 0 && !AppController.hasSelectedOutput)
+                        || (String(AppController.editorPreviewSource || "").length === 0 && !root.hasTimelineOutput)
                         ? String(root.previewMedia.liveOutputFormat || "keep_ratio") : "keep_ratio"
                     resultThumbnailOutputFormat: String(root.previewMedia.liveOutputFormat || "keep_ratio")
                     thumbnailSource: AppController.videoThumbnailSource
@@ -1006,10 +1013,15 @@ Item {
             {label: qsTr("Watermark"), stageIndex: 7},
             Object.assign({}, root.toolModel[4], {stageIndex: 4}),
             Object.assign({}, root.toolModel[5], {stageIndex: 5}),
-            {label: qsTr("Xuất SRT"), stageIndex: 8}]
+            {label: qsTr("Xuất SRT"), stageIndex: 8,
+                enabled: !AppController.isProcessing && !AppController.isSelectedVideoQueued
+                    && !AppController.videoExportBusy && !AppController.mediaImportBusy}]
         currentIndex: root.selectedStageIndex
         onToolSelected: function(index) {
             if (index === 8) {
+                if (AppController.isProcessing || AppController.isSelectedVideoQueued
+                        || AppController.videoExportBusy || AppController.mediaImportBusy)
+                    return;
                 root.dismissSubtitleEditor();
                 AppController.exportSelectedSrt();
                 return;

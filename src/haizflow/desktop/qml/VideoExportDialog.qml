@@ -13,8 +13,7 @@ AppDialog {
     property bool processBeforeExport: false
     property bool batchMode: false
     title: batchMode ? qsTr("Xử lý và xuất hàng loạt") : processBeforeExport ? qsTr("Xử lý và xuất video") : qsTr("Xuất video")
-    subtitle: processBeforeExport ? qsTr("Xử lý theo cài đặt dự án và lưu video vào vị trí đã chọn")
-        : qsTr("Lưu bản sao thành phẩm; dữ liệu dự án được giữ nguyên")
+    subtitle: ""
     preferredWidth: 600
     bodySpacing: Theme.space12
 
@@ -91,17 +90,8 @@ AppDialog {
         }
         Text {
             Layout.fillWidth: true
-            text: qsTr("Giữ tỷ lệ khung hình, không tăng độ phân giải nguồn. Âm thanh giữ chất lượng bản phối.")
-            textFormat: Text.PlainText
-            color: Theme.textMuted
-            font.family: Theme.fontFamily
-            font.pixelSize: TypeScale.metadata
-            wrapMode: Text.WordWrap
-        }
-        Text {
-            Layout.fillWidth: true
             visible: root.batchMode
-            text: qsTr("Áp dụng chất lượng xuất cho %1 video. Cài đặt xử lý riêng của từng video được giữ nguyên.").arg(root.configuration.count || 0)
+            text: qsTr("%1 video · Giữ cài đặt riêng").arg(root.configuration.count || 0)
             textFormat: Text.PlainText
             color: Theme.textMuted
             font.pixelSize: TypeScale.metadata
@@ -110,7 +100,7 @@ AppDialog {
         Text {
             Layout.fillWidth: true
             visible: !root.processBeforeExport && !root.configuration.ready
-            text: qsTr("Chưa có bản dựng phù hợp. HaizFlow sẽ dựng video từ các kết quả xử lý đã lưu trước khi xuất.")
+            text: qsTr("Video sẽ được dựng khi xuất.")
             textFormat: Text.PlainText
             color: Theme.textMuted
             font.family: Theme.fontFamily

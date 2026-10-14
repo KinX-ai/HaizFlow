@@ -19,6 +19,22 @@ from haizflow.services.video_download import DownloadCancelled
 
 
 class MediaDownloadQueueTests(unittest.TestCase):
+    def test_incomplete_channel_scan_keeps_usable_results_without_false_success_or_failure(self):
+        controller = MediaDownloadController()
+        try:
+            controller._active_task = {"kind": "channel_scan", "label": "channel preview"}
+            warning = "Quét chưa hoàn tất: đã quét 22/300 bài đăng."
+            with mock.patch.object(type(controller._channel_importer), "state", new_callable=mock.PropertyMock,
+                                   return_value="partial"), \
+                 mock.patch.object(type(controller._channel_importer), "status", new_callable=mock.PropertyMock,
+                                   return_value=warning):
+                controller._on_channel_changed()
+            self.assertEqual(controller.state, "partial")
+            self.assertEqual(controller.status, warning)
+            self.assertFalse(controller.busy)
+        finally:
+            controller.shutdown()
+
     def test_new_link_check_clears_old_error_without_hiding_active_work(self):
         controller = MediaDownloadController()
         try:

@@ -26,7 +26,7 @@ dependencies = [
   "playwright==1.63.0",
   "pydub==0.25.1",
   "srt==3.5.3",
-  "edge-tts==7.2.8",
+  "edge-tts @ https://codeload.github.com/rany2/edge-tts/tar.gz/360fa8e1de354e1dda74c09bd695887d6a44df74#sha256=470d399a288b9ff9800988538ae31c99f06e589ec0ed67cb01141b29a005ab47",
 ]
 
 [project.urls]
@@ -66,6 +66,13 @@ haizflow = "haizflow.desktop.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Exact upstream source, used until this release is available on PyPI.
+# The lock verifier requires both the full commit URL and archive hash.
+[tool.haizflow.source-dependencies.edge-tts]
+version = "7.3.1"
+url = "https://codeload.github.com/rany2/edge-tts/tar.gz/360fa8e1de354e1dda74c09bd695887d6a44df74"
+sha256 = "470d399a288b9ff9800988538ae31c99f06e589ec0ed67cb01141b29a005ab47"
 
 [tool.setuptools.package-data]
 "haizflow" = ["assets/fonts/Bangers-Regular.ttf"]

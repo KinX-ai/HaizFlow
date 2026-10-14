@@ -9,13 +9,16 @@ GridLayout {
     property string outputFormat: "keep_ratio"
     property bool editable: true
     property bool compact: false
+    property bool showSpeed: false
+    property real outputSpeed: 1.0
+    signal speedEdited(real value)
     signal edited(string value)
     readonly property string description: root.outputFormat === "blur_background_9_16"
         ? qsTr("Giữ trọn video ở giữa khung 1080 × 1920, lấp khoảng trống bằng nền mờ. Nguồn đã đúng 9:16 giữ nguyên kích thước.")
         : root.outputFormat === "tiktok_9_16_crop"
             ? qsTr("Phóng đầy khung 1080 × 1920; nội dung ngoài khung có thể bị cắt. Nguồn đã đúng 9:16 giữ nguyên kích thước.")
             : qsTr("Giữ khung hình của video nguồn. Không thêm nền hoặc cắt theo tỷ lệ đăng mạng xã hội.")
-    columns: root.compact ? 3 : 1
+    columns: root.compact ? (root.showSpeed ? 4 : 3) : 1
     columnSpacing: Theme.space8
     rowSpacing: Theme.space8
 
@@ -35,6 +38,13 @@ GridLayout {
     Item {
         visible: root.compact
         Layout.fillWidth: true
+    }
+    OutputSpeedButton {
+        visible: root.showSpeed
+        enabled: root.editable
+        speed: root.outputSpeed
+        compactLabel: true
+        onEdited: function(value) { root.speedEdited(value); }
     }
     Text {
         visible: !root.compact

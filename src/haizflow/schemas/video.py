@@ -8,7 +8,7 @@ SUBTITLE_FONT_FAMILY = "Bangers"
 WorkflowMode = Literal["A", "review"]
 TranslatorProvider = Literal["hymt2", "gemini"]
 TranslationModel = Literal["auto", "q4", "full", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
-TTSProvider = Literal["omnivoice", "omnivoice-gpu", "edge"]
+TTSProvider = Literal["omnivoice", "omnivoice-gpu", "edge", "vieneu", "vieneu-gpu"]
 SpeechRecognitionModel = Literal["small", "small-cpu", "small-gpu", "large-v3-turbo"]
 OutputFormat = Literal["keep_ratio", "tiktok_9_16_crop", "blur_background_9_16"]
 ProjectType = Literal["single", "manual", "batch"]
@@ -92,6 +92,7 @@ class VideoConfig(BaseModel):
     remove_original_subtitles: bool = True
     original_subtitle_removal_mode: OriginalSubtitleRemovalMode = "patch"
     output_format: OutputFormat = "keep_ratio"  # The desktop workflow preserves the original aspect ratio.
+    output_speed: float = Field(default=1.0, ge=0.25, le=3.0, allow_inf_nan=False)
     crop: CropSettings = Field(default_factory=CropSettings)
     enable_audio_separation: bool = True
     original_video_volume: int = Field(default=60, ge=0, le=100)
@@ -132,6 +133,8 @@ class VideoInfo(BaseModel):
     mode: WorkflowMode
     source_language: str
     target_language: str
+    # Language of the published Manual text, not the next translation choice.
+    subtitle_language: str = ""
     translator_provider: TranslatorProvider = "hymt2"
     speech_recognition_model: SpeechRecognitionModel = "small"
     translation_model: TranslationModel = "q4"
@@ -143,6 +146,7 @@ class VideoInfo(BaseModel):
     remove_original_subtitles: bool = True
     original_subtitle_removal_mode: OriginalSubtitleRemovalMode = "patch"
     output_format: OutputFormat
+    output_speed: float = Field(default=1.0, ge=0.25, le=3.0, allow_inf_nan=False)
     export_preset: Literal["source", "1080p", "1080p-high", "720p", "2160p"] = "source"
     export_history: list[dict] = Field(default_factory=list)
     crop: CropSettings = Field(default_factory=CropSettings)

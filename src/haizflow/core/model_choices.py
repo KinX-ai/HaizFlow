@@ -12,17 +12,23 @@ def project_recognition_choice(choice: str, app_device: str, *, total_vram_bytes
     return choice
 
 
-def project_model_defaults(app_device: str, *, total_vram_bytes: int | None = None) -> dict[str, str]:
+def project_model_defaults(app_device: str, *, total_vram_bytes: int | None = None,
+                           target_language: str = "vi") -> dict[str, str]:
     gpu = app_device == "gpu"
     small_gpu = gpu and total_vram_bytes is not None and total_vram_bytes < _FOUR_GB_GPU_LIMIT_BYTES
     return {
         # Keep the established defaults on larger GPUs. On a 4 GB card,
-        # Whisper Small and OmniVoice run sequentially on CUDA; translation
+        # Whisper Small and voice synthesis run sequentially on CUDA; translation
         # uses its smaller CPU pack so the full GPU weights never overlap.
         "_speech_recognition_model": "small-gpu" if small_gpu else "large-v3-turbo" if gpu else "small-cpu",
         "_translation_model": "q4" if small_gpu or not gpu else "full",
-        "_tts_provider": "omnivoice-gpu" if gpu else "omnivoice",
+        "_tts_provider": (("vieneu-gpu" if gpu else "vieneu") if target_language == "vi"
+                          else "omnivoice-gpu" if gpu else "omnivoice"),
     }
+
+
+def default_tts_voice(provider: str) -> str:
+    return "vieneu:Hải Đăng" if str(provider).startswith("vieneu") else "omnivoice:female"
 
 
 def project_translation_choice(choice: str, app_device: str, *, total_vram_bytes: int | None = None) -> str:
@@ -51,6 +57,8 @@ def models_for_device(app_device: str, *, recognition: str, translation: str, vo
             translation = "q4"
         if voice == "omnivoice-gpu":
             voice = "omnivoice"
+        elif voice == "vieneu-gpu":
+            voice = "vieneu"
     return {"speech_recognition_model": recognition, "translation_model": translation, "tts_provider": voice}
 
 

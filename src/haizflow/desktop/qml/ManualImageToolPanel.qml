@@ -71,16 +71,6 @@ ColumnLayout {
                 imagePane.inspector.ocrModeDraftRequested(imagePane.clipId, String(selected.value || "blur"));
         }
     }
-    Text {
-        Layout.fillWidth: true
-        visible: Number((imagePane.selectedLayer.region || {}).width_percent || 0) > 0
-        text: qsTr("Bấm vào vùng che trên preview để chỉnh. Chọn Áp dụng để lưu thay đổi.")
-        textFormat: Text.PlainText
-        wrapMode: Text.WordWrap
-        color: Theme.textMuted
-        font.family: Theme.fontFamily
-        font.pixelSize: TypeScale.metadata
-    }
     Flow {
         Layout.fillWidth: true
         spacing: Theme.space8

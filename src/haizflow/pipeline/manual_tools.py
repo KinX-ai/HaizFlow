@@ -378,7 +378,9 @@ def _subtitle_document_signature(video, path: str) -> str:
 
 
 def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
-    language = str(getattr(video, "target_language", "vi") or "vi")
+    from haizflow.services.subtitle_language import manual_subtitle_language
+
+    language = manual_subtitle_language(video, segments)
     speaker_mode = str(getattr(video, "speaker_mode", "single") or "single")
     files = dict(getattr(video, "files", {}) or {})
     overrides = dict(files.get("manual_voice_overrides") or {})
@@ -398,6 +400,7 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
         voice = str(override.get("voice") or voice_selection_identity(getattr(video, "tts_voice", ""), speaker_mode))
         from haizflow.pipeline.edge_tts_backend import EDGE_CACHE_VERSION
         from haizflow.pipeline.tts_quality import voice_text_policy_versions
+        from haizflow.core.vieneu_assets import CACHE_VERSION as VIENEU_CACHE_VERSION
         signatures.append(
             manual_artifacts.signature(
                 preprocess_text_for_tts(str(segment.get("text") or "")),
@@ -414,7 +417,10 @@ def _voice_clip_signatures(video, segments: list[dict[str, Any]]) -> list[str]:
                 *_generation_token(video, "voice"),
                 _voice_cache_version(video),
                 *((EDGE_CACHE_VERSION,) if provider == "edge" else ()),
-                *(voice_text_policy_versions(str(segment.get("text") or ""), language) if provider != "edge" else ()),
+                *(voice_text_policy_versions(str(segment.get("text") or ""), language)
+                  if provider.startswith("omnivoice") else ()),
+                *((VIENEU_CACHE_VERSION,)
+                  if provider.startswith("vieneu") else ()),
             )
         )
     return signatures
@@ -446,7 +452,10 @@ def ensure_narrator_anchor(video_id: str) -> str:
     video = video_store.get_video(video_id)
     if not video:
         return ""
-    provider = resolve_tts_provider(video.tts_provider, video.target_language)
+    from haizflow.services.subtitle_language import manual_subtitle_language
+
+    language = manual_subtitle_language(video)
+    provider = resolve_tts_provider(video.tts_provider, language)
     if (
         provider != "omnivoice"
         or str(getattr(video, "speaker_mode", "single") or "single") != "single"
@@ -456,7 +465,7 @@ def ensure_narrator_anchor(video_id: str) -> str:
     config = manual_artifacts.signature(
         provider,
         video.tts_voice,
-        video.target_language,
+        language,
         "manual-narrator-anchor-v1",
     )
     files = dict(video.files or {})
@@ -817,6 +826,7 @@ def export_signature(video, *, validate: bool = True) -> str:
         getattr(video, "subtitle_layout_override", False),
         result_segments.render_payload(editor_document),
         getattr(video, "export_preset", "source"),
+        *(["output-speed-v1", video.output_speed] if getattr(video, "output_speed", 1.0) != 1.0 else []),
         *_generation_token(video, "export"),
         "manual-export-v9-absolute-libass-font-directory",
     )
@@ -1432,7 +1442,17 @@ def _replace_subtitles_from_translation(video_id: str, translated_segments: str)
     # OCR geometry, music and the last exported user file remain untouched.
     files.pop("voice_output", None)
     files.pop("voice_parts_dir", None)
-    video_store.update_video(video_id, files=files)
+    language = str(getattr(video, "target_language", "vi") or "vi")
+    changes = {"files": files, "subtitle_language": language}
+    if language == "zh" and str(getattr(video, "tts_provider", "")).startswith("vieneu"):
+        changes.update(tts_provider="omnivoice-gpu" if video.tts_provider.endswith("-gpu") else "omnivoice",
+                       tts_voice="omnivoice:female_gentle")
+        files["manual_voice_overrides"] = {
+            key: value for key, value in dict(files.get("manual_voice_overrides") or {}).items()
+            if isinstance(value, dict) and not str(value.get("provider", "")).startswith("vieneu")
+        }
+        video_store.log_to_video(video_id, "Chinese subtitles published: VieNeu switched to OmniVoice.")
+    video_store.update_video(video_id, **changes)
     if draft_path:
         try:
             Path(draft_path).unlink(missing_ok=True)
@@ -1664,6 +1684,14 @@ def _run_voice(video, reporter) -> None:
         raise RuntimeError("Hãy chuẩn bị phụ đề trước khi tạo giọng đọc.")
     narrator_anchor = ensure_narrator_anchor(video.video_id)
     video = video_store.get_video(video.video_id) or video
+    from haizflow.services.subtitle_language import manual_subtitle_language
+
+    language = manual_subtitle_language(video, segments)
+    if language != video.target_language:
+        from copy import copy
+
+        video = copy(video)
+        video.target_language = language
     clip_signatures = _voice_clip_signatures(video, segments)
     expected = manual_artifacts.signature(clip_signatures, _voice_cache_version(video, manifest=True))
     cached = manual_artifacts.resolve(video.video_id, "tts_manifest", expected)
@@ -1726,6 +1754,7 @@ def _run_voice(video, reporter) -> None:
 
                 def report_voice_status(stage: str, current: int, _total: int) -> None:
                     preparing_details = {
+                        "verifying_runtime": "Đang kiểm tra gói giọng đọc",
                         "importing_runtime": "Đang khởi tạo thư viện giọng đọc",
                         "reusing_runtime": "Đang dùng bộ tạo giọng đã khởi tạo",
                         "loading_model": "Đang nạp model giọng đọc",
@@ -1739,9 +1768,12 @@ def _run_voice(video, reporter) -> None:
                     if stage in preparing_details:
                         percent = 5 + round(90 * completed_before / max(1, missing_clip_count))
                         status_detail = preparing_details[stage]
+                    elif stage == 'retrying_short_utterance':
+                        percent = 5 + round(90 * (completed_before+current) / max(1,missing_clip_count))
+                        status_detail = 'Đang tạo lại câu có audio chưa đạt'
                     elif stage == 'leveling_voice':
                         percent = 5 + round(90 * (completed_before+current) / max(1,missing_clip_count))
-                        status_detail = 'Đang cân mức các câu cùng người nói'
+                        status_detail = 'Đang hoàn thiện âm thanh giọng đọc'
                     else:
                         overall = completed_before + current
                         percent = 5 + round(90 * overall / max(1, missing_clip_count))
@@ -1786,7 +1818,7 @@ def _run_voice(video, reporter) -> None:
                         segment_indices=group_indices,
                         level_peer_indices=generation_groups[(provider,voice)],
                         narrator_anchor_text=narrator_anchor,
-                        status_callback=report_voice_status if effective == "omnivoice" else None,
+                        status_callback=report_voice_status if effective in {"omnivoice", "vieneu"} else None,
                     )
                     completed_before += len(group_indices)
             else:
@@ -2232,6 +2264,7 @@ def _run_export(video, reporter) -> None:
             finish_export_resolution(
                 str(staging / "video-overlays.mp4"), str(staging / "video.mp4"),
                 export_preset, video.video_id,
+                output_speed=getattr(video, "output_speed", 1.0),
                 progress_callback=lambda fraction: reporter.update(
                     94 + round(3 * fraction), "manual_export", "Đang hoàn thiện video theo chất lượng đã chọn"),
             )

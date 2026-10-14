@@ -789,21 +789,34 @@ def apply_overlays(
 
 
 def finish_export_resolution(input_path: str, output_path: str, preset: str, process_id: str,
-                             *, progress_callback=None) -> str:
+                             *, progress_callback=None, output_speed: float = 1.0) -> str:
     from haizflow.services.video_export import output_dimensions, preset_settings
     from haizflow.utils.ffmpeg import get_video_dimensions
 
     dimensions = get_video_dimensions(input_path)
     target = output_dimensions(*dimensions, preset)
-    if target == dimensions:
+    speed = float(output_speed)
+    if not math.isfinite(speed) or not 0.25 <= speed <= 3.0:
+        raise ValueError("Output speed must be between 0.25x and 3x.")
+    if target == dimensions and speed == 1.0:
         _copy_video(input_path, output_path, process_id, progress_callback)
         return output_path
+    filters = []
+    if target != dimensions:
+        filters.append(f"scale={target[0]}:{target[1]}:flags=lanczos")
+    audio_args = ["-c:a", "copy"]
+    if speed != 1.0:
+        from haizflow.pipeline.audio_timeline import _atempo_filters
+
+        filters.append(f"setpts=(PTS-STARTPTS)/{speed:.6f}")
+        audio_args = ["-af", f"asetpts=PTS-STARTPTS,{_atempo_filters(speed)}",
+                      "-c:a", "aac", "-b:a", "256k"]
     _run([
         _binary("ffmpeg"), "-y", "-i", os.path.abspath(input_path),
-        "-map", "0:v:0", "-map", "0:a?", "-vf", f"scale={target[0]}:{target[1]}:flags=lanczos",
+        "-map", "0:v:0", "-map", "0:a?", "-vf", ",".join(filters),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(preset_settings(preset)["crf"]),
-        "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", os.path.abspath(output_path),
+        "-pix_fmt", "yuv420p", *audio_args, "-movflags", "+faststart", os.path.abspath(output_path),
     ], cwd=str(Path(output_path).resolve().parent), process_id=process_id, label="Export resolution",
         progress_callback=progress_callback,
-        duration=get_video_duration(input_path))
+        duration=get_video_duration(input_path) / speed)
     return output_path

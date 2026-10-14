@@ -28,6 +28,8 @@ class _Host(QObject):
     videoExportCompleted = Signal(str, str)
     appAlertRequested = Signal(str, str, str)
     batchChanged = Signal()
+    selectedVideoChanged = Signal()
+    processingChanged = Signal()
 
     def __init__(self):
         super().__init__()
@@ -394,6 +396,56 @@ class RenderExportStorageTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"old")
         self.assertEqual(list(self.external.glob(".haizflow-export-*")), [])
         self.assertIsNotNone(video_export.current_render(video))
+
+    def test_cancel_export_stops_real_render_process_and_cleans_staging(self):
+        from haizflow.pipeline.process_registry import clean_video, register_process, start_video
+        from haizflow.services.processing_queue import SerialProcessingQueue
+        from haizflow.utils.ffmpeg import _binary
+
+        _, video = self.make_video(kind="manual")
+        started = threading.Event()
+        state = {}
+        def runner(identifier):
+            staging = manual_artifacts.create_staging_directory(identifier, "export")
+            state["staging"] = staging
+            process = None
+            start_video(identifier)
+            try:
+                process = subprocess.Popen([
+                    _binary("ffmpeg"), "-v", "error", "-y", "-re", "-f", "lavfi", "-i",
+                    "color=c=black:s=32x32:r=10", "-t", "60", "-an", "-c:v", "libx264",
+                    str(staging / "video.mp4"),
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                state["process"] = process
+                register_process(identifier, process)
+                started.set()
+                process.communicate(timeout=15)
+            finally:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.communicate()
+                manual_artifacts.discard_staging_directory(staging)
+                clean_video(identifier)
+        task_queue = SerialProcessingQueue(runner)
+        self.host._processing_queue = task_queue
+        try:
+            self.assertTrue(task_queue.enqueue(video.video_id))
+            self.assertTrue(started.wait(3))
+            job = {"videoId": video.video_id, "status": "rendering", "progress": 20}
+            self.exporter.jobs = [job]
+            self.exporter._capture_render_owner(job)
+            self.exporter.cancel_all()
+            self.assertTrue(task_queue.shutdown(timeout_seconds=3))
+            self.assertIsNotNone(state["process"].poll())
+            self.assertFalse(state["staging"].exists())
+            self.assertEqual(job["status"], "cancelled")
+            self.assertEqual(video_store.get_video(video.video_id).status, "paused")
+            self.assertIsNotNone(video_export.current_render(video_store.get_video(video.video_id)))
+        finally:
+            if state.get("process") is not None and state["process"].poll() is None:
+                state["process"].kill()
+            task_queue.shutdown(timeout_seconds=3)
 
     def test_full_disk_and_unavailable_destination_are_export_only_failures(self):
         _, video = self.make_video()

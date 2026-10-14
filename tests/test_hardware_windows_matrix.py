@@ -77,7 +77,10 @@ def test_admission_ui_and_resource_packs_agree(machine, device):
     assert options[2]["available"] is (device == "gpu" and machine.gpu_ok
         and caps.heavy_gpu_models_supported)
     voice_options = HaizFlowController._tts_provider_options_for_language(host, "vi")
-    assert voice_options[1]["available"] is (device == "gpu" and machine.gpu_ok)
+    providers = {item["provider"]: item for item in voice_options}
+    for provider in ("vieneu-gpu", "omnivoice-gpu"):
+        assert providers[provider]["available"] is (device == "gpu" and machine.gpu_ok)
+    assert voice_options[0]["provider"] == "vieneu-gpu"
     profile = hardware.runtime_profile_for(caps, device)
     assert profile.cuda_available is (device == "gpu" and machine.gpu_ok)
     if not profile.cuda_available:

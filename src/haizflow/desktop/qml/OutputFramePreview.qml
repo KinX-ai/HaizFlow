@@ -1,7 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtMultimedia
-import QtQuick.Effects
 
 Item {
     id: root
@@ -33,44 +32,16 @@ Item {
         clip: root.portrait
 
         Loader {
+            objectName: "outputBackgroundLoader"
             anchors.fill: parent
+            asynchronous: true
             active: root.visible && root.displayFormat === "blur_background_9_16"
                 && root.frameRect.width > 0 && root.frameRect.height > 0
             sourceComponent: Component {
-                Item {
-                    id: background
-                    readonly property real ratio: root.frameRect.width / Math.max(1, root.frameRect.height)
-                    readonly property real smallWidth: Math.min(270, 480 * ratio)
-                    readonly property real smallHeight: smallWidth / ratio
-                    ShaderEffectSource {
-                        id: capture
-                        sourceItem: root.frameSource
-                        sourceRect: root.frameRect
-                        textureSize: Qt.size(Math.ceil(background.smallWidth), Math.ceil(background.smallHeight))
-                        width: background.smallWidth
-                        height: background.smallHeight
-                        visible: false
-                        live: false
-                        Component.onCompleted: scheduleUpdate()
-                        onSourceRectChanged: scheduleUpdate()
-                        onTextureSizeChanged: scheduleUpdate()
-                        onSourceItemChanged: scheduleUpdate()
-                    }
-                    Connections {
-                        target: video.videoSink
-                        function onVideoFrameChanged() { capture.scheduleUpdate(); }
-                    }
-                    MultiEffect {
-                        source: capture
-                        width: background.smallWidth
-                        height: background.smallHeight
-                        anchors.centerIn: parent
-                        scale: Math.max(background.width / width, background.height / height)
-                        blurEnabled: true
-                        blur: 1
-                        blurMax: 16
-                        autoPaddingEnabled: false
-                    }
+                OutputFrameBackground {
+                    sourceItem: root.frameSource
+                    sourceRect: root.frameRect
+                    videoSink: video.videoSink
                 }
             }
         }

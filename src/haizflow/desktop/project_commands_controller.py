@@ -91,10 +91,17 @@ class ProjectCommandsController:
         project_import = getattr(host, "_project_import", None)
         if project_import and project_import.has_project_work(project_key):
             return False
-        target = getattr(host, "_url_import_target", None)
-        if not target or target.get("project_key") != project_key:
-            return True
-        importer = getattr(host, "_url_importer", None)
+        registry = getattr(host, "_project_url_imports", None)
+        if registry is not None:
+            importer = registry.existing(project_key)
+            target = importer.import_target if importer else None
+            if importer is None:
+                return True
+        else:
+            target = getattr(host, "_url_import_target", None)
+            if not target or target.get("project_key") != project_key:
+                return True
+            importer = getattr(host, "_url_importer", None)
         # A storage import may already be moving validated media; let it finish.
         if importer and importer.state == "importing":
             return False
@@ -103,7 +110,10 @@ class ProjectCommandsController:
             if not importer.shutdown(timeout_seconds=1.0):
                 return False
             importer.begin("single")
-        host._url_import_target = None
+        if registry is not None:
+            importer.import_target = None
+        else:
+            host._url_import_target = None
         return True
 
     def _release_project_preview(self, project_key: str, videos: list) -> None:
@@ -126,6 +136,13 @@ class ProjectCommandsController:
 
         host = self._host
         text = lambda vi, en: vi if host._settings_language == "vi" else en
+        queue = getattr(host, "_processing_queue", None)
+        if (getattr(host, "isProcessing", False) or getattr(queue, "has_work", False)
+                or getattr(host, "videoExportBusy", False) or getattr(host, "mediaImportBusy", False)):
+            host.appAlertRequested.emit(text("Đang xử lý", "Processing in progress"),
+                text("Chờ tác vụ hoàn tất trước khi xuất SRT.", "Wait for processing to finish before exporting SRT."),
+                "warning")
+            return False
         video = host._selected_video()
         model = getattr(host, "_manual_editor_document", None)
         document = model.document_object if model and video and model.video_id == video.video_id else None
@@ -189,6 +206,17 @@ class ProjectCommandsController:
         if callable(ensure_hardware) and not ensure_hardware():
             return False
         videos = list(videos)
+        from haizflow.core.vieneu_voices import unsupported_language_notice
+
+        for video in videos:
+            notice = unsupported_language_notice(
+                getattr(video, "tts_provider", getattr(host, "_tts_provider", "omnivoice")),
+                getattr(video, "target_language", getattr(host, "_target_language", "vi")),
+                getattr(host, "_settings_language", "vi"),
+            )
+            if notice:
+                host.appAlertRequested.emit(*notice, "warning")
+                return False
         capabilities = getattr(host, "_hardware_capabilities", None)
         vram = getattr(capabilities, "total_vram_bytes", None)
         for index, video in enumerate(videos):
@@ -231,7 +259,7 @@ class ProjectCommandsController:
                 host.appAlertRequested.emit(title, message, "warning")
                 return False
         for video in videos:
-            if video and getattr(video, "tts_voice", "") == "omnivoice:clone":
+            if video and getattr(video, "tts_voice", "") in {"omnivoice:clone", "vieneu:clone"}:
                 reference = str((getattr(video, "files", None) or {}).get("voice_reference") or "")
                 try:
                     has_sample = bool(reference and os.path.isfile(reference) and os.path.getsize(reference) > 0)
@@ -247,7 +275,7 @@ class ProjectCommandsController:
         missing = []
         for video in videos:
             context = {
-                "voice_clone": str(getattr(video, "tts_voice", "")) == "omnivoice:clone",
+                "voice_clone": str(getattr(video, "tts_voice", "")) in {"omnivoice:clone", "vieneu:clone"},
                 "device": str(getattr(host, "_settings_processing_device", "cpu") or "cpu"),
                 "model": str(
                     getattr(video, "speech_recognition_model", None)
@@ -376,6 +404,7 @@ class ProjectCommandsController:
                 "speakerMode": getattr(host, "_speaker_mode", "single"),
                 "enableAudioSeparation": host._enable_audio_separation,
                 "outputFormat": getattr(host, "_output_format", "keep_ratio"),
+                "outputSpeed": getattr(host, "_output_speed", 1.0),
                 "originalVolume": host._original_volume,
                 "backgroundMusicVolume": host._background_music_volume,
                 "ttsVolume": host._tts_volume,
@@ -467,6 +496,7 @@ class ProjectCommandsController:
             "speakerMode": "multiple" if speaker_mode == "multiple" else "single",
             "enableAudioSeparation": bool(audio_separation),
             "outputFormat": getattr(baseline_video, "output_format", "keep_ratio"),
+            "outputSpeed": getattr(baseline_video, "output_speed", 1.0),
             "originalVolume": int(original_volume),
             "backgroundMusicVolume": int(background_music_volume),
             "ttsVolume": int(tts_volume),
@@ -551,6 +581,7 @@ class ProjectCommandsController:
                 str(getattr(video, "original_subtitle_removal_mode", "patch") or "patch"),
                 _subtitle_style_items(video),
                 music_signature,
+                getattr(video, "output_speed", 1.0),
             )
 
         keys = (
@@ -570,6 +601,7 @@ class ProjectCommandsController:
             "subtitleRemovalMode",
             "subtitleLayout",
             "backgroundMusic",
+            "outputSpeed",
         )
         baseline, _count = Counter(values(video) for video in videos).most_common(1)[0]
         overrides = []
@@ -697,6 +729,16 @@ class ProjectCommandsController:
             if normalize_provider
             else (str(tts_provider or "omnivoice").lower())
         )
+        from haizflow.core.vieneu_voices import unsupported_language_notice
+
+        notice = unsupported_language_notice(provider, language, getattr(host, "_settings_language", "vi"))
+        if notice:
+            show_alert = getattr(host, "_show_app_alert", None)
+            if callable(show_alert):
+                show_alert(*notice, "warning")
+            else:
+                QMessageBox.warning(None, *notice)
+            return False
         asr_model = (
             str(speech_recognition_model or getattr(host, "_speech_recognition_model", "small") or "small")
             .strip()
@@ -769,7 +811,7 @@ class ProjectCommandsController:
             voice = host._normalized_voice_for_language(language, tts_voice)
         normalized_speaker_mode = (
             "multiple"
-            if provider.startswith("omnivoice")
+            if provider.startswith(("omnivoice", "vieneu"))
             and str(speaker_mode or getattr(host, "_speaker_mode", "single")).strip().lower()
             == "multiple"
             else "single"
@@ -929,6 +971,7 @@ class ProjectCommandsController:
         host._speaker_mode = values["speakerMode"]
         host._enable_audio_separation = values["enableAudioSeparation"]
         host._output_format = values.get("outputFormat", "keep_ratio")
+        host._output_speed = values.get("outputSpeed", 1.0)
         host._original_volume = values["originalVolume"]
         host._background_music_volume = values["backgroundMusicVolume"]
         host._tts_volume = values["ttsVolume"]
@@ -950,6 +993,7 @@ class ProjectCommandsController:
         host.speakerModeChanged.emit()
         host.enableAudioSeparationChanged.emit()
         host.outputFormatChanged.emit()
+        host.outputSpeedChanged.emit()
         host.originalVolumeChanged.emit()
         host.backgroundMusicVolumeChanged.emit()
         host.ttsVolumeChanged.emit()

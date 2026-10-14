@@ -21,8 +21,11 @@ Rectangle {
     property bool comparing: false
     property real previewZoomPercent: 100
     property string outputFormat: "keep_ratio"
+    property real outputSpeed: 1.0
+    signal outputSpeedEdited(real value)
     property bool outputFormatEditable: true
-    readonly property bool compactTools: width < 1000
+    readonly property bool compactTools: width < 1120
+    readonly property int toolControlSize: width < 960 ? 32 : 40
 
     signal undoRequested()
     signal redoRequested()
@@ -62,7 +65,7 @@ Rectangle {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
             Layout.preferredWidth: 0
-            visible: !root.hasVideo || frameGroup.width >= 240
+            visible: !root.hasVideo || frameGroup.width >= 80
             text: root.projectTitle
             color: Theme.text
             font.family: Theme.fontFamily
@@ -72,29 +75,20 @@ Rectangle {
             textFormat: Text.PlainText
             Accessible.name: root.projectTitle
         }
-        OutputFrameCombo {
-            id: frameCombo
-            objectName: "manualOutputFrameCombo"
-            visible: root.hasVideo
-            Layout.preferredWidth: implicitWidth
-            Layout.maximumWidth: implicitWidth
-            enabled: root.outputFormatEditable
-            outputFormat: root.outputFormat
-            popup.width: Math.max(frameCombo.width, 220)
-            onEdited: function(value) { root.outputFormatEdited(value); }
-        }
     }
 
     RowLayout {
         id: historyGroup
         objectName: "manualHistoryGroup"
-        anchors.centerIn: parent
+        anchors.verticalCenter: parent.verticalCenter
+        x: Math.max(Theme.space16, Math.min((root.width - width) / 2,
+            outputGroup.x - width - Theme.space16))
         spacing: root.compactTools ? Theme.space4 : Theme.space8
 
         StudioIconButton {
             objectName: "manualUndoButton"
             visible: root.hasVideo
-            controlSize: root.compactTools ? 32 : 40
+            controlSize: root.toolControlSize
             iconName: "undo"
             enabled: root.canUndo
             toolTipText: qsTr("Hoàn tác")
@@ -103,7 +97,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualRedoButton"
             visible: root.hasVideo
-            controlSize: root.compactTools ? 32 : 40
+            controlSize: root.toolControlSize
             iconName: "redo"
             enabled: root.canRedo
             toolTipText: qsTr("Làm lại")
@@ -124,7 +118,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualPreviewZoomOutButton"
             visible: root.hasVideo
-            controlSize: root.compactTools ? 32 : 40
+            controlSize: root.toolControlSize
             iconName: "zoomOut"
             enabled: root.previewZoomPercent > 50
             toolTipText: qsTr("Thu nhỏ preview")
@@ -133,7 +127,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualPreviewZoomInButton"
             visible: root.hasVideo
-            controlSize: root.compactTools ? 32 : 40
+            controlSize: root.toolControlSize
             iconName: "zoomIn"
             enabled: root.previewZoomPercent < 400
             toolTipText: qsTr("Phóng to preview")
@@ -151,7 +145,7 @@ Rectangle {
                 required property int modelData
                 objectName: "manualSeek" + modelData
                 visible: root.hasVideo
-                controlSize: root.compactTools ? 32 : 40
+                controlSize: root.toolControlSize
                 offsetSeconds: modelData
                 onClicked: root.seekRequested(modelData)
             }
@@ -159,7 +153,7 @@ Rectangle {
         StudioIconButton {
             objectName: "manualSplitResultButton"
             visible: root.hasVideo
-            controlSize: root.compactTools ? 32 : 40
+            controlSize: root.toolControlSize
             iconName: "split"
             toolTipText: qsTr("Chia đoạn tại vị trí phát (S)")
             showToolTip: true
@@ -168,11 +162,32 @@ Rectangle {
     }
 
     RowLayout {
+        id: outputGroup
+        objectName: "manualOutputControlsGroup"
         anchors.right: parent.right
         anchors.rightMargin: Theme.space12
         anchors.verticalCenter: parent.verticalCenter
         spacing: Theme.space8
 
+        OutputFrameCombo {
+            id: frameCombo
+            objectName: "manualOutputFrameCombo"
+            visible: root.hasVideo
+            Layout.preferredWidth: implicitWidth
+            Layout.maximumWidth: implicitWidth
+            enabled: root.outputFormatEditable
+            outputFormat: root.outputFormat
+            popup.width: Math.max(frameCombo.width, 220)
+            onEdited: function(value) { root.outputFormatEdited(value); }
+        }
+        OutputSpeedButton {
+            objectName: "manualOutputSpeedButton"
+            compactLabel: root.compactTools
+            visible: root.hasVideo
+            enabled: root.outputFormatEditable
+            speed: root.outputSpeed
+            onEdited: function(value) { root.outputSpeedEdited(value); }
+        }
         StudioButton {
             objectName: "manualExportButton"
             visible: root.hasVideo

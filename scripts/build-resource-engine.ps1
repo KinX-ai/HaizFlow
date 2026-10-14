@@ -136,6 +136,7 @@ try {
       "haizflow.pipeline.transcribe",
       "haizflow.pipeline.audio_separation",
       "haizflow.pipeline.omnivoice_tts",
+      "haizflow.pipeline.vieneu_tts",
       "haizflow.services.translation",
       "haizflow.services.hymt2_worker"
       "pydub"

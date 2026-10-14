@@ -32,11 +32,12 @@ def main() -> int:
         "rpc_command": [executable, "--rpc"],
     }
     if args.profile in {"cpu", "cuda128"}:
-        commands["runtime_contract"] = 6
+        commands["runtime_contract"] = 7
         commands.update(
             {
                 "hymt2_server": [executable, "--hymt2-worker", "--server"],
                 "omnivoice_worker": [executable, "--omnivoice-worker"],
+                "vieneu_worker": [executable, "--vieneu-worker"],
                 "omnivoice_server": [executable, "--omnivoice-server"],
                 "demucs": [executable, "--demucs-separate"],
                 "demucs_task": [executable],

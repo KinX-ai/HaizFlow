@@ -49,6 +49,8 @@ InspectorPanel {
             subtitleRemovalMode: AppController.originalSubtitleRemovalMode
             enableAudioSeparation: AppController.enableAudioSeparation
             outputFormat: AppController.outputFormat
+            outputSpeed: AppController.outputSpeed
+            onOutputSpeedEdited: function(value) { AppController.outputSpeed = value; root.scheduleVideoSettingsSave(); }
             onOutputFormatEdited: function(value) { AppController.outputFormat = value; root.scheduleVideoSettingsSave(); }
             backgroundMusicPath: AppController.backgroundMusicPath
             watermarkText: AppController.watermarkText

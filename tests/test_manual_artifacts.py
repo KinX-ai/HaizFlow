@@ -16,6 +16,12 @@ from haizflow.services import manual_artifacts
 
 
 class ManualArtifactTests(unittest.TestCase):
+    def test_voice_finalization_label_does_not_imply_multi_speaker_processing(self):
+        source = inspect.getsource(manual_tools._run_voice)
+        self.assertIn("stage == 'leveling_voice'", source)
+        self.assertIn("Đang hoàn thiện âm thanh giọng đọc", source)
+        self.assertNotIn("Đang cân mức các câu cùng người nói", source)
+
     def test_cancelled_source_and_separation_release_producer_leases(self):
         source = {"artifact_id": "source_audio:existing", "resolved_outputs": {"audio": "audio.wav"}}
         for tool in ("source", "separation"):

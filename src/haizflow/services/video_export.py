@@ -63,6 +63,8 @@ def render_revision(video) -> str:
 
     ignored = {"project_name", "project_directory", "project_id", "project_key", "background_music_path", "review_approved"}
     config = {key: getattr(video, key, None) for key in VideoConfig.model_fields if key not in ignored}
+    if config.get("output_speed", 1.0) == 1.0:
+        config.pop("output_speed", None)
     media = {key: manual_artifacts.file_state((video.files or {}).get(key)) for key in (
         "video_input", "srt_output", "voice_output", "background_music", "watermark_image", "watermark_video",
     )}
@@ -276,12 +278,9 @@ def export_video(video, destination, *, overwrite: bool = False, cancel: threadi
             temporary = None
         finally:
             if temporary is not None:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    # A disconnected drive may make cleanup impossible. Keep
-                    # the original failure; a .partial is never a finished MP4.
-                    pass
+                from haizflow.services.temporary_cleanup import discard_file
+
+                discard_file(temporary)
     if progress:
         progress(100)
     # History is informational only. A history write failure cannot undo a
@@ -317,6 +316,7 @@ def _export_editor_range(video, destination, range_ms, *, overwrite, cancel, pro
         raise ExportCancelled("Export cancelled.")
     owner = "segment-export-" + uuid.uuid4().hex
     owners = [owner]
+    directory = None
     # Pin source and all active dependencies before using the snapshot; this
     # also prevents project deletion while a bounded render reads its media.
     try:
@@ -327,7 +327,8 @@ def _export_editor_range(video, destination, range_ms, *, overwrite, cancel, pro
                 manual_artifacts.pin(video.video_id, kind, signature, dependency_owner)
                 owners.append(dependency_owner)
         revision = render_revision(video)
-        with tempfile.TemporaryDirectory(prefix=".haizflow-segment-", dir=target.parent) as directory:
+        directory = tempfile.mkdtemp(prefix=".haizflow-segment-", dir=target.parent)
+        try:
             output = Path(directory) / "segment.mp4"
             record = current_render(video, verify=False)
             if record:
@@ -356,6 +357,10 @@ def _export_editor_range(video, destination, range_ms, *, overwrite, cancel, pro
             else:
                 os.link(output, target)
                 output.unlink()
+        finally:
+            from haizflow.services.temporary_cleanup import discard_tree
+
+            discard_tree(directory)
     finally:
         for pinned_owner in owners:
             manual_artifacts.unpin(video.video_id, pinned_owner)
@@ -423,7 +428,9 @@ def _render_range(source, output, range_ms, preset, token, progress):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate()
-        meter.unlink(missing_ok=True)
+        from haizflow.services.temporary_cleanup import discard_file
+
+        discard_file(meter)
 
 
 def batch_filename(video) -> str:

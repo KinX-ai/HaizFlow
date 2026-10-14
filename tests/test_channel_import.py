@@ -1,5 +1,4 @@
 import json
-import subprocess
 import sys
 import tempfile
 import threading
@@ -42,6 +41,74 @@ from haizflow.services.video_download import DownloadCancelled
 
 
 class ChannelUrlTests(unittest.TestCase):
+    def test_invalid_optional_numeric_metadata_does_not_destroy_the_video_list(self):
+        for value in ("not-a-number", float("inf"), float("nan"), 1e300):
+            with self.subTest(value=value):
+                row = douyin_candidate({"aweme_id": "123", "create_time": value,
+                    "video": {"duration": value, "play_addr": {"url_list": ["https://cdn.example/video.mp4"]}},
+                    "statistics": {"play_count": value}})
+                self.assertIsNotNone(row)
+                self.assertEqual(row["remote_video_id"], "123")
+                self.assertEqual(row["published_at"], "")
+                self.assertEqual(row["duration_seconds"], 0)
+                self.assertIsNone(row["view_count"])
+
+    def test_zero_view_douyin_results_are_not_presented_as_ranked_by_views(self):
+        request = ChannelImportRequest(url="https://www.douyin.com/user/creator", platform="douyin",
+                                       ranking="popular", limit=50, duration_filter="all")
+        rows = [ChannelVideoCandidate(remote_video_id=str(index),
+                source_url=f"https://www.douyin.com/video/{index}", title="Video", platform="Douyin", view_count=0)
+                for index in range(22)]
+        with patch("haizflow.services.channel_import._scan_douyin", return_value=("Creator", rows)):
+            _, _, result = scan_channel(request)
+        self.assertEqual(len(result), 22)
+        self.assertIn("chưa thể xếp", result.warning)
+        self.assertTrue(all(item.view_count == 0 for item in result))
+
+    def test_partial_douyin_scan_preserves_warning_and_never_reports_complete(self):
+        from haizflow.services.douyin_adapter import ProfileCandidates
+
+        rows = ProfileCandidates([
+            {"remote_video_id": str(index), "source_url": f"https://www.douyin.com/video/{index}",
+             "title": "Video", "platform": "Douyin", "view_count": index}
+            for index in range(22)
+        ])
+        rows.warning = "Quét chưa hoàn tất: đã quét 22/300 bài đăng."
+        rows.scan_progress = 7
+        adapter = Mock()
+        adapter.profile_posts.return_value = ("Creator", rows)
+        progress = Mock()
+        request = ChannelImportRequest(url="https://www.douyin.com/user/creator", platform="douyin",
+                                       ranking="popular", limit=50, scan_scope=300, duration_filter="all")
+        with patch("haizflow.services.douyin_adapter.get_douyin_adapter", return_value=adapter):
+            _, _, candidates = scan_channel(request, progress_callback=progress)
+        self.assertEqual(len(candidates), 22)
+        self.assertIn(rows.warning, candidates.warning)
+        self.assertIn("22/50", candidates.warning)
+        self.assertEqual(candidates.scan_progress, 7)
+        self.assertEqual(progress.call_args.args, (7, candidates.warning))
+        self.assertNotIn(100, [call.args[0] for call in progress.call_args_list])
+
+    def test_any_douyin_result_count_remains_usable_with_clear_shortfall_notice(self):
+        request = ChannelImportRequest(url="https://www.douyin.com/user/creator", platform="douyin",
+                                       ranking="popular", limit=50, duration_filter="all")
+        for count in (0, 1, 22, 50, 100):
+            rows = [ChannelVideoCandidate(remote_video_id=str(index),
+                    source_url=f"https://www.douyin.com/video/{index}", title="Video", platform="Douyin",
+                    view_count=index + 1) for index in range(count)]
+            progress = Mock()
+            with self.subTest(count=count), patch("haizflow.services.channel_import._scan_douyin",
+                                                  return_value=("Creator", rows)):
+                _, _, result = scan_channel(request, progress_callback=progress)
+                self.assertEqual(len(result), min(count, request.limit))
+                self.assertTrue(all(row.status == "ready" and row.selected for row in result))
+                if count < request.limit:
+                    self.assertIn(f"{count}/50", result.warning)
+                    self.assertIn("ít hơn", result.warning)
+                    self.assertEqual(progress.call_args.args, (100, result.warning))
+                else:
+                    self.assertFalse(getattr(result, "warning", ""))
+
     def test_douyin_worker_rejects_non_http_and_lookalike_hosts(self):
         for url in (
             "file:///C:/secret.txt",
@@ -86,7 +153,7 @@ class ChannelUrlTests(unittest.TestCase):
         self.assertEqual(name, "Creator")
         self.assertEqual([v.remote_video_id for v in candidates], ["123"])
         adapter.profile_posts.assert_called_once_with(request.url, limit=1, cancel_event=cancel,
-                                                      progress_callback=None)
+                                                      progress_callback=None, count_videos=True)
 
     def test_video_urls_and_unknown_hosts_are_rejected(self):
         invalid = (
@@ -340,7 +407,8 @@ class ChannelUrlTests(unittest.TestCase):
         adapter.profile_posts.return_value = ("Creator", [])
         with patch("haizflow.services.douyin_adapter.get_douyin_adapter", return_value=adapter):
             inspect_douyin_profile({"url": "https://www.douyin.com/user/creator-id", "limit": 20})
-        adapter.profile_posts.assert_called_once_with("https://www.douyin.com/user/creator-id", limit=20)
+        adapter.profile_posts.assert_called_once_with("https://www.douyin.com/user/creator-id", limit=20,
+                                                      count_videos=True)
 
 
 class ChannelScanTests(unittest.TestCase):

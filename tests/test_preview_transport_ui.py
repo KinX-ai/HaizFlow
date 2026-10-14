@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 
-from PySide6.QtCore import QMetaObject, QPointF, Qt, QUrl
+from PySide6.QtCore import QMetaObject, QObject, QPointF, Qt, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlComponent, QQmlEngine
 from PySide6.QtQuick import QQuickItem, QQuickWindow
@@ -79,25 +79,41 @@ class PreviewTransportUiTests(unittest.TestCase):
         from PySide6.QtCore import QCoreApplication, QEvent
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
-    def test_single_speed_button_cycles_without_playing_or_changing_position(self):
+    def test_speed_popup_applies_only_on_release_without_playing_or_changing_position(self):
         button = self.child(self.preview, "manualResultSpeedButton")
         self.assertIsNotNone(button)
         self.item.restore(42)
         players = [self.preview.findChild(QMediaPlayer, name)
                    for name in ("manualInputPlayer", "manualResultPlayer")]
         initial_geometry = (button.width(), button.height())
-        for expected in (1.5, 2, .5, 1):
-            point = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()
-            QTest.mouseClick(self.window, Qt.LeftButton, Qt.NoModifier, point)
-            self.app.processEvents()
-            self.assertEqual(self.preview.property("playbackSpeed"), expected)
-            self.assertEqual(button.property("speed"), expected)
-            self.assertEqual((button.width(), button.height()), initial_geometry)
-            self.assertEqual(self.preview.property("positionSeconds"), 42)
-            self.assertFalse(self.preview.property("resultPlaybackRequested"))
-            self.assertFalse(self.preview.property("inputPlaybackRequested"))
-            for player in players:
-                self.assertEqual(player.playbackRate(), expected)
+        point = button.mapToScene(QPointF(button.width() / 2, button.height() / 2)).toPoint()
+        QTest.mouseClick(self.window, Qt.LeftButton, Qt.NoModifier, point)
+        self.app.processEvents()
+        popup = button.findChild(QObject, "previewSpeedPopup")
+        self.assertTrue(popup.property("opened"))
+        self.assertEqual(self.preview.property("playbackSpeed"), 1)
+        slider = button.findChild(QQuickItem, "previewSpeedSlider")
+        origin = slider.mapToScene(QPointF(slider.width() * .2727, slider.height() / 2)).toPoint()
+        target = slider.mapToScene(QPointF(slider.width() * .6, slider.height() / 2)).toPoint()
+        QTest.mousePress(self.window, Qt.LeftButton, Qt.NoModifier, origin)
+        QTest.mouseMove(self.window, target, 20)
+        self.app.processEvents()
+        self.assertTrue(slider.property("pressed"))
+        self.assertEqual(self.preview.property("playbackSpeed"), 1)
+        expected = round(slider.property("value"), 2)
+        self.assertGreater(expected, 1.5)
+        QTest.mouseRelease(self.window, Qt.LeftButton, Qt.NoModifier, target)
+        self.app.processEvents()
+        self.assertAlmostEqual(self.preview.property("playbackSpeed"), expected)
+        self.assertEqual((button.width(), button.height()), initial_geometry)
+        self.assertEqual(self.preview.property("positionSeconds"), 42)
+        self.assertFalse(self.preview.property("resultPlaybackRequested"))
+        self.assertFalse(self.preview.property("inputPlaybackRequested"))
+        for player in players:
+            self.assertAlmostEqual(player.playbackRate(), expected)
+        QTest.mouseClick(self.window, Qt.LeftButton, Qt.NoModifier, point)
+        self.app.processEvents()
+        self.assertFalse(popup.property("opened"))
         self.preview.setProperty("playbackSpeed", 2)
         QMetaObject.invokeMethod(self.preview, "pausePlayback", Qt.DirectConnection)
         self.assertEqual(players[1].playbackRate(), 2)

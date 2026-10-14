@@ -87,6 +87,7 @@ def _voice_checkpoint_signature(video, transcript_state, *, segments=None):
     from haizflow.pipeline.speaker_identity import IDENTITY_VERSION
     from haizflow.pipeline.edge_tts_backend import EDGE_CACHE_VERSION
     from haizflow.pipeline.tts_quality import voice_text_policy_versions
+    from haizflow.core.vieneu_assets import CACHE_VERSION as VIENEU_CACHE_VERSION
 
     speaker_mode = str(getattr(video, "speaker_mode", "single") or "single")
     provider = str(getattr(video, "tts_provider", "omnivoice") or "omnivoice")
@@ -104,7 +105,9 @@ def _voice_checkpoint_signature(video, transcript_state, *, segments=None):
         *((EDGE_CACHE_VERSION,) if provider == "edge" else ()),
         *(tuple(dict.fromkeys(version for item in (segments or []) if isinstance(item, dict)
                              for version in voice_text_policy_versions(str(item.get("text") or ""), language)))
-          if provider != "edge" else ()),
+          if provider.startswith("omnivoice") else ()),
+        *((VIENEU_CACHE_VERSION,)
+          if provider.startswith("vieneu") else ()),
     )
 
 
@@ -896,7 +899,7 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
         reporter.update(82, "creating_voice", "Reusing generated voices", expected_parts, expected_parts)
     else:
         reporter.update(65, "creating_voice", "Starting voice synthesis")
-        if effective_tts_provider == "omnivoice":
+        if effective_tts_provider in {"omnivoice", "vieneu"}:
             # Translation and speech recognition can leave several GB of
             # model weights resident on the GPU. OmniVoice runs in an
             # isolated process, so hand the accelerator over before that
@@ -928,6 +931,9 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
                 reporter.update(65, "creating_voice", f"Identifying speakers {current} of {total}")
             elif stage in {"synthesizing", "completed", "leveling_voice"}:
                 report_voice_progress(current, total)
+            elif stage == 'retrying_short_utterance':
+                reporter.update(65 + round(17 * current / max(1,total)), 'creating_voice',
+                    'Regenerating an invalid speech clip', current, total)
             else:
                 reporter.update(65, "creating_voice", f"Preparing voice: {stage}")
 
@@ -1026,6 +1032,7 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
         os.path.join(video_dir, "temp", "source_segments.json")
     )
     render_signature = _signature(
+        *(["output-speed-v1", video.output_speed] if getattr(video, "output_speed", 1.0) != 1.0 else []),
         timeline_signature,
         subtitle_signature,
         video.output_format,
@@ -1107,11 +1114,12 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
             watermark_italic=getattr(video, "watermark_italic", True),
             encoding_quality=int(preset_settings(getattr(video, "export_preset", "source"))["crf"]),
         )
-        if getattr(video, "export_preset", "source") != "source":
+        if getattr(video, "export_preset", "source") != "source" or getattr(video, "output_speed", 1.0) != 1.0:
             from haizflow.pipeline.sequence_compiler import finish_export_resolution
 
             scaled = str(Path(final_video).with_name("render-quality.mp4"))
-            finish_export_resolution(final_video, scaled, video.export_preset, video_id)
+            finish_export_resolution(final_video, scaled, video.export_preset, video_id,
+                                     output_speed=getattr(video, "output_speed", 1.0))
             os.replace(scaled, final_video)
         _mark_checkpoint(video, "render", render_signature)
 

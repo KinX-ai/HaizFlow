@@ -61,8 +61,8 @@ AppDialog {
         draftSpeakerMode = "single";
         draftProvider = AppController.ttsProvider;
         globalProvider = draftProvider;
-        globalVoice = "omnivoice:clone";
-        refreshVoices("omnivoice:clone");
+        globalVoice = AppController.ttsVoice;
+        refreshVoices(globalVoice);
     }
 
     onClosed: voicePicker.stopPreview()
@@ -107,6 +107,16 @@ AppDialog {
                     return 0;
                 }
                 onActivated: {
+                    if (!AppController.validateTtsProviderForLanguage(AppController.manualVoiceLanguage, currentValue)) {
+                        currentIndex = Qt.binding(function() {
+                            for (let i = 0; i < model.length; ++i) {
+                                if (model[i].provider === root.draftProvider)
+                                    return i;
+                            }
+                            return 0;
+                        });
+                        return;
+                    }
                     root.draftProvider = currentValue;
                     root.draftSpeakerMode = "single";
                     root.refreshVoices(root.draftVoice);
@@ -119,18 +129,6 @@ AppDialog {
                 helpText: qsTr("Nhận diện nhiều người nói chọn giọng thư viện ổn định cho từng người; kết quả có thể cần chỉnh lại. Giọng nhân bản dùng mẫu do bạn cung cấp.")
             }
 
-            Text {
-                Layout.fillWidth: true
-                text: AppController.processingDevice === "gpu" && root.draftProvider === "omnivoice"
-                    ? qsTr("Máy đang dùng GPU. OmniVoice GPU thường xử lý nhanh hơn; bạn vẫn có thể chọn CPU.")
-                    : qsTr("Chế độ CPU: đổi bộ xử lý trong Cài đặt → Chung để sử dụng OmniVoice GPU.")
-                visible: root.draftProvider.indexOf("omnivoice") === 0
-                    && (AppController.processingDevice !== "gpu" || root.draftProvider === "omnivoice")
-                color: Theme.textMuted
-                font.pixelSize: TypeScale.metadata
-                wrapMode: Text.Wrap
-                textFormat: Text.PlainText
-            }
 
             Text {
                 Layout.fillWidth: true
@@ -146,8 +144,8 @@ AppDialog {
                 Layout.fillWidth: true
                 model: root.voiceModel
                 currentValue: root.draftSpeakerMode === "multiple" ? "omnivoice:multiple" : root.draftVoice
-                allowMultipleSpeakers: root.draftProvider.indexOf("omnivoice") === 0
-                allowVoiceClone: root.draftProvider.indexOf("omnivoice") === 0
+                allowMultipleSpeakers: root.draftProvider.indexOf("omnivoice") === 0 || root.draftProvider.indexOf("vieneu") === 0
+                allowVoiceClone: root.draftProvider.indexOf("omnivoice") === 0 || root.draftProvider.indexOf("vieneu") === 0
                 onCloneRequested: root.cloneRequested()
                 previewEnabled: true
                 previewSource: AppController.audioPreviewSource
@@ -160,7 +158,7 @@ AppDialog {
                     AppController.previewVoiceSample(
                         root.draftProvider,
                         voice,
-                        AppController.targetLanguage
+                        AppController.manualVoiceLanguage
                     );
                 }
             }

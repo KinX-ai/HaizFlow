@@ -344,6 +344,7 @@ class ResourcePackManagerTests(unittest.TestCase):
             self.assertEqual(pack_ids, [
                 "model-whisper-small", "model-whisper-turbo",
                 "model-hymt2-cpu", "model-hymt2-gpu", "model-omnivoice",
+                "model-vieneu",
                 "model-demucs-cpu", "model-demucs-gpu", "model-subtitle-ocr",
                 "browser-douyin-chromium",
             ])

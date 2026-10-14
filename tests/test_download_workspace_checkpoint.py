@@ -113,3 +113,152 @@ def test_channel_qml_restores_visible_results_and_switches_forms(tmp_path):
         root.deleteLater()
         _APP.processEvents()
         controller.shutdown()
+
+
+def test_video_link_paste_and_typing_survive_preview_notifications(tmp_path):
+    from PySide6.QtCore import QObject, Qt, QUrl
+    from PySide6.QtQml import QQmlComponent, QQmlEngine, QQmlPropertyMap
+    from PySide6.QtQuick import QQuickWindow
+    from PySide6.QtTest import QTest
+    from haizflow.desktop.douyin_session_controller import DouyinSessionController
+
+    controller = MediaDownloadController()
+    controller.attach_project('a', str(tmp_path / 'first'))
+    engine = QQmlEngine()
+    owner = QQmlPropertyMap()
+    guest = DouyinSessionController()
+    owner.insert('douyinSession', guest)
+    engine.rootContext().setContextProperty('AppController', owner)
+    component = QQmlComponent(engine, QUrl.fromLocalFile(str(
+        Path(__file__).parents[1] / 'src/haizflow/desktop/qml/VideoDownloadPage.qml')))
+    assert component.isReady(), [error.toString() for error in component.errors()]
+    root = component.createWithInitialProperties({'downloader': controller, 'width': 780, 'height': 680})
+    assert root is not None
+    window = QQuickWindow()
+    window.resize(780, 680)
+    root.setParentItem(window.contentItem())
+    window.show()
+    try:
+        _APP.processEvents()
+        fields = [child for child in root.findChildren(QObject) if child.property('accessibleName') == 'Liên kết video']
+        assert fields
+        field = fields[0]
+        field.forceActiveFocus()
+        QTest.keyClick(window, Qt.Key_H)
+        _APP.processEvents()
+        assert field.property('text') == 'h'
+        assert controller.workspaceState['videoUrl'] == 'h'
+        url = 'https://www.youtube.com/watch?v=abcdefghijk'
+        _APP.clipboard().setText(url)
+        QTest.keyClick(window, Qt.Key_A, Qt.ControlModifier)
+        QTest.keyClick(window, Qt.Key_V, Qt.ControlModifier)
+        _APP.processEvents()
+        assert field.property('text') == url
+        assert controller.workspaceState['videoUrl'] == url
+        cursor = field.property('cursorPosition')
+        controller.changed.emit()
+        _APP.processEvents()
+        assert field.property('text') == url and field.property('cursorPosition') == cursor
+        controller.attach_project('b', str(tmp_path / 'second'))
+        _APP.processEvents()
+        assert field.property('text') == ''
+        controller.attach_project('a', str(tmp_path / 'first'))
+        _APP.processEvents()
+        assert field.property('text') == url
+    finally:
+        window.hide()
+        root.setParentItem(None)
+        root.deleteLater()
+        window.deleteLater()
+        _APP.processEvents()
+        controller.shutdown()
+
+
+@pytest.mark.parametrize('ranking', ['newest', 'popular'])
+def test_channel_rescan_uses_edited_limit_without_enter(tmp_path, monkeypatch, ranking):
+    from PySide6.QtCore import QObject, QPoint, Qt, QUrl
+    from PySide6.QtQml import QQmlComponent, QQmlEngine, QQmlPropertyMap
+    from PySide6.QtQuick import QQuickWindow
+    from PySide6.QtTest import QTest
+    from haizflow.desktop.douyin_session_controller import DouyinSessionController
+    from haizflow.schemas.channel_import import ChannelVideoCandidate
+
+    requests = []
+
+    def scan(request, *_args):
+        requests.append((request.limit, request.ranking, request.scan_scope))
+        return 'YouTube', 'Creator', [ChannelVideoCandidate(
+            remote_video_id=str(index), source_url=f'https://www.youtube.com/watch?v={index}',
+            title=f'Video {index}', platform='YouTube', duration_seconds=60)
+            for index in range(request.limit)]
+
+    monkeypatch.setattr('haizflow.desktop.channel_import.scan_channel', scan)
+    controller = MediaDownloadController()
+    controller.attach_project('channel-rescan', str(tmp_path))
+    controller.saveWorkspaceState({'channelUrl': 'https://www.youtube.com/@creator',
+                                   'platform': 'youtube', 'limit': 20,
+                                   'ranking': ranking, 'scanScope': 300})
+    engine = QQmlEngine()
+    owner = QQmlPropertyMap()
+    guest = DouyinSessionController()
+    owner.insert('douyinSession', guest)
+    engine.rootContext().setContextProperty('AppController', owner)
+    component = QQmlComponent(engine, QUrl.fromLocalFile(str(
+        Path(__file__).parents[1] / 'src/haizflow/desktop/qml/ChannelDownloadPage.qml')))
+    assert component.isReady(), [error.toString() for error in component.errors()]
+    root = component.createWithInitialProperties({'downloader': controller, 'width': 1000, 'height': 900})
+    assert root is not None
+    window = QQuickWindow()
+    window.resize(1000, 900)
+    root.setParentItem(window.contentItem())
+    window.show()
+
+    def scan_button():
+        return next(child for child in root.findChildren(QObject)
+                    if child.property('text') in ('Xem trước', 'Quét lại'))
+
+    def click(item):
+        point = item.mapToScene(item.boundingRect().center())
+        QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, QPoint(round(point.x()), round(point.y())))
+
+    def wait_for_count(count):
+        for _ in range(100):
+            _APP.processEvents()
+            if not controller.channelBusy and controller.channelCandidateCount == count:
+                return
+            QTest.qWait(10)
+        assert controller.channelCandidateCount == count
+
+    try:
+        _APP.processEvents()
+        click(scan_button())
+        wait_for_count(20)
+        spin = next(child for child in root.findChildren(QObject)
+                    if child.property('from') == 1 and child.property('to') == 100)
+        input_item = spin.property('contentItem')
+        for limit in (50, 10, 100):
+            input_item.forceActiveFocus()
+            QTest.keyClick(window, Qt.Key_A, Qt.ControlModifier)
+            for digit in str(limit):
+                QTest.keyClick(window, getattr(Qt, f'Key_{digit}'))
+            _APP.processEvents()
+            assert input_item.property('text') == str(limit)
+            assert controller.workspaceState['limit'] == limit
+            click(scan_button())  # Do not press Enter to commit the edited number.
+            wait_for_count(limit)
+        scope = 300 if ranking == 'popular' else 0
+        assert requests == [(limit, ranking, scope) for limit in (20, 50, 10, 100)]
+        controller.attach_project('other', str(tmp_path / 'other'))
+        _APP.processEvents()
+        assert spin.property('value') == 20
+        controller.attach_project('channel-rescan', str(tmp_path))
+        _APP.processEvents()
+        assert spin.property('value') == 100
+        assert controller.channelCandidateCount == 100
+    finally:
+        window.hide()
+        root.setParentItem(None)
+        root.deleteLater()
+        window.deleteLater()
+        _APP.processEvents()
+        controller.shutdown()

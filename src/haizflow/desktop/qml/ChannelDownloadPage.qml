@@ -17,6 +17,7 @@ Item {
     readonly property bool hasResults: downloader.channelCandidateCount > 0 && root.matchesSource
         && root.downloader.channelPreviewReady
     property string selectedPlatform: "youtube"
+    property bool restoringForm: true
     readonly property var platformOptions: [
         { "label": "YouTube", "value": "youtube", "platform": "youtube" },
         { "label": "TikTok", "value": "tiktok", "platform": "tiktok" },
@@ -32,6 +33,7 @@ Item {
             durationFilter: contentFilter.currentValue, scanScope: scanScope.currentValue});
     }
     function restoreForm() {
+        root.restoringForm = true;
         const form = root.downloader.workspaceState;
         root.selectedPlatform = String(form.platform || "youtube");
         platformSelector.currentIndex = Math.max(0, root.platformOptions.findIndex(function(option) {
@@ -45,6 +47,7 @@ Item {
         scanScope.currentIndex = [100, 300, 1000, 0].indexOf(Number(form.scanScope === undefined ? 300 : form.scanScope));
         if (scanScope.currentIndex < 0) scanScope.currentIndex = 1;
         root.inspectedSource = root.downloader.channelPreviewSource;
+        root.restoringForm = false;
     }
     Component.onCompleted: restoreForm()
     Connections {
@@ -162,7 +165,20 @@ Item {
                             Layout.fillWidth: true
                             spacing: Theme.space4
                             Text { text: qsTr("Số lượng tải"); color: Theme.textMuted; font.pixelSize: Theme.label }
-                            AppSpinBox { id: channelLimit; Layout.fillWidth: true; from: 1; to: 100; value: 20; enabled: !root.channelActive; onValueModified: root.saveForm() }
+                            AppSpinBox {
+                                id: channelLimit
+                                Layout.fillWidth: true
+                                from: 1
+                                to: 100
+                                value: 20
+                                live: true
+                                enabled: !root.channelActive
+                                Accessible.name: qsTr("Số lượng tải")
+                                onValueChanged: {
+                                    if (!root.restoringForm)
+                                        root.saveForm()
+                                }
+                            }
                         }
 
                         ColumnLayout {

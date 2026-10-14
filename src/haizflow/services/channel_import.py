@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import tempfile
 import threading
 import uuid
@@ -524,11 +523,13 @@ def _scan_douyin(
         progress_callback(5, "Reading channel videos")
     budget = request.scan_scope if request.ranking == "popular" else request.limit
     name, rows = get_douyin_adapter(_auth_options(request)).profile_posts(
-        request.url, limit=budget or 1000, cancel_event=cancel_event, progress_callback=progress_callback)
+        request.url, limit=budget or 1000, cancel_event=cancel_event, progress_callback=progress_callback,
+        count_videos=request.ranking == "newest")
     from haizflow.services.douyin_adapter import ProfileCandidates
 
     candidates = ProfileCandidates(ChannelVideoCandidate.model_validate(row) for row in rows)
     candidates.warning = getattr(rows, "warning", "")
+    candidates.scan_progress = getattr(rows, "scan_progress", 0)
     return name, candidates
 
 
@@ -546,12 +547,19 @@ def scan_channel(
     else:
         channel_name, candidates = _scan_with_ytdlp(request, platform, progress_callback, cancel_event)
     warning = getattr(candidates, "warning", "")
+    scan_progress = getattr(candidates, "scan_progress", 0)
     existing = {str(value).lower() for value in existing_remote_keys}
     existing.update(normalize_remote_url(value) for value in existing_remote_keys)
     candidates = [candidate for candidate in candidates if _passes_duration(candidate, request.duration_filter)]
     if request.ranking == "popular":
+        if platform == "Douyin" and candidates and not any((item.view_count or 0) > 0 for item in candidates):
+            if not warning:
+                scan_progress = 100
+            warning = (warning + "\nDouyin chưa cung cấp lượt xem đáng tin cậy; "
+                       "chưa thể xếp danh sách theo lượt xem.").strip()
         candidates.sort(
-            key=lambda item: (item.view_count is not None, item.view_count or -1, item.published_at),
+            key=lambda item: (item.view_count is not None,
+                              item.view_count if item.view_count is not None else -1, item.published_at),
             reverse=True,
         )
     else:
@@ -568,6 +576,15 @@ def scan_channel(
                     reverse=True,
                 )
     candidates = candidates[: request.limit]
+    if platform == "Douyin" and len(candidates) < request.limit:
+        # A real EOF, photos/duration filters and withheld pages can all yield
+        # fewer usable videos. Keep every usable row, with no false completion.
+        summary = f"Tìm thấy {len(candidates)}/{request.limit} video phù hợp."
+        if warning:
+            warning = summary + "\n" + warning
+        else:
+            scan_progress = 100
+            warning = summary + " Danh sách trong phạm vi quét ít hơn số lượng yêu cầu."
     for candidate in candidates:
         key = f"{candidate.platform.lower()}:{candidate.remote_video_id}".lower()
         url_key = normalize_remote_url(candidate.source_url)
@@ -576,11 +593,13 @@ def scan_channel(
         if candidate.duplicate:
             candidate.status = "duplicate"
     if progress_callback:
-        progress_callback(100, f"Found {len(candidates)} videos")
+        progress_callback(scan_progress if warning else 100,
+                          warning or f"Found {len(candidates)} videos")
     if warning:
         from haizflow.services.douyin_adapter import ProfileCandidates
         candidates = ProfileCandidates(candidates)
         candidates.warning = warning
+        candidates.scan_progress = scan_progress
     return platform, channel_name, candidates
 
 
@@ -599,7 +618,8 @@ def download_workspace(project_root: str, session_id: str, remote_video_id: str)
     safe_video_id = "".join(
         character for character in str(remote_video_id) if character.isalnum() or character in {"-", "_"}
     ) or str(uuid.uuid4())
-    path = os.path.join(session_directory(project_root, session_id), "downloads", safe_video_id)
+    path = os.path.join(session_directory(project_root, session_id), "downloads",
+                        f"{safe_video_id}--{uuid.uuid4().hex}")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -607,10 +627,12 @@ def download_workspace(project_root: str, session_id: str, remote_video_id: str)
 def cleanup_channel_workspace(workspace: str) -> None:
     if not workspace:
         return
-    workspace_path = Path(workspace).resolve()
+    workspace_path = Path(os.path.abspath(workspace))
     if workspace_path.parent.name != "downloads":
         return
-    shutil.rmtree(workspace_path, ignore_errors=True)
+    from haizflow.services.temporary_cleanup import discard_tree
+
+    discard_tree(workspace_path)
     try:
         workspace_path.parent.rmdir()
     except OSError:

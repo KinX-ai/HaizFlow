@@ -7,6 +7,7 @@ import os
 from haizflow.desktop.media import thumbnail_source
 from haizflow.schemas.video import CropSettings
 from haizflow.services import project_store, social_publish as tiktok_publish, video_store
+from haizflow.services.subtitle_language import manual_subtitle_language
 
 
 class ProjectWorkspaceController:
@@ -82,12 +83,13 @@ class ProjectWorkspaceController:
             host._target_language, getattr(video, "tts_provider", "omnivoice")
         )
         host._tts_voice = host._normalized_voice_for_language(
-            host._target_language, video.tts_voice, host._tts_provider
+            manual_subtitle_language(video) if host._project_type == "manual" else host._target_language,
+            video.tts_voice, host._tts_provider
         )
         stored_speaker_mode = str(getattr(video, "speaker_mode", "single") or "single")
         host._speaker_mode = (
             "multiple"
-            if host._tts_provider.startswith("omnivoice") and stored_speaker_mode == "multiple"
+            if host._tts_provider.startswith(("omnivoice", "vieneu")) and stored_speaker_mode == "multiple"
             else "single"
         )
         if (
@@ -110,6 +112,7 @@ class ProjectWorkspaceController:
             )
         host._enable_audio_separation = video.enable_audio_separation
         host._output_format = video.output_format
+        host._output_speed = getattr(video, "output_speed", 1.0)
         host._original_volume = video.original_video_volume
         host._background_music_volume = getattr(video, "background_music_volume", 30)
         host._background_music_loop = getattr(video, "background_music_loop", True)
@@ -187,6 +190,7 @@ class ProjectWorkspaceController:
         host.speakerModeChanged.emit()
         host.enableAudioSeparationChanged.emit()
         host.outputFormatChanged.emit()
+        host.outputSpeedChanged.emit()
         host.originalVolumeChanged.emit()
         host.backgroundMusicVolumeChanged.emit()
         host.audioMixOptionsChanged.emit()
@@ -333,11 +337,22 @@ class ProjectWorkspaceController:
         host = self._host
         changed = []
         affected_project_keys = set()
+        export_only_selected = False
         for video_id in video_ids:
             previous = host._catalog_videos.get(video_id)
             current = video_store.get_video(video_id)
             if previous is None or current is None:
                 return False
+            if video_id == host._selected_video_id and getattr(current, "project_type", "") == "manual":
+                def preview_fields(video):
+                    values = video.model_dump()
+                    for field in ("output_speed", "updated_at"):
+                        values.pop(field, None)
+                    values["active_artifacts"] = {key: value for key, value in
+                        dict(values.get("active_artifacts") or {}).items() if key != "export"}
+                    return values
+                export_only_selected = (previous.output_speed != current.output_speed
+                                        and preview_fields(previous) == preview_fields(current))
             host._catalog_videos[video_id] = current
             changed.append(current)
             affected_project_keys.add(host._video_project_key(previous))
@@ -370,6 +385,9 @@ class ProjectWorkspaceController:
                 return False
 
         if host._selected_video_id in video_ids:
-            host._selected_video_snapshot = None
-            host.selectedVideoChanged.emit()
+            if export_only_selected:
+                host._selected_video_snapshot = host._catalog_videos[host._selected_video_id]
+            else:
+                host._selected_video_snapshot = None
+                host.selectedVideoChanged.emit()
         return True

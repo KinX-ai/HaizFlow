@@ -66,7 +66,7 @@ def test_popular_pagination_waits_and_retries_with_the_same_working_identity():
     post = detail()["aweme_detail"]
     page = {"aweme_list": [post], "has_more": 1, "max_cursor": 42}
     final = {"aweme_list": [{**post, "aweme_id": "7683481325270177899"}], "has_more": 0, "max_cursor": 50}
-    adapter, transport = adapter_with(response(page), response({"status_code": 0}), response(final))
+    adapter, transport = adapter_with(response(page), response(status=429), response(final))
     adapter.session.native_verified = True
     adapter.session.browser = Mock()
     with patch("haizflow.services.video_download._wait_for_retry") as wait:
@@ -79,14 +79,15 @@ def test_popular_pagination_waits_and_retries_with_the_same_working_identity():
 
 def test_continuation_throttle_keeps_pages_and_reports_incomplete_scan():
     page = {"aweme_list": [detail()["aweme_detail"]], "has_more": 1, "max_cursor": 42}
-    adapter, transport = adapter_with(response(page), *(response({"status_code": 0}) for _ in range(3)))
+    adapter, transport = adapter_with(response(page), *(response(status=429) for _ in range(9)))
     adapter.session.native_verified = True
     adapter.session.browser = Mock()
     adapter._status_callback = Mock()
     _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=2)
     assert len(rows) == 1 and "1/2" in rows.warning
     assert adapter.session.ready and adapter.session.generation == 1
-    assert len(transport.calls) == 4
+    assert len(transport.calls) == 10
+    assert rows.scan_progress < 100 and "Quét chưa hoàn tất" in rows.warning
     assert not any(call.args == ("Douyin session needs refresh",) for call in adapter._status_callback.call_args_list)
 
 
@@ -94,7 +95,7 @@ def test_popular_scan_resumes_throttled_cursor_without_repeating_first_page():
     post = detail()["aweme_detail"]
     first = {"aweme_list": [post], "has_more": 1, "max_cursor": 42}
     final = {"aweme_list": [{**post, "aweme_id": "7683481325270177899"}], "has_more": 0, "max_cursor": 50}
-    adapter, transport = adapter_with(response(first), *[response({"status_code": 0})] * 3, response(final))
+    adapter, transport = adapter_with(response(first), *[response(status=429)] * 9, response(final))
     adapter.session.native_verified = True
     adapter.session.browser = Mock()
     _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
@@ -102,8 +103,123 @@ def test_popular_scan_resumes_throttled_cursor_without_repeating_first_page():
     _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
     assert len(rows) == 2 and not getattr(rows, "warning", "")
     assert parse_qs(urlsplit(transport.calls[-1][0]).query)["max_cursor"] == ["42"]
-    assert len(transport.calls) == 5
+    assert len(transport.calls) == 11
     adapter.session.browser.open.assert_not_called()
+
+
+def test_scan_recovers_after_cooldown_and_ranks_fifty_across_all_pages():
+    from haizflow.schemas.channel_import import ChannelImportRequest
+    from haizflow.services.channel_import import scan_channel
+
+    post = detail()["aweme_detail"]
+
+    def page(start, count, cursor, more):
+        return response({"aweme_list": [
+            {**post, "aweme_id": str(1000 + index), "statistics": {"play_count": index}}
+            for index in range(start, start + count)
+        ], "has_more": more, "max_cursor": cursor})
+
+    adapter, transport = adapter_with(
+        page(0, 22, 42, 1), *[response(status=429)] * 3,
+        page(22, 20, 84, 1), page(42, 20, 126, 1), page(62, 8, 140, 0),
+    )
+    adapter.session.native_verified = True
+    adapter.session.browser = Mock()
+    request = ChannelImportRequest(url="https://www.douyin.com/user/public-user",
+                                   platform="douyin", ranking="popular", limit=50,
+                                   scan_scope=300, duration_filter="all")
+    progress = Mock()
+    with patch("haizflow.services.douyin_adapter.get_douyin_adapter", return_value=adapter), \
+         patch("haizflow.services.video_download._wait_for_retry") as wait:
+        _, _, rows = scan_channel(request, progress_callback=progress)
+    assert len(rows) == 50 and not getattr(rows, "warning", "")
+    assert [row.view_count for row in rows] == list(range(69, 19, -1))
+    cursors = [parse_qs(urlsplit(call[0]).query)["max_cursor"][0] for call in transport.calls]
+    assert cursors == ["0", "42", "42", "42", "42", "84", "126"]
+    assert any(29 <= call.args[1] <= 30 for call in wait.call_args_list)
+    assert any("tự động quét tiếp" in call.args[1] for call in progress.call_args_list)
+    assert progress.call_args.args == (100, "Found 50 videos")
+    assert adapter.session.generation == 1
+    adapter.session.browser.sign.assert_not_called()
+
+
+def test_recovery_budget_is_shared_across_pages_not_reset_after_success():
+    post = detail()["aweme_detail"]
+    first = response({"aweme_list": [post], "has_more": 1, "max_cursor": 42})
+    second = response({"aweme_list": [{**post, "aweme_id": "other"}], "has_more": 1, "max_cursor": 84})
+    risk = response(status=429)
+    adapter, transport = adapter_with(first, *[risk] * 3, second, *[risk] * 6)
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
+    assert len(rows) == 2 and rows.warning
+    assert len(transport.calls) == 11
+
+
+def test_second_cooldown_can_recover_the_same_cursor():
+    post = detail()["aweme_detail"]
+    first = response({"aweme_list": [post], "has_more": 1, "max_cursor": 42})
+    final = response({"aweme_list": [{**post, "aweme_id": "other"}], "has_more": 0, "max_cursor": 84})
+    adapter, transport = adapter_with(first, *[response(status=429)] * 6, final)
+    with patch("haizflow.services.video_download._wait_for_retry") as wait:
+        _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
+    assert len(rows) == 2 and not getattr(rows, "warning", "")
+    assert any(59 <= call.args[1] <= 60 for call in wait.call_args_list)
+    assert [parse_qs(urlsplit(call[0]).query)["max_cursor"][0] for call in transport.calls] == ["0"] + ["42"] * 7
+
+
+def test_cancel_during_throttle_cooldown_keeps_cursor_for_rescan():
+    post = detail()["aweme_detail"]
+    first = response({"aweme_list": [post], "has_more": 1, "max_cursor": 42})
+    final = response({"aweme_list": [{**post, "aweme_id": "other"}], "has_more": 0, "max_cursor": 84})
+    adapter, transport = adapter_with(first, *[response(status=429)] * 3, final)
+    cancel = threading.Event()
+
+    def wait(event, delay):
+        if delay > 20:
+            cancel.set()
+            raise DownloadCancelled("stopped")
+
+    with patch("haizflow.services.video_download._wait_for_retry", side_effect=wait):
+        with pytest.raises(DownloadCancelled):
+            adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100, cancel_event=cancel)
+    assert len(transport.calls) == 4
+    cancel.clear()
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100, cancel_event=cancel)
+    assert len(rows) == 2 and not getattr(rows, "warning", "")
+    assert parse_qs(urlsplit(transport.calls[-1][0]).query)["max_cursor"] == ["42"]
+
+
+def test_challenge_does_not_enter_automatic_cooldown_recovery():
+    first = response({"aweme_list": [detail()["aweme_detail"]], "has_more": 1, "max_cursor": 42})
+    adapter, transport = adapter_with(first, response(body=b"<html>captcha</html>"))
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
+    assert len(rows) == 1 and "yêu cầu xác minh" in rows.warning
+    assert len(transport.calls) == 2 and rows.scan_progress < 100
+
+
+@pytest.mark.parametrize("outcome", [Outcome.CHALLENGE, Outcome.SIGNATURE, Outcome.UNAVAILABLE,
+                                     Outcome.UPSTREAM, Outcome.METADATA])
+def test_terminal_continuation_errors_keep_all_verified_rows(outcome):
+    adapter, _ = adapter_with()
+    page = {"aweme_list": [detail()["aweme_detail"]], "has_more": 1, "max_cursor": 42}
+    with patch.object(adapter, "_api", side_effect=[page, DouyinError(outcome)]) as api:
+        _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
+    assert api.call_count == 2 and len(rows) == 1
+    assert "Quét chưa hoàn tất" in rows.warning and "vẫn có thể tải" in rows.warning
+
+
+def test_invalid_cursor_keeps_newly_received_rows_without_looping_or_false_eof():
+    page = {"aweme_list": [detail()["aweme_detail"]], "has_more": 1, "max_cursor": 0}
+    adapter, transport = adapter_with(response(page))
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
+    assert len(rows) == 1 and len(transport.calls) == 1
+    assert "phân trang" in rows.warning
+    assert not adapter._profile_pages[("public-user", 1)]["complete"]
+
+
+def test_valid_empty_profile_is_a_zero_result_not_an_exception():
+    adapter, _ = adapter_with(response({"aweme_list": [], "has_more": 0, "max_cursor": 0}))
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=50)
+    assert rows == []
 
 
 def test_cancel_during_pagination_wait_makes_no_next_request():
@@ -113,6 +229,29 @@ def test_cancel_during_pagination_wait_makes_no_next_request():
         with pytest.raises(DownloadCancelled):
             adapter.profile_posts("https://www.douyin.com/user/public-user", limit=2)
     assert len(transport.calls) == 1 and adapter.session.ready
+
+
+def test_bare_continuation_response_retries_briefly_without_long_cooldowns_or_false_eof():
+    page = {"aweme_list": [detail()["aweme_detail"]], "has_more": 1, "max_cursor": 42}
+    adapter, transport = adapter_with(response(page), *[response({"status_code": 0})] * 3)
+    with patch("haizflow.services.video_download._wait_for_retry") as wait:
+        _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=300)
+    assert len(transport.calls) == 4 and len(rows) == 1
+    assert "không trả trang tiếp theo" in rows.warning and rows.scan_progress < 100
+    assert [call.args[1] for call in wait.call_args_list] == [3.0, 1.0, 2.0]
+    assert adapter.session.ready
+    assert not adapter._profile_pages[("public-user", 1)]["complete"]
+
+
+def test_transient_bare_continuation_can_recover_without_new_identity():
+    post = detail()["aweme_detail"]
+    first = response({"aweme_list": [post], "has_more": 1, "max_cursor": 42})
+    final = response({"aweme_list": [{**post, "aweme_id": "second"}], "has_more": 0, "max_cursor": 84})
+    adapter, transport = adapter_with(first, response({"status_code": 0}), final)
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/public-user", limit=100)
+    assert len(rows) == 2 and not getattr(rows, "warning", "")
+    assert adapter.session.generation == 1
+    assert [parse_qs(urlsplit(call[0]).query)["max_cursor"][0] for call in transport.calls] == ["0", "42", "42"]
 
 
 @pytest.fixture(autouse=True)
@@ -495,6 +634,76 @@ def test_channel_scan_respects_budget_when_upstream_ignores_count():
     adapter, transport = adapter_with(response({"aweme_list": posts, "has_more": 1, "max_cursor": 99}))
     _, videos = adapter.profile_posts("https://www.douyin.com/user/creator", limit=2)
     assert len(videos) == 2 and len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("limit", [50, 100])
+def test_newest_scan_can_fill_fifty_or_hundred_using_stable_forty_post_pages(limit):
+    post = detail()["aweme_detail"]
+    replies = [response({"aweme_list": [{**post, "aweme_id": str(index)}
+                for index in range(start, min(start+40, limit))],
+                "has_more": int(start+40 < limit), "max_cursor": start+40})
+               for start in range(0, limit, 40)]
+    adapter, transport = adapter_with(*replies)
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/creator", limit=limit)
+    assert len(rows) == limit and not getattr(rows, "warning", "")
+    assert all(parse_qs(urlsplit(call[0]).query)["count"] == ["40"] for call in transport.calls)
+
+
+def test_increasing_scan_from_twenty_restarts_with_larger_page_size_not_old_cursor():
+    post = detail()["aweme_detail"]
+    page20 = response({"aweme_list": [{**post, "aweme_id": str(index)} for index in range(20)],
+                       "has_more": 1, "max_cursor": 20})
+    page40 = response({"aweme_list": [{**post, "aweme_id": str(index)} for index in range(40)],
+                       "has_more": 1, "max_cursor": 40})
+    final = response({"aweme_list": [{**post, "aweme_id": str(index)} for index in range(40, 50)],
+                      "has_more": 0, "max_cursor": 50})
+    adapter, transport = adapter_with(page20, page40, final)
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/creator", limit=20)
+    assert len(rows) == 20
+    _, rows = adapter.profile_posts("https://www.douyin.com/user/creator", limit=50)
+    assert len(rows) == 50
+    values = [parse_qs(urlsplit(call[0]).query) for call in transport.calls]
+    assert [(value["max_cursor"][0], value["count"][0]) for value in values] == [("0", "20"), ("0", "40"), ("40", "40")]
+
+
+def test_newest_counts_usable_videos_not_photos_or_repeated_posts():
+    post = detail()["aweme_detail"]
+    first = response({"aweme_list": [{**post, "aweme_id": f'photo-{i}', "images": [1]} for i in range(18)]
+        + [{**post, "aweme_id": str(i)} for i in range(22)], "has_more": 1, "max_cursor": 40})
+    second = response({"aweme_list": [{**post, "aweme_id": str(i)} for i in range(22,50)]
+        + [{**post, "aweme_id": str(i)} for i in range(12)], "has_more": 0, "max_cursor": 80})
+    adapter, transport = adapter_with(first, second)
+    _, rows = adapter.profile_posts('https://www.douyin.com/user/creator', limit=50, count_videos=True)
+    assert len(rows) == 50 and len({row['remote_video_id'] for row in rows}) == 50
+    assert len(transport.calls) == 2 and not getattr(rows, 'warning', '')
+
+
+def test_newest_fifty_to_hundred_reuses_full_pages_without_skipping_unused_rows():
+    from haizflow.schemas.channel_import import ChannelImportRequest
+    from haizflow.services.channel_import import scan_channel
+    post = detail()['aweme_detail']
+    replies = [response({'aweme_list': [{**post, 'aweme_id': str(i)} for i in range(start,start+40)],
+                         'has_more': int(start < 80), 'max_cursor': start+40}) for start in (0,40,80)]
+    adapter, transport = adapter_with(*replies)
+    with patch('haizflow.services.douyin_adapter.get_douyin_adapter', return_value=adapter):
+        request = ChannelImportRequest(url='https://www.douyin.com/user/creator', platform='douyin',
+                                       ranking='newest', limit=50, duration_filter='all')
+        _, _, rows = scan_channel(request)
+        assert len(rows) == 50
+        request.limit = 100
+        _, _, rows = scan_channel(request)
+        assert len(rows) == 100 and {row.remote_video_id for row in rows} == {str(i) for i in range(100)}
+    assert [parse_qs(urlsplit(call[0]).query)['max_cursor'][0] for call in transport.calls] == ['0','40','80']
+
+
+def test_newest_empty_photo_pages_still_have_a_hard_raw_post_budget():
+    photo = {**detail()['aweme_detail'], 'images': [1]}
+    replies = [response({'aweme_list': [{**photo, 'aweme_id': str(i)} for i in range(start,start+40)],
+                         'has_more': 1, 'max_cursor': start+40}) for start in range(0,1000,40)]
+    adapter, transport = adapter_with(*replies)
+    _, rows = adapter.profile_posts('https://www.douyin.com/user/creator', limit=100, count_videos=True)
+    assert not rows and 'giới hạn quét an toàn' in rows.warning
+    assert len(transport.calls) == 25
 
 
 def test_sdk_signed_url_is_sent_unchanged_with_scoped_browser_state(caplog):

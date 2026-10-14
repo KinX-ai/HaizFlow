@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
@@ -9,10 +10,7 @@ AppDialog {
 
     property string importMode: "single"
     property string inspectedText: ""
-    // Python's generated qmltypes omit the constant flag; the importer is stable.
-    // qmllint disable stale-property-read
     readonly property var importer: AppController.urlImporter
-    // qmllint enable stale-property-read
     readonly property bool inspectedLinkMatches: inspectedText.length > 0 && inspectedText === videoUrl.text.trim()
     readonly property bool hasMetadata: inspectedLinkMatches && importer.title.length > 0
     readonly property bool hasStatus: inspectedLinkMatches && importer.status.length > 0
@@ -42,8 +40,8 @@ AppDialog {
     }
 
     onOpened: {
-        videoUrl.clear()
-        inspectedText = ""
+        videoUrl.text = importer.busy ? importer.url : ""
+        inspectedText = importer.busy ? importer.url : ""
         videoUrl.forceActiveFocus()
     }
 

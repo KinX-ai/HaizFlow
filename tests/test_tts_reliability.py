@@ -81,7 +81,10 @@ class TtsReliabilityTests(unittest.TestCase):
 
     def test_legacy_provider_aliases_migrate_to_omnivoice(self):
         self.assertEqual(tts.resolve_tts_provider("auto", "vi"), "omnivoice")
-        self.assertEqual(tts.resolve_tts_provider("vieneu", "en"), "omnivoice")
+        self.assertEqual(tts.resolve_tts_provider("vieneu", "vi"), "vieneu")
+        self.assertEqual(tts.resolve_tts_provider("vieneu", "en"), "vieneu")
+        with self.assertRaises(ValueError):
+            tts.resolve_tts_provider("vieneu", "zh")
         self.assertEqual(tts.resolve_tts_provider("edge", "vi"), "edge")
         self.assertEqual(tts.resolve_tts_provider("omnivoice", "ja"), "omnivoice")
 
