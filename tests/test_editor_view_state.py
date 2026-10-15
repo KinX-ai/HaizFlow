@@ -34,7 +34,8 @@ def test_ocr_restore_updates_snapshot_before_notifying_ui(monkeypatch):
     restored = SimpleNamespace(video_id="a", original_subtitle_region_override={})
     host = SimpleNamespace(_selected_video=lambda: old,
         _processing_queue=SimpleNamespace(contains=lambda _: False),
-        _selected_video_snapshot=old, selectedVideoChanged=SimpleNamespace(emit=Mock()))
+        _selected_video_snapshot=old, selectedVideoChanged=SimpleNamespace(emit=Mock()),
+        subtitleSettingsChanged=SimpleNamespace(emit=Mock()))
     monkeypatch.setattr("haizflow.desktop.qml_controller.video_store.update_video", lambda *_a, **_kw: restored)
     def assert_updated():
         assert host._selected_video_snapshot.original_subtitle_region_override == {}

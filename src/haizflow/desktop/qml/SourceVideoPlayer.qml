@@ -18,6 +18,13 @@ Item {
     property bool priming: false
     property bool sourceDetached: false
     property real primePosition: 0
+    property bool showFullscreen: true
+    readonly property rect frameRect: inlineFrameReady ? inlineOutput.contentRect
+        : Qt.rect((inlineThumbnail.width - inlineThumbnail.paintedWidth) / 2,
+                  (inlineThumbnail.height - inlineThumbnail.paintedHeight) / 2,
+                  inlineThumbnail.paintedWidth, inlineThumbnail.paintedHeight)
+    readonly property rect videoRect: Qt.rect(inlineOutput.x + frameRect.x,
+        inlineOutput.y + frameRect.y, frameRect.width, frameRect.height)
     readonly property bool hasSource: String(source || "").length > 0
     readonly property bool playing: player.playbackState === MediaPlayer.PlayingState && !priming
 
@@ -132,6 +139,7 @@ Item {
         }
 
         Image {
+            id: inlineThumbnail
             anchors.fill: inlineOutput
             source: root.thumbnailSource
             sourceSize.width: 960
@@ -149,6 +157,7 @@ Item {
             position: Number(player.position || 0) / 1000
             duration: Math.max(1, Number(player.duration || 0) / 1000)
             playing: root.playing
+            showFullscreen: root.showFullscreen
             onPlaybackToggled: root.togglePlayback()
             onScrubStarted: function(position) { root.beginScrub(position); }
             onScrubbed: function(position) { root.updateScrub(position); }

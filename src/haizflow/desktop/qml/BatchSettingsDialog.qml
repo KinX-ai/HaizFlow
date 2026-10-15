@@ -31,6 +31,7 @@ FloatingToolDialog {
     property string draftBackgroundMusicPath: ""
     property bool draftRemoveOriginalSubtitles: true
     property string draftOriginalSubtitleRemovalMode: "patch"
+    property var draftOriginalSubtitleRegion: ({})
     property int draftSubtitleFontSize: 60
     property int draftSubtitlePositionX: 51
     property int draftSubtitlePositionY: 96
@@ -154,6 +155,7 @@ FloatingToolDialog {
         draftBackgroundMusicPath = settings.backgroundMusicPath || ""
         draftRemoveOriginalSubtitles = settings.removeOriginalSubtitles !== false
         draftOriginalSubtitleRemovalMode = settings.originalSubtitleRemovalMode || "patch"
+        draftOriginalSubtitleRegion = Object.assign({}, settings.originalSubtitleRegion || ({}));
         const style = settings.subtitleStyle || ({})
         draftSubtitleFontSize = Number(style.font_size !== undefined ? style.font_size : 60)
         draftSubtitlePositionX = Number(style.position_x_percent !== undefined ? style.position_x_percent : 51)
@@ -201,6 +203,7 @@ FloatingToolDialog {
             "watermarkItalic": draftWatermarkItalic,
             "removeOriginalSubtitles": draftRemoveOriginalSubtitles,
             "originalSubtitleRemovalMode": draftOriginalSubtitleRemovalMode,
+            "originalSubtitleRegion": draftOriginalSubtitleRegion,
             "subtitleStyle": Object.assign({}, draftSubtitleStyle, {
                 "font_size": draftSubtitleFontSize,
                 "margin_bottom": draftSubtitleMarginBottom,
@@ -393,6 +396,9 @@ FloatingToolDialog {
                 onSpeakerModeEdited: function(value) { root.draftSpeakerMode = value }
                 onRemoveOriginalSubtitlesEdited: function(value) { root.draftRemoveOriginalSubtitles = value }
                 onSubtitleRemovalModeEdited: function(value) { root.draftOriginalSubtitleRemovalMode = value }
+                onSourceCoverRequested: batchSourceCoverDialogLoader.invoke("openForSource", [
+                    AppController.sourceCoverPreviewMedia(String(root.previewSource.videoId || "")),
+                    root.draftOriginalSubtitleRegion])
                 onSubtitleLayoutRequested: batchSubtitlePreviewDialogLoader.invoke("openWithLayout", [
                     root.draftSubtitleFontSize, root.draftSubtitlePositionX, root.draftSubtitlePositionY,
                     root.draftSubtitleBoxWidth, root.draftSubtitleBoxHeight])
@@ -431,6 +437,27 @@ FloatingToolDialog {
                 variant: "primary"
                 enabled: !AppController.isBatchRunning
                 onClicked: if (root.saveDraft()) root.close()
+            }
+        }
+    }
+
+    LazyDialogLoader {
+        id: batchSourceCoverDialogLoader
+        sourceComponent: Component {
+            SourceCoverDialog {
+                selectedOwner: false
+                toolSubtitle: root.previewSource.fileName || ""
+                saveHandler: function(region) {
+                    if (!root.visible || root.openedProjectKey !== AppController.projectKey || AppController.isBatchRunning)
+                        return false;
+                    root.draftOriginalSubtitleRegion = Object.assign({}, region);
+                    return true;
+                }
+                onClosed: batchSourceCoverDialogLoader.release()
+                Connections {
+                    target: root
+                    function onClosed() { batchSourceCoverDialogLoader.release(); }
+                }
             }
         }
     }

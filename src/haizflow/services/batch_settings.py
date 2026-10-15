@@ -26,6 +26,7 @@ FIELDS = {
     "watermarkFontFamily": "watermark_font_family", "watermarkTextColor": "watermark_text_color",
     "watermarkBold": "watermark_bold", "watermarkItalic": "watermark_italic",
     "removeOriginalSubtitles": "remove_original_subtitles", "originalSubtitleRemovalMode": "original_subtitle_removal_mode",
+    "originalSubtitleRegion": "original_subtitle_region_override",
 }
 ASSETS = {"backgroundMusicPath": "background_music", "voiceReferencePath": "voice_reference",
           "watermarkImagePath": "watermark_image", "watermarkVideoPath": "watermark_video"}
@@ -119,7 +120,9 @@ def stable_values(project_key: str, initial: dict, videos: list) -> dict:
         return initial
     saved = record.get("batch_settings", {}).get("values")
     if isinstance(saved, dict):
-        return {**initial, **saved}
+        # Older shared defaults predate hand-drawn cover regions. An individual
+        # video's region must not silently become the shared batch default.
+        return {**initial, "originalSubtitleRegion": {}, **saved}
     if videos:
         maps = [values_for(video) for video in videos]
         signatures = [json.dumps({key: asset_identity(value) if key in ASSETS else value

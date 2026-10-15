@@ -240,6 +240,28 @@ class ManualArtifactTests(unittest.TestCase):
         self.assertEqual(stored["outputs"], {})
         self.assertIsNone(manual_artifacts.resolve("manual-video", "translation", "failed-signature"))
 
+    def test_failed_attempt_does_not_poison_an_existing_complete_result(self):
+        record = self.publish_text('complete-before-error', '[]')
+        manual_artifacts.record_error('manual-video', 'translation', 'complete-before-error', 'Gemini HTTP 503')
+        assert manual_artifacts.resolve('manual-video', 'translation', 'complete-before-error')
+        assert Path(record['resolved_outputs']['segments']).read_text() == '[]'
+        saved = manual_artifacts.load_manifest('manual-video')['artifacts']['translation:complete-before-error']
+        assert saved['last_attempt_error'] == 'Gemini HTTP 503'
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows read-only attribute regression')
+    def test_readonly_cache_file_is_not_misreported_as_persistent_preview_lock(self):
+        import stat
+        record = self.publish_text('readonly-old', '[]')
+        manual_artifacts.deactivate('manual-video', ['translation'])
+        output = Path(record['resolved_outputs']['segments'])
+        output.chmod(stat.S_IREAD)
+        try:
+            manual_artifacts.prune('manual-video', limit_bytes=0)
+            assert not output.exists()
+        finally:
+            if output.exists():
+                output.chmod(stat.S_IWRITE)
+
     def test_republish_replaces_a_corrupted_directory_for_the_same_signature(self):
         record = self.publish_text("same", "[]")
         Path(record["resolved_outputs"]["segments"]).write_text("corrupt", encoding="utf-8")

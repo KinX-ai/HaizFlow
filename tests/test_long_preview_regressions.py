@@ -354,11 +354,12 @@ def test_real_thirty_minute_unicode_source_is_reusable_without_render(tmp_path):
     assert not controller.busy and not controller.error and controller.source
 
 
+@pytest.mark.parametrize("codec", ["hevc", "av1"])
 @pytest.mark.parametrize("pixel_format,allowed", [("yuv420p", True), ("yuv420p10le", False)])
-def test_hevc_native_preview_accepts_sdr_without_unconditionally_converting_long_clip(pixel_format, allowed):
+def test_native_preview_accepts_sdr_without_unconditionally_converting_long_clip(codec, pixel_format, allowed):
     settings = dict(source_path="long-hevc.mp4", output_format="keep_ratio", crop={},
                     remove_original_subtitles=True, ocr_region={})
-    response = SimpleNamespace(stdout=json.dumps({"streams": [{"codec_name": "hevc", "pix_fmt": pixel_format}]}))
+    response = SimpleNamespace(stdout=json.dumps({"streams": [{"codec_name": codec, "pix_fmt": pixel_format}]}))
     with patch("haizflow.desktop.editor_preview_controller.subprocess.run", return_value=response):
         assert EditorPreviewController._can_reuse_native_source(settings, 0) == allowed
 

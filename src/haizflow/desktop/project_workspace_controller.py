@@ -137,6 +137,7 @@ class ProjectWorkspaceController:
         host._watermark_italic = bool(getattr(video, "watermark_italic", True))
         host._remove_original_subtitles = bool(getattr(video, "remove_original_subtitles", True))
         host._original_subtitle_removal_mode = str(getattr(video, "original_subtitle_removal_mode", "patch") or "patch")
+        host._original_subtitle_region_override = dict(getattr(video, "original_subtitle_region_override", {}) or {})
         host._subtitle_style = video.subtitle_style
         host._subtitle_layout_override = bool(getattr(video, "subtitle_layout_override", False))
         stored_crop = getattr(video, "crop", None)

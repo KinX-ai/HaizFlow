@@ -14,7 +14,7 @@ _MANUAL_FIELDS = {
     "translation": {"source_language", "target_language", "speech_recognition_model",
                     "translation_model", "translator_provider", "enable_audio_separation"},
     "recognition": {"source_language", "speech_recognition_model", "enable_audio_separation"},
-    "image": {"remove_original_subtitles", "original_subtitle_removal_mode", "crop", "subtitle_style"},
+    "image": {"remove_original_subtitles", "original_subtitle_removal_mode", "original_subtitle_region_override", "crop", "subtitle_style"},
     "voice": {"target_language", "tts_provider", "tts_voice", "speaker_mode"},
     "subtitle": {"subtitle_style"},
 }
@@ -58,6 +58,8 @@ def can_resume(host, video) -> bool:
     original = getattr(video, "processing_configuration", {}) or {}
     device = str(getattr(host, "_settings_processing_device", "cpu") or "cpu")
     current = configuration_snapshot(video, device)
+    if original and "original_subtitle_region_override" in current["settings"]:
+        original = {**original, "settings": {"original_subtitle_region_override": {}, **original.get("settings", {})}}
     build = getattr(host, "_build_config", None)
     selected = str(getattr(host, "_selected_video_id", "") or "") == video.video_id
     owner = str(getattr(host, "_settings_owner_video_id", video.video_id) or "") == video.video_id

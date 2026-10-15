@@ -130,6 +130,7 @@ class HaizFlowController(QObject):
         "subtitle_layout_override",
         "remove_original_subtitles",
         "original_subtitle_removal_mode",
+        "original_subtitle_region_override",
         "output_format",
         "output_speed",
         "crop",
@@ -289,6 +290,7 @@ class HaizFlowController(QObject):
         self._watermark_italic = True
         self._remove_original_subtitles = True
         self._original_subtitle_removal_mode = "patch"
+        self._original_subtitle_region_override = {}
         self._subtitle_style = SubtitleStyle()
         self._subtitle_layout_override = False
         self._crop_settings = CropSettings()
@@ -1996,6 +1998,10 @@ class HaizFlowController(QObject):
     @Property(str, notify=subtitleSettingsChanged)
     def originalSubtitleRemovalMode(self):
         return self._original_subtitle_removal_mode
+
+    @Property("QVariantMap", notify=subtitleSettingsChanged)
+    def originalSubtitleRegionOverride(self):
+        return dict(getattr(self, "_original_subtitle_region_override", {}) or {})
 
     @originalSubtitleRemovalMode.setter
     def originalSubtitleRemovalMode(self, value):
@@ -3905,6 +3911,58 @@ class HaizFlowController(QObject):
             return {}
         return HaizFlowController._review_preview_media_for(self, video_store.get_video(str(video_id)))
 
+    @Slot(str, result="QVariantMap")
+    def sourceCoverPreviewMedia(self, video_id):
+        requested = str(video_id or "")
+        allowed = {str(self._selected_video_id or ""), *getattr(self, "_batch_video_ids", [])}
+        if not requested or requested not in allowed:
+            return {}
+        video = video_store.get_video(requested)
+        if not video or video.project_key != self._selected_project_key:
+            return {}
+        from haizflow.services import source_cover
+        identity = source_cover.source_key(video)
+        if not identity:
+            return {}
+        return {"videoId": requested, "projectKey": video.project_key, "sourceKey": identity,
+                "videoSource": QUrl.fromLocalFile(os.path.abspath(video.files["video_input"])).toString(),
+                "thumbnailSource": thumbnail_source(video.files.get("thumbnail") or ""),
+                "videoWidth": video.video_width, "videoHeight": video.video_height,
+                "detectedRegion": source_cover.detected_region(video, video_store.get_video_dir(requested))}
+
+    @Slot(str, str, str, "QVariantMap", result=bool)
+    def saveSourceCoverRegion(self, video_id, project_key, source_key, region):
+        # Capture owner/source at open time; a stale dialog cannot edit a new source.
+        from haizflow.services import source_cover
+        from haizflow.services.ocr_regions import normalize_region
+        requested = str(video_id or "")
+        if (not requested or requested != self._selected_video_id
+                or requested != self._settings_owner_video_id
+                or project_key != self._selected_project_key
+                or self._processing_queue.contains(requested) or not self._remove_original_subtitles):
+            return False
+        video = video_store.get_video(requested)
+        if (not video or video.project_type not in {"single", "batch"}
+                or video.project_key != project_key or not source_key
+                or source_cover.source_key(video) != source_key):
+            return False
+        try:
+            normalized = normalize_region(dict(region)) if region else {}
+        except (TypeError, ValueError):
+            return False
+        previous = self._original_subtitle_region_override
+        self._original_subtitle_region_override = normalized
+        try:
+            saved = self.persistVideoSettingsFor(requested)
+        except (OSError, ValueError):
+            saved = False
+        if not saved:
+            self._original_subtitle_region_override = previous
+            return False
+        self.subtitleSettingsChanged.emit()
+        self.previewMediaChanged.emit()
+        return True
+
     @Slot(str, "QVariantMap", bool, result=bool)
     def applyBatchSettingsValues(self, project_key, values, replace_overrides):
         if replace_overrides and self.batchSettingOverrides():
@@ -4903,6 +4961,7 @@ class HaizFlowController(QObject):
         else:
             refreshed = video
         self._remove_original_subtitles = normalized != "keep"
+        self._original_subtitle_region_override = dict(refreshed.original_subtitle_region_override or {})
         if normalized != "keep":
             self._original_subtitle_removal_mode = normalized
         self.subtitleSettingsChanged.emit()
@@ -4998,9 +5057,11 @@ class HaizFlowController(QObject):
             if not updated:
                 return False
             self._selected_video_snapshot = updated
+            self._original_subtitle_region_override = dict(normalized)
         except (OSError, TypeError, ValueError):
             return False
         self.selectedVideoChanged.emit()
+        self.subtitleSettingsChanged.emit()
         return True
 
     @Slot(result=str)
@@ -6612,10 +6673,10 @@ class HaizFlowController(QObject):
         )
 
     def _select_project_summary(self, project) -> bool:
-        if not self._tiktok_publisher.can_switch_project(project["key"]):
+        if project["project_type"] == "publish" and not self._tiktok_publisher.can_switch_project(project["key"]):
             self.appAlertRequested.emit(
                 "Social publishing",
-                "Wait for the active Zernio upload or request to finish before opening another project.",
+                "Wait for the active publishing task to finish before opening another publishing project.",
                 "info",
             )
             return False
@@ -6984,6 +7045,7 @@ class HaizFlowController(QObject):
             "subtitle_layout_override": video.subtitle_layout_override,
             "remove_original_subtitles": video.remove_original_subtitles,
             "original_subtitle_removal_mode": video.original_subtitle_removal_mode,
+            "original_subtitle_region_override": dict(getattr(video, "original_subtitle_region_override", {}) or {}),
             "output_format": video.output_format,
             "output_speed": getattr(video, "output_speed", 1.0),
             "crop": video.crop,
@@ -7220,6 +7282,15 @@ class HaizFlowController(QObject):
     def _build_config(self):
         from haizflow.core.model_choices import project_translation_choice
 
+        selected = (getattr(self, "_selected_video_snapshot", None)
+                    or getattr(self, "_catalog_videos", {}).get(getattr(self, "_selected_video_id", "")))
+        if (selected is not None and selected.video_id == getattr(self, "_selected_video_id", "")
+                and getattr(selected, "project_key", "") == self._selected_project_key):
+            # Project identity is immutable. Re-reading the global index here
+            # migrated/probed every registered project on each option click.
+            project_id = str(getattr(selected, "project_id", "") or "")
+        else:
+            project_id = str((project_store.get_project(self._selected_project_key) or {}).get("project_id") or "")
         manual_subtitle_layout = bool(self._subtitle_layout_override)
         translation_model = project_translation_choice(
             self._translation_model, self._settings_processing_device,
@@ -7240,6 +7311,7 @@ class HaizFlowController(QObject):
             subtitle_layout_override=manual_subtitle_layout,
             remove_original_subtitles=self._remove_original_subtitles,
             original_subtitle_removal_mode=self._original_subtitle_removal_mode,
+            original_subtitle_region_override=dict(getattr(self, "_original_subtitle_region_override", {}) or {}),
             output_format=getattr(self, "_output_format", "keep_ratio"),
             output_speed=getattr(self, "_output_speed", 1.0),
             crop=self._crop_settings,
@@ -7264,7 +7336,7 @@ class HaizFlowController(QObject):
             project_directory=self._project_directory,
             project_type=self._project_type,
             project_key=self._selected_project_key,
-            project_id=str((project_store.get_project(self._selected_project_key) or {}).get("project_id") or ""),
+            project_id=project_id,
         )
 
     def _apply_setup_to_video(self, video, review_approved=None):
@@ -7403,6 +7475,7 @@ class HaizFlowController(QObject):
             "subtitle_layout_override": config.subtitle_layout_override,
             "remove_original_subtitles": config.remove_original_subtitles,
             "original_subtitle_removal_mode": config.original_subtitle_removal_mode,
+            "original_subtitle_region_override": config.original_subtitle_region_override,
             "output_format": config.output_format,
             "output_speed": config.output_speed,
             "crop": config.crop,
@@ -7464,6 +7537,7 @@ class HaizFlowController(QObject):
                     changed("subtitle_style", config.subtitle_style),
                     changed("remove_original_subtitles", config.remove_original_subtitles),
                     changed("original_subtitle_removal_mode", config.original_subtitle_removal_mode),
+                    changed("original_subtitle_region_override", config.original_subtitle_region_override),
                     changed("subtitle_layout_override", config.subtitle_layout_override),
                 )
             ):

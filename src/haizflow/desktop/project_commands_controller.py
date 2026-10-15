@@ -463,7 +463,9 @@ class ProjectCommandsController:
             capabilities = ["recognition", "translation", "voice"]
             if bool(getattr(video, "enable_audio_separation", getattr(host, "_enable_audio_separation", False))):
                 capabilities.append("separation")
-            if bool(getattr(video, "remove_original_subtitles", getattr(host, "_remove_original_subtitles", False))):
+            from haizflow.services.ocr_regions import effective_region
+            if (bool(getattr(video, "remove_original_subtitles", getattr(host, "_remove_original_subtitles", False)))
+                    and not effective_region(video)):
                 capabilities.append("ocr")
             for capability in capabilities:
                 for pack_id in resource_controller.manager.required_packs(capability, context):
@@ -579,6 +581,7 @@ class ProjectCommandsController:
                 "originalSubtitleRemovalMode": str(
                     getattr(host, "_original_subtitle_removal_mode", "patch") or "patch"
                 ),
+                "originalSubtitleRegion": dict(getattr(host, "_original_subtitle_region_override", {}) or {}),
                 "subtitleStyle": {
                     **(getattr(host, "_subtitle_style", None) or SubtitleStyle()).model_dump(),
                     "manual": bool(getattr(host, "_subtitle_layout_override", False)),
@@ -669,6 +672,7 @@ class ProjectCommandsController:
             "watermarkText": str(watermark_text or ""),
             "removeOriginalSubtitles": bool(remove_original_subtitles),
             "originalSubtitleRemovalMode": str(original_subtitle_removal_mode),
+            "originalSubtitleRegion": dict(getattr(baseline_video, "original_subtitle_region_override", {}) or {}),
             "subtitleStyle": dict(subtitle_style_items),
             "backgroundMusicPath": background_music_path,
         }
@@ -1144,6 +1148,7 @@ class ProjectCommandsController:
         host._watermark_text = values["watermarkText"]
         host._remove_original_subtitles = values["removeOriginalSubtitles"]
         host._original_subtitle_removal_mode = values["originalSubtitleRemovalMode"]
+        host._original_subtitle_region_override = dict(values.get("originalSubtitleRegion") or {})
         subtitle_style = dict(values["subtitleStyle"])
         host._subtitle_layout_override = bool(subtitle_style.pop("manual", False))
         host._subtitle_style = SubtitleStyle(**subtitle_style)
@@ -1208,8 +1213,10 @@ class ProjectCommandsController:
                 record(video.video_id, snapshot, snapshot_for(refreshed) if callable(snapshot_for) else {})
         if log_change:
             video_store.log_to_video(video.video_id, "Per-video dubbing settings saved.")
-        host.refreshVideos()
-        host.selectedVideoChanged.emit()
+        update_changed = getattr(host, "_apply_video_metadata_changes", None)
+        if not callable(update_changed) or not update_changed({video.video_id}):
+            host.refreshVideos()
+            host.selectedVideoChanged.emit()
         if video.project_type == "batch":
             host.batchChanged.emit()
         return True

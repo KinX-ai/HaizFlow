@@ -1067,10 +1067,10 @@ class EditorPreviewController:
             ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
                 check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             streams = json.loads(probe.stdout).get("streams", [])
-            # Qt's bundled FFmpeg decoder handles SDR HEVC directly too.
-            # Rejecting it encoded the entire untouched Douyin source before
-            # publishing a preview, even though the source monitor could play it.
-            return bool(streams and streams[0].get("codec_name") in {"h264", "hevc"}
+            # Qt's bundled FFmpeg decoder also handles 8-bit SDR AV1 directly
+            # (Bilibili DASH). The old whitelist unnecessarily encoded a full
+            # 18-minute source before the editor could display its first frame.
+            return bool(streams and streams[0].get("codec_name") in {"h264", "hevc", "av1"}
                         and streams[0].get("pix_fmt") == "yuv420p")
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
             return False

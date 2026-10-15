@@ -82,6 +82,9 @@ InspectorPanel {
             onSpeakerModeEdited: function(value) { AppController.speakerMode = value; root.scheduleVideoSettingsSave() }
             onRemoveOriginalSubtitlesEdited: function(value) { AppController.removeOriginalSubtitles = value; root.scheduleVideoSettingsSave() }
             onSubtitleRemovalModeEdited: function(value) { AppController.originalSubtitleRemovalMode = value; root.scheduleVideoSettingsSave() }
+            onSourceCoverRequested: sourceCoverDialogLoader.invoke("openForSource", [
+                AppController.sourceCoverPreviewMedia(AppController.selectedVideoId),
+                AppController.originalSubtitleRegionOverride])
             onSubtitleLayoutRequested: subtitlePreviewDialogLoader.invoke("openWithLayout", [
                 AppController.subtitleFontSize,
                 AppController.subtitlePositionXPercent,
@@ -166,6 +169,23 @@ InspectorPanel {
                     AppController.subtitleBoxHeightPercent = boxHeight
                     root.scheduleVideoSettingsSave()
                 }
+            }
+        }
+    }
+
+    LazyDialogLoader {
+        id: sourceCoverDialogLoader
+        sourceComponent: Component {
+            SourceCoverDialog {
+                saveHandler: function(region) {
+                    const saved = AppController.saveSourceCoverRegion(media.videoId, media.projectKey, media.sourceKey, region);
+                    if (saved) {
+                        videoSettingsSaveTimer.stop();
+                        root.pendingSettingsVideoId = "";
+                    }
+                    return saved;
+                }
+                onClosed: sourceCoverDialogLoader.release()
             }
         }
     }

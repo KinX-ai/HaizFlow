@@ -725,6 +725,15 @@ def record_error(
         manifest = load_manifest(video_id)
         previous = manifest["artifacts"].get(key) or {}
         timestamp = _now()
+        if previous.get("status") == "complete":
+            # A later attempt/dependent stage failed, not the previously
+            # verified result. Keep it usable for preview, undo and retry.
+            # Normal resolve still validates its bytes; do not checksum/read
+            # potentially locked media while handling an unrelated failure.
+            previous["last_attempt_error"] = str(error or "Manual tool failed.")
+            previous["last_attempt_at"] = timestamp
+            _save_manifest(video_id, manifest)
+            return
         manifest["artifacts"][key] = {
             "artifact_id": key,
             "kind": kind,
@@ -741,7 +750,7 @@ def record_error(
         _save_manifest(video_id, manifest)
 
 
-def _active_ids(video_id: str) -> set[str]:
+def _active_ids(video_id: str, *, include_runtime_pins: bool = True) -> set[str]:
     video = video_store.get_video(video_id)
     if not video:
         return set()
@@ -753,12 +762,13 @@ def _active_ids(video_id: str) -> set[str]:
     from haizflow.services.processing_runs import retained_ids
 
     active_ids.update(retained_ids(video_id, video))
-    with _RUNTIME_PINS_GUARD:
-        active_ids.update(
-            artifact_key
-            for (pinned_video_id, _owner), artifact_key in _RUNTIME_PINS.items()
-            if pinned_video_id == str(video_id)
-        )
+    if include_runtime_pins:
+        with _RUNTIME_PINS_GUARD:
+            active_ids.update(
+                artifact_key
+                for (pinned_video_id, _owner), artifact_key in _RUNTIME_PINS.items()
+                if pinned_video_id == str(video_id)
+            )
     # Active manifests depend on immutable child artifacts (for example a TTS
     # manifest references each cached sentence).  Cache maintenance must pin
     # that complete dependency closure, not only the top-level references kept
@@ -824,9 +834,23 @@ def adaptive_global_limit(root: Path, current_bytes: int) -> int:
 
 
 def _remove_inactive_directory(directory: Path) -> bool:
+    def remove_readonly(function, path, error):
+        # WinError 5 caused by a read-only attribute is persistent across app
+        # restarts, unlike a reader lock. Only clear that attribute on the
+        # already ownership-checked tree, never permissions/ACLs elsewhere.
+        info = Path(path).lstat()
+        if (not isinstance(error, PermissionError)
+                or not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY
+                or is_reparse(Path(path))):
+            raise error
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        function(path)
+
     try:
         safe_tree(directory)
-        shutil.rmtree(directory, ignore_errors=True)
+        shutil.rmtree(directory, onexc=remove_readonly)
+        return not directory.exists()
+    except FileNotFoundError:
         return not directory.exists()
     except (OSError, ValueError):
         return False

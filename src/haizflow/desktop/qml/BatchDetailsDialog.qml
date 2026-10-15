@@ -34,6 +34,7 @@ AppDialog {
         case "voiceReferencePath": return qsTr("Giọng nhân bản");
         case "removeOriginalSubtitles": case "originalSubtitles": return qsTr("Che phụ đề");
         case "originalSubtitleRemovalMode": case "subtitleRemovalMode": return qsTr("Cách che phụ đề");
+        case "originalSubtitleRegion": return qsTr("Vùng che phụ đề gốc");
         case "subtitleStyle": case "subtitleLayout": return qsTr("Kiểu và vị trí phụ đề");
         case "outputSpeed": return qsTr("Tốc độ đầu ra");
         case "watermarkText": return qsTr("Nội dung watermark");

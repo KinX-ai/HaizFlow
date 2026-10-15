@@ -934,6 +934,7 @@ Module {
             notify: "subtitleSettingsChanged"
             index: 68
         }
+        Property { name: "originalSubtitleRegionOverride"; type: "QVariantMap"; read: "originalSubtitleRegionOverride"; notify: "subtitleSettingsChanged"; isReadonly: true }
         Property { name: "subtitleFontFamily"; type: "QString"; read: "subtitleFontFamily"; write: "subtitleFontFamily"; notify: "subtitleSettingsChanged" }
         Property { name: "subtitleTextColor"; type: "QString"; read: "subtitleTextColor"; write: "subtitleTextColor"; notify: "subtitleSettingsChanged" }
         Property { name: "subtitleKaraokeColor"; type: "QString"; read: "subtitleKaraokeColor"; write: "subtitleKaraokeColor"; notify: "subtitleSettingsChanged" }
@@ -1996,6 +1997,17 @@ Module {
         Method {
             name: "batchPreviewMedia"; type: "QVariantMap"
             Parameter { name: "video_id"; type: "QString" }
+        }
+        Method {
+            name: "sourceCoverPreviewMedia"; type: "QVariantMap"
+            Parameter { name: "video_id"; type: "QString" }
+        }
+        Method {
+            name: "saveSourceCoverRegion"; type: "bool"
+            Parameter { name: "video_id"; type: "QString" }
+            Parameter { name: "project_key"; type: "QString" }
+            Parameter { name: "source_key"; type: "QString" }
+            Parameter { name: "region"; type: "QVariantMap" }
         }
         Method { name: "batchSettingOverrides"; type: "QVariantList" }
         Method { name: "applyBatchSettings"; type: "bool" }

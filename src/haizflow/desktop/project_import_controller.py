@@ -1229,6 +1229,7 @@ class ProjectImportController:
             "_watermark_italic": True,
             "_remove_original_subtitles": True,
             "_original_subtitle_removal_mode": "patch",
+            "_original_subtitle_region_override": {},
             "_subtitle_style": SubtitleStyle(),
             "_subtitle_layout_override": False,
             "_background_music_path": "",
@@ -1263,6 +1264,7 @@ class ProjectImportController:
             "_watermark_italic": "watermarkStyleChanged",
             "_remove_original_subtitles": "subtitleSettingsChanged",
             "_original_subtitle_removal_mode": "subtitleSettingsChanged",
+            "_original_subtitle_region_override": "subtitleSettingsChanged",
             "_subtitle_style": "subtitleSettingsChanged",
             "_subtitle_layout_override": "subtitleSettingsChanged",
             "_background_music_path": "backgroundMusicChanged",
@@ -1310,12 +1312,12 @@ class ProjectImportController:
                 "Wait for the current channel task to finish or cancel it before creating another download project.",
             )
             return False
-        if publisher is not None and not publisher.can_switch_project("__new_project__"):
+        if normalized_type == "publish" and publisher is not None and not publisher.can_switch_project("__new_project__"):
             QMessageBox.information(
                 None,
                 "Social publishing",
                 "Wait for the current Zernio or publishing-project import task to finish "
-                "before creating another project.",
+                "before creating another publishing project.",
             )
             return False
         previous_video_id = str(getattr(host, "_selected_video_id", "") or "")

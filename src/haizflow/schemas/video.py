@@ -91,6 +91,7 @@ class VideoConfig(BaseModel):
     subtitle_layout_override: bool = False
     remove_original_subtitles: bool = True
     original_subtitle_removal_mode: OriginalSubtitleRemovalMode = "patch"
+    original_subtitle_region_override: Dict[str, float] = Field(default_factory=dict)
     output_format: OutputFormat = "keep_ratio"  # The desktop workflow preserves the original aspect ratio.
     output_speed: float = Field(default=1.0, ge=0.25, le=3.0, allow_inf_nan=False)
     crop: CropSettings = Field(default_factory=CropSettings)
@@ -122,6 +123,12 @@ class VideoConfig(BaseModel):
     project_id: str = ""
     project_key: str = ""
     review_approved: bool = False
+
+    @field_validator("original_subtitle_region_override")
+    @classmethod
+    def valid_original_subtitle_region(cls, value):
+        from haizflow.services.ocr_regions import normalize_region
+        return normalize_region(value) if value else {}
 
 
 class VideoInfo(BaseModel):

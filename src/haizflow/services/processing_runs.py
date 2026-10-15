@@ -31,6 +31,19 @@ def _source_identity(video):
     return (str((video.files or {}).get("video_input") or ""), video.created_at)
 
 
+def _baseline_references(run):
+    """Reject self-references saved by the pre-recovery stale-snapshot bug.
+
+    A result produced by this run cannot simultaneously be its old baseline.
+    Persisted journals from 1.0.0 can contain that contradiction after rollback
+    modified video.json but begin() kept its pre-rollback in-memory snapshot.
+    """
+    baseline = set(run["baseline_ids"]) - set(run["created"])
+    return {kind: value for kind, value in run["active_artifacts"].items()
+            if kind in manual_artifacts.ARTIFACT_KINDS
+            and manual_artifacts.artifact_id(kind, value) in baseline}
+
+
 def _path(video_id):
     return manual_artifacts.cache_root(video_id) / "processing-run.json"
 
@@ -167,19 +180,41 @@ def begin(video_id, *, resuming=False):
             _CURRENT.run = previous
             _save(previous)
             return previous
+        if (previous and video.project_type == "manual" and previous.get("state") == "failed"
+                and not previous.get("discard") and not previous.get("export_owned")):
+            # A failed provider request is not a user cancellation. Completed,
+            # immutable ASR/stem/voice artifacts remain valid inputs/cache, and
+            # requiring their deletion can wedge every retry on a preview lock.
+            # Explicit Manual reruns already advance their signature generation;
+            # unfinished staging is never a cache hit and has producer cleanup.
+            _drop(previous)
+            previous = None
         if previous:
             if (previous.get("state") in {"running", "discarding"}
                     or previous.get("state") in {"paused", "failed"} and previous["tool"] == tool and not resuming):
                 previous["discard"] = True
-                if not rollback(previous):
-                    raise RuntimeError("File của lượt trước còn bị khóa. Đóng preview/tệp đang dùng rồi chạy lại.")
+                if not rollback(previous, defer_cache_cleanup=video.project_type == "manual"):
+                    detail = previous.get("cleanup_error") or {}
+                    raise RuntimeError(
+                        "Chưa thể khôi phục dữ liệu tạm của lượt trước. Dữ liệu dự án được giữ nguyên. "
+                        f"Chi tiết: {detail.get('type', 'cleanup_pending')} "
+                        f"({detail.get('phase', 'rollback')})."
+                    )
             else:
                 _drop(previous)
+        # rollback changes active artifacts/files/checkpoints (and may restore
+        # idle status). Never snapshot the stale object loaded before rollback:
+        # that saves this run's own outputs as its baseline and self-pins them
+        # permanently, including after a restart of the application.
+        refreshed = video_store.get_video(video_id)
+        if refreshed is None or _source_identity(refreshed) != _source_identity(video):
+            raise RuntimeError("Video source changed while preparing processing. Try again.")
+        video = refreshed
         manifest = manual_artifacts.load_manifest(video_id)
         run = {"video_id": video_id, "id": _ARMED_EXPORTS.get(video_id) or uuid.uuid4().hex, "tool": tool,
             "source_generation": _source_identity(video), "state": "running", "running": True,
             "export_owned": video_id in _ARMED_EXPORTS, "discard": False, "created": [],
-            "baseline_ids": list(manifest["artifacts"]),
+            "baseline_ids": [key for key, record in manifest["artifacts"].items() if record.get("status") == "complete"],
             "active_artifacts": dict(video.active_artifacts or {}),
             "files": dict(video.files or {}), "checkpoints": dict(video.checkpoints or {}),
             "manual_completed_stages": list(video.manual_completed_stages or []),
@@ -242,7 +277,7 @@ def request_discard(video_id, run_id=None):
             _save(run)
 
 
-def rollback(run):
+def rollback(run, *, defer_cache_cleanup=False):
     """Never remove baseline artifacts, input assets, or outputs of later runs."""
     video_id = run["video_id"]
     with _LOCK, manual_artifacts._manifest_lock(video_id), managed_storage_guard:
@@ -252,13 +287,14 @@ def rollback(run):
             return True
         root = Path(video_store.get_video_dir(video_id))
         temporary = owned_path(root / "temp", root)
+        run.pop("cleanup_error", None)
         try:
             if temporary.exists():
                 safe_tree(temporary)
                 baseline = set(run["temp_files"])
                 for path in temporary.rglob("*"):
                     if path.is_file() and str(path.relative_to(temporary)) not in baseline:
-                        path.unlink()
+                        path.unlink(missing_ok=True)
             if run.get("backup_ready"):
                 backup = owned_path(root / (".processing-backup-" + run["id"]), root)
                 for relative in run["temp_files"]:
@@ -267,16 +303,20 @@ def rollback(run):
                         target = owned_path(temporary / relative, root)
                         target.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(source, target)
-        except OSError:
+        except OSError as exc:
             run["state"] = "discarding"
+            run["cleanup_error"] = {"phase": "temporary_files", "type": type(exc).__name__,
+                "errno": exc.errno, "winerror": getattr(exc, "winerror", None)}
+            _LOG.warning("Run rollback could not restore temporary files: video=%s error=%r", video_id, exc)
             _save(run)
             return False
         manifest = manual_artifacts.load_manifest(video_id)
         created = set(run["created"])
         references = dict(video.active_artifacts or {})
+        baseline_references = _baseline_references(run)
         for kind, signature in list(references.items()):
             if manual_artifacts.artifact_id(kind, signature) in created:
-                previous = run["active_artifacts"].get(kind)
+                previous = baseline_references.get(kind)
                 if previous:
                     references[kind] = previous
                 else:
@@ -292,31 +332,45 @@ def rollback(run):
             if (video.project_type == "manual" and isinstance(current, str) and current
                     and not any(Path(current).is_relative_to(directory) for directory in created_directories)):
                 continue
-            if name in run["files"]:
-                files[name] = run["files"][name]
+            previous = run["files"].get(name)
+            self_reference = isinstance(previous, str) and previous and any(
+                Path(previous).is_relative_to(directory) for directory in created_directories)
+            if name in run["files"] and not self_reference:
+                files[name] = previous
             else:
                 files.pop(name, None)
         video_store.update_video(video_id, active_artifacts=references, files=files,
             checkpoints=run["checkpoints"], manual_completed_stages=run["manual_completed_stages"],
             manual_completed_stage=run["manual_completed_stage"], resume_step="")
         protected = manual_artifacts._active_ids(video_id)
+        # Active user documents and their dependencies must never be retired.
+        # Runtime-only readers can finish with old bytes while a new immutable
+        # generation runs; retain a non-reusable manifest entry for later GC.
+        document_protected = manual_artifacts._active_ids(video_id, include_runtime_pins=False) if defer_cache_cleanup else set()
         pending = []
         for key in created:
             record = manifest["artifacts"].get(key)
             if record is None:
                 continue
-            if key in protected:
+            if defer_cache_cleanup and key in document_protected:
+                continue
+            if key in protected and not defer_cache_cleanup:
                 pending.append(key)
                 continue
             directory = manual_artifacts.artifact_directory(video_id, record["kind"], record["signature"])
-            if manual_artifacts._remove_inactive_directory(directory):
+            if key not in protected and manual_artifacts._remove_inactive_directory(directory):
                 manifest["artifacts"].pop(key, None)
+            elif defer_cache_cleanup:
+                record["status"] = "discarded"
+                record["discarded_by_run"] = run["id"]
+                _LOG.info("Restart retired old immutable cache; physical cleanup deferred: %s", key)
             else:
                 pending.append(key)
         manual_artifacts._save_manifest(video_id, manifest)
         if pending:
             run["created"] = pending
             run["state"] = "discarding"
+            run["cleanup_error"] = {"phase": "immutable_cache", "type": "reader_or_cleanup_pending"}
             _save(run)
             return False
         fields = _validated_idle_fields(video, run.get("manual_idle_state"))
@@ -369,7 +423,7 @@ def retained_ids(video_id, video=None):
     video = video or (video_store.get_video(video_id) if run else None)
     if not run or not video or _source_identity(video) != tuple(run["source_generation"]):
         return set()
-    return {manual_artifacts.artifact_id(kind, signature) for kind, signature in run["active_artifacts"].items()}
+    return {manual_artifacts.artifact_id(kind, signature) for kind, signature in _baseline_references(run).items()}
 
 
 def discard_pending(video_id, run_id):

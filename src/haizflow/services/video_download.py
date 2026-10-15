@@ -74,6 +74,8 @@ _NETWORK_RETRY_ERROR_MARKERS = (
     "timed out",
     "timeout",
     "connection reset",
+    "reset by server",
+    "transfer closed with outstanding read data",
     "remote end closed connection",
     "temporary failure in name resolution",
     "name or service not known",
@@ -120,6 +122,10 @@ _NON_RETRYABLE_ERROR_MARKERS = (
     "unsupported url",
 )
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SHORT_READ_ERROR = re.compile(
+    r"\b\d+\s+bytes read,\s*\d+\s+more expected\b|"
+    r"\bdownloaded\s+\d+\s+bytes,\s*expected\s+\d+\s+bytes\b"
+)
 
 
 class DownloadCancelled(RuntimeError):
@@ -260,7 +266,13 @@ def _load_yt_dlp():
 
 
 def _extract_video_info(downloader, url: str, *, download: bool, cancel_event=None, auth=None):
-    if _matching_platform(urlparse(url).hostname or "") == "Douyin":
+    platform = _matching_platform(urlparse(url).hostname or "")
+    if platform == "Bilibili":
+        from haizflow.services.bilibili_video import HaizFlowBiliBiliIE
+        parameters = getattr(downloader, "params", {})
+        attempt = parameters.get("_haizflow_bilibili_cdn_attempt", 0) if isinstance(parameters, dict) else 0
+        downloader.add_info_extractor(HaizFlowBiliBiliIE(cdn_attempt=attempt))
+    if platform == "Douyin":
         from haizflow.services.douyin_adapter import get_douyin_adapter
         from haizflow.services.douyin_video import HaizFlowDouyinIE
         adapter = get_douyin_adapter(auth)
@@ -407,8 +419,12 @@ def _is_retryable_tiktok_error(exc: Exception) -> bool:
 def _is_retryable_download_error(exc: Exception, platform: str) -> bool:
     """Return whether a fresh extractor session is likely to recover the media URL."""
     message = _ANSI_ESCAPE.sub("", str(exc)).lower()
-    if any(marker in message for marker in _NON_RETRYABLE_ERROR_MARKERS):
+    if isinstance(exc, PermissionError) or any(marker in message for marker in _NON_RETRYABLE_ERROR_MARKERS):
         return False
+    # yt-dlp wraps IncompleteRead/ContentTooShortError as a plain DownloadError
+    # without the exception name. Match its precise byte-count diagnostics too.
+    if _SHORT_READ_ERROR.search(message):
+        return True
     if any(marker in message for marker in _FORMAT_REFRESH_ERROR_MARKERS + _NETWORK_RETRY_ERROR_MARKERS):
         return True
     if platform == "TikTok" and _is_retryable_tiktok_error(exc):
@@ -549,7 +565,8 @@ def download_audio(
             raise DownloadCancelled("Audio download cancelled.")
         for stale in target.parent.glob(f"{target.stem}.source.*"):
             stale.unlink(missing_ok=True)
-        options = _youtube_dl_options(_ytdlp_auth_for_url(auth, normalized_url), impersonate=attempt > 0)
+        options = _youtube_dl_options(_ytdlp_auth_for_url(auth, normalized_url),
+                                     impersonate=attempt > 0 and platform != "Bilibili")
         options.update(
             {
                 "outtmpl": str(target.with_name(f"{target.stem}.source.%(ext)s")),
@@ -559,6 +576,12 @@ def download_audio(
                 "overwrites": True,
             }
         )
+        if platform == "Bilibili":
+            # Short bounded range requests avoid a single long CDN response
+            # being cut off. Keep incomplete bytes in .part, never as a final
+            # media file; the existing finally block cleans audio staging.
+            options.update(http_chunk_size=2 * 1024 * 1024, nopart=False, continuedl=True,
+                           retries=1, _haizflow_bilibili_cdn_attempt=attempt)
         try:
             with yt_dlp.YoutubeDL(options) as downloader, DownloadControl(downloader, cancel_event, DownloadCancelled):
                 info = _extract_video_info(downloader, normalized_url, download=True, auth=auth,
@@ -718,7 +741,8 @@ def download_video(
     for attempt in range(attempts):
         if cancel_event and cancel_event.is_set():
             raise DownloadCancelled("Video download cancelled.")
-        options = _youtube_dl_options(_ytdlp_auth_for_url(auth, metadata.url), impersonate=attempt > 0)
+        options = _youtube_dl_options(_ytdlp_auth_for_url(auth, metadata.url),
+                                     impersonate=attempt > 0 and metadata.platform != "Bilibili")
         options.update(
             {
                 "outtmpl": os.path.join(workspace, "%(title).120B [%(id)s].%(ext)s"),
@@ -731,6 +755,16 @@ def download_video(
                 "overwrites": True,
             }
         )
+        if metadata.platform == "Bilibili":
+            # Resume this workspace's partial track across a fresh extractor
+            # session instead of downloading the whole long video again. Keep
+            # HTTP/1.1 transport stable; on this site fallback is to its supplied
+            # CDN, not Chrome impersonation (which can reset HTTP/2 streams).
+            options.update(http_chunk_size=2 * 1024 * 1024, nopart=False, continuedl=True,
+                           retries=1, _haizflow_bilibili_cdn_attempt=attempt,
+                           # Keep resolution/FPS first; prefer native-friendly
+                           # AVC only among equivalent quality streams.
+                           format_sort=["res", "fps", "+codec:avc:m4a"], format_sort_force=True)
         try:
             # A new YoutubeDL instance on every attempt forces a fresh media
             # manifest.  TikTok's signed URLs can expire between inspection

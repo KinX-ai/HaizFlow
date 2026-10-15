@@ -36,6 +36,237 @@ def artifact(video, kind, signature, data=b"result", activate=True):
                                     activate_artifact=activate)
 
 
+@pytest.mark.parametrize('tool,kind', [('translation', 'recognition'), ('separation', 'source_audio'),
+    ('voice', 'tts_clip'), ('image', 'ocr_region'), ('audio', 'audio_mix')])
+@pytest.mark.parametrize('reopen', [False, True])
+def test_retry_failed_tool_keeps_completed_outputs_without_requiring_deletion(video_factory, monkeypatch, tool, kind, reopen):
+    """A provider failure is not Cancel; its completed prerequisites are reusable."""
+    video = video_factory()
+    baseline = artifact(video, 'separation', 'older-success')
+    video_store.update_video(video.video_id, manual_target_tool=tool)
+    processing_runs.begin(video.video_id)
+    completed = artifact(video, kind, 'completed-before-model-error', activate=kind != 'tts_clip')
+    video_store.update_video(video.video_id, status='failed', error='Gemini HTTP 503', manual_target_tool=tool)
+    processing_runs.finish(video.video_id)
+    failed_id = processing_runs.current_id(video.video_id)
+    if reopen:
+        monkeypatch.setattr(processing_runs, '_RUNS', {})
+        monkeypatch.setattr(processing_runs, '_CHECKED', set())
+    video_store.update_video(video.video_id, status='processing', manual_target_tool=tool, resume_step='')
+    # Preview/AV may retain an output, but retry must not require removing it.
+    monkeypatch.setattr(manual_artifacts, '_remove_inactive_directory', lambda _path: False)
+    retry = processing_runs.begin(video.video_id)
+    assert retry['id'] != failed_id
+    assert Path(completed['resolved_outputs']['data']).exists()
+    assert Path(baseline['resolved_outputs']['data']).exists()
+    video_store.update_video(video.video_id, status='manual_ready')
+    processing_runs.finish(video.video_id)
+
+
+@pytest.mark.parametrize('reopen', [False, True])
+def test_legacy_discarding_journal_can_restart_while_old_cache_reader_is_open(video_factory, monkeypatch, reopen):
+    video = video_factory()
+    old = artifact(video, 'export', 'previous-valid')
+    processing_runs.begin(video.video_id)
+    current = artifact(video, 'export', 'failed-new')
+    manual_artifacts.pin(video.video_id, 'export', 'failed-new', 'old-preview')
+    video_store.update_video(video.video_id, status='failed', error='503')
+    processing_runs.finish(video.video_id)
+    previous = processing_runs._get(video.video_id)
+    previous['discard'] = True  # Journal left by 1.0.0's failed retry.
+    assert not processing_runs.rollback(previous)
+    assert previous['state'] == 'discarding'
+    if reopen:
+        monkeypatch.setattr(processing_runs, '_RUNS', {})
+        monkeypatch.setattr(processing_runs, '_CHECKED', set())
+    video_store.update_video(video.video_id, status='processing', manual_target_tool='export')
+    try:
+        retry = processing_runs.begin(video.video_id)
+        assert retry['id'] != previous['id']
+        assert retry['active_artifacts'] == {'export': 'previous-valid'}
+        assert Path(old['resolved_outputs']['data']).exists()
+        assert Path(current['resolved_outputs']['data']).exists()
+        assert manual_artifacts.resolve(video.video_id, 'export', 'failed-new') is None
+        assert video_store.get_video(video.video_id).active_artifacts == {'export': 'previous-valid'}
+    finally:
+        manual_artifacts.unpin(video.video_id, 'old-preview')
+        video_store.update_video(video.video_id, status='manual_ready')
+        processing_runs.finish(video.video_id)
+    manual_artifacts.prune(video.video_id)
+    assert not Path(current['resolved_outputs']['data']).exists()
+    assert Path(old['resolved_outputs']['data']).exists()
+
+
+@pytest.mark.parametrize('reopen', [False, True])
+def test_legacy_self_referencing_journal_cannot_permanently_protect_its_own_output(video_factory, monkeypatch, reopen):
+    """Reproduce the persisted 1.0.0 stale pre-rollback snapshot, without any OS lock."""
+    video = video_factory()
+    baseline = artifact(video, 'export', 'real-older-result')
+    processing_runs.begin(video.video_id)
+    current = artifact(video, 'export', 'self-pinned-new-result')
+    run = processing_runs._get(video.video_id)
+    new_path = current['resolved_outputs']['data']
+    # The old begin() saved references from before it rolled back the last
+    # attempt, even though baseline_ids correctly came from after rollback.
+    run['active_artifacts'] = {'export': 'self-pinned-new-result'}
+    run['files']['final_video'] = new_path
+    video_store.update_video(video.video_id, status='failed', files={**video.files, 'final_video': new_path})
+    processing_runs.finish(video.video_id)
+    run['discard'] = True
+    run['state'] = 'discarding'
+    processing_runs._save(run)
+    if reopen:
+        monkeypatch.setattr(processing_runs, '_RUNS', {})
+        monkeypatch.setattr(processing_runs, '_CHECKED', set())
+    video_store.update_video(video.video_id, status='processing', resume_step='')
+    retry = processing_runs.begin(video.video_id)
+    assert retry['id'] != run['id']
+    assert 'export' not in retry['active_artifacts']
+    assert retry['files'].get('final_video') != new_path
+    assert not Path(new_path).exists()
+    assert Path(baseline['resolved_outputs']['data']).exists()
+    video_store.update_video(video.video_id, status='manual_ready')
+    processing_runs.finish(video.video_id)
+
+
+@pytest.mark.parametrize('prior_status', ['error', 'discarded'])
+def test_a_preexisting_error_record_is_not_a_preexisting_successful_output(video_factory, prior_status):
+    video = video_factory()
+    manual_artifacts.record_error(video.video_id, 'tts_clip', 'retry-key', 'old model error')
+    manifest = manual_artifacts.load_manifest(video.video_id)
+    manifest['artifacts']['tts_clip:retry-key']['status'] = prior_status
+    manual_artifacts._save_manifest(video.video_id, manifest)
+    processing_runs.begin(video.video_id)
+    completed = artifact(video, 'tts_clip', 'retry-key', activate=False)
+    video_store.update_video(video.video_id, status='cancelled')
+    processing_runs.request_discard(video.video_id)
+    processing_runs.finish(video.video_id)
+    assert not Path(completed['resolved_outputs']['data']).exists()
+
+
+def test_transient_temp_cleanup_failure_has_evidence_and_can_retry(video_factory, monkeypatch):
+    video = video_factory()
+    processing_runs.begin(video.video_id)
+    run = processing_runs._get(video.video_id)
+    generated = Path(video_store.get_video_dir(video.video_id)) / 'temp' / 'generated.tmp'
+    generated.parent.mkdir(exist_ok=True)
+    generated.write_bytes(b'owned partial')
+    original = Path.unlink
+    def locked(path, *args, **kwargs):
+        if path == generated:
+            raise PermissionError(13, 'fixture sharing violation')
+        return original(path, *args, **kwargs)
+    with monkeypatch.context() as locked_context:
+        locked_context.setattr(Path, 'unlink', locked)
+        assert not processing_runs.rollback(run)
+    assert run['cleanup_error']['phase'] == 'temporary_files'
+    assert run['cleanup_error']['type'] == 'PermissionError'
+    assert processing_runs.rollback(run)
+    assert not generated.exists()
+
+
+@pytest.mark.parametrize('reopen', [False, True])
+def test_manual_gemini_503_then_fresh_run_can_translate_and_publish_subtitles(video_factory, monkeypatch, reopen):
+    import json
+    from haizflow.pipeline import manual_tools
+    from haizflow.services import gemini_translation
+
+    video = video_factory()
+    video_store.update_video(video.video_id, manual_target_tool='translation', enable_audio_separation=False,
+        translation_model='gemini-3.1-flash-lite', target_language='vi')
+    source_segments = [{'start': 0., 'end': 1.8, 'text': 'Hello friend.', 'language': 'en'}]
+    def transcribe(_audio, output, *_args, **_kwargs):
+        Path(output).write_text(json.dumps(source_segments), encoding='utf-8')
+    monkeypatch.setattr(manual_tools, 'transcribe', transcribe)
+    monkeypatch.setattr(manual_tools, '_release_recognition_runtime', lambda: None)
+    monkeypatch.setattr(manual_tools, 'shutdown_hymt2_worker', lambda: None)
+    monkeypatch.setattr('haizflow.pipeline.omnivoice_tts.clear_runtime', lambda: None)
+    monkeypatch.setattr(gemini_translation, 'active_key', lambda: 'isolated-test-key-not-real')
+    calls = []
+    def translate(chunk, **_kwargs):
+        calls.append(chunk)
+        if len(calls) == 1:
+            raise RuntimeError('Gemini HTTP 503 UNAVAILABLE')
+        return ['Chào bạn.']
+    monkeypatch.setattr(gemini_translation, '_request_chunk', translate)
+    # Never allow these regression tests to send real requests or spend tokens.
+    monkeypatch.setattr(gemini_translation.request, 'urlopen', lambda *_a, **_k: pytest.fail('Unexpected network request'))
+    processing_runs.begin(video.video_id)
+    manual_tools.run_manual_tool_sync(video.video_id, 'translation')
+    processing_runs.finish(video.video_id)
+    failed = video_store.get_video(video.video_id)
+    assert failed.status == 'failed' and '503' in failed.error
+    recognized = manual_artifacts.active(failed, 'recognition')
+    assert recognized
+    original_recognition = Path(recognized['resolved_outputs']['segments'])
+    if reopen:
+        monkeypatch.setattr(processing_runs, '_RUNS', {})
+        monkeypatch.setattr(processing_runs, '_CHECKED', set())
+    assert manual_tools.prepare_manual_rerun(video.video_id, 'translation')
+    video_store.update_video(video.video_id, status='processing', resume_step='')
+    processing_runs.begin(video.video_id)
+    manual_tools.run_manual_tool_sync(video.video_id, 'translation')
+    processing_runs.finish(video.video_id)
+    completed = video_store.get_video(video.video_id)
+    assert completed.status == 'manual_ready', completed.error
+    assert not completed.error and original_recognition.exists()
+    assert len(calls) == 2
+    published = manual_artifacts.active(completed, 'subtitle_document')
+    assert published
+    assert json.loads(Path(published['resolved_outputs']['segments']).read_text('utf-8'))[0]['text'] == 'Chào bạn.'
+
+
+@pytest.mark.parametrize('tool,kind', [('translation', 'recognition'), ('separation', 'source_audio'), ('voice', 'tts_clip')])
+def test_resume_after_reopen_preserves_completed_artifacts_and_scope(video_factory, monkeypatch, tool, kind):
+    video = video_factory()
+    video_store.update_video(video.video_id, manual_target_tool=tool)
+    run = processing_runs.begin(video.video_id)
+    complete = artifact(video, kind, 'completed-before-pause', activate=kind != 'tts_clip')
+    video_store.update_video(video.video_id, status='paused', resume_step=tool)
+    processing_runs.finish(video.video_id)
+    monkeypatch.setattr(processing_runs, '_RUNS', {})
+    monkeypatch.setattr(processing_runs, '_CHECKED', set())
+    resumed = processing_runs.begin(video.video_id, resuming=True)
+    assert resumed['id'] == run['id'] and not resumed['discard']
+    assert Path(complete['resolved_outputs']['data']).exists()
+    video_store.update_video(video.video_id, status='manual_ready')
+    processing_runs.finish(video.video_id)
+
+
+@pytest.mark.skipif(__import__('os').name != 'nt', reason='Actual Windows sharing-mode regression')
+def test_restart_with_real_windows_locked_cache_retires_then_cleans_when_released(video_factory, monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    video = video_factory()
+    before = artifact(video, 'export', 'before-real-lock')
+    processing_runs.begin(video.video_id)
+    created = artifact(video, 'export', 'real-reader-locked')
+    locked = Path(created['resolved_outputs']['data'])
+    video_store.update_video(video.video_id, status='paused', resume_step='export')
+    processing_runs.finish(video.video_id)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateFileW(str(locked), 0x80000000, 3, None, 3, 0x80, None)
+    assert handle != wintypes.HANDLE(-1).value
+    try:
+        video_store.update_video(video.video_id, status='processing', resume_step='')
+        processing_runs.begin(video.video_id, resuming=False)
+        assert locked.exists()
+        assert manual_artifacts.resolve(video.video_id, 'export', 'real-reader-locked') is None
+        assert Path(before['resolved_outputs']['data']).exists()
+    finally:
+        kernel.CloseHandle(handle)
+        video_store.update_video(video.video_id, status='manual_ready')
+        processing_runs.finish(video.video_id)
+    manual_artifacts.prune(video.video_id)
+    assert not locked.exists()
+    assert Path(before['resolved_outputs']['data']).exists()
+
+
 def test_cancel_removes_new_complete_cache_but_restores_previous_result(video_factory):
     video = video_factory()
     old = artifact(video, "export", "old", b"old complete result")

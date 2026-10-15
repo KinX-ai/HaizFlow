@@ -61,7 +61,10 @@ Rectangle {
                     border.color: Theme.controlFocus
                 }
 
-                onClicked: root.activated(optionButton.modelData.value)
+                onClicked: {
+                    if (!optionButton.selected)
+                        root.activated(optionButton.modelData.value);
+                }
             }
         }
     }

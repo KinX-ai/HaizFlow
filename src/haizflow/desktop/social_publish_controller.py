@@ -405,6 +405,11 @@ class SocialPublishController:
             self.reconcile_accounts()
 
     def detach_project(self) -> None:
+        # Navigating to Manual/Auto/Batch is not cancellation. Workers and
+        # their queued events still belong to this publishing project; clearing
+        # its identity here would drop completion events and leave busy stuck.
+        if self._busy:
+            return
         self._project_key = ""
         self._project_root = ""
         self._state = tiktok_publish.empty_state()
@@ -1659,12 +1664,15 @@ class SocialPublishController:
 
     def publish_item(self, row: int, *, continue_queue: bool = False) -> bool:
         item = self._host.tiktok_publish_items.item_at(row)
+        return self._publish_item(item, continue_queue=continue_queue)
+
+    def _publish_item(self, item: dict | None, *, continue_queue: bool, background: bool = False) -> bool:
         if item and (item.get("status") in {"published", "posted", "scheduled"}
                      or (item.get("zernio_post_id") and item.get("status") not in {"failed", "partial", "draft"})):
             self._status = "This video already has a social post; it will not be published again."
             self._emit_changed()
             return False
-        if not item or not self._ensure_ready_to_publish(item):
+        if not item or not self._ensure_ready_to_publish(item, background=background):
             return False
         self._auto_continue = bool(continue_queue)
         self._busy = True
@@ -1706,8 +1714,27 @@ class SocialPublishController:
     def publish_all(self) -> bool:
         return self.publish_next(continue_queue=True)
 
-    def _ensure_ready_to_publish(self, item: dict) -> bool:
-        if self._busy or not self._ensure_publish_project():
+    def _continue_owned_queue(self) -> bool:
+        # Only the already-confirmed Publish All workflow may continue without
+        # a visible publishing workspace. Never derive its owner from the newly
+        # selected Manual/Auto project or from a different screen's row model.
+        if not self._auto_continue or self._cancel.is_set():
+            return False
+        for item in reversed(self._queue_items()):
+            if self._waiting_to_publish(item):
+                return self._publish_item(item, continue_queue=True, background=True)
+        self._auto_continue = False
+        self._status = "No videos are waiting to be published."
+        self._emit_changed()
+        return False
+
+    def _ensure_ready_to_publish(self, item: dict, *, background: bool = False) -> bool:
+        if self._busy:
+            return False
+        if background:
+            if not self._auto_continue or not self._project_key or not self._project_root:
+                return False
+        elif not self._ensure_publish_project():
             return False
         if self._account_syncing or self._creator_syncing or self._credential_busy:
             self._status = "Wait for the selected platform to finish loading."
@@ -2269,7 +2296,7 @@ class SocialPublishController:
             project_store.touch_project_by_key(self._project_key)
             self._host.refreshVideos()
         if continue_queue and not self._busy:
-            self.publish_next(continue_queue=True)
+            self._continue_owned_queue()
         self._poll_oauth_accounts()
         self._poll_connected_accounts()
         self._poll_post_statuses()

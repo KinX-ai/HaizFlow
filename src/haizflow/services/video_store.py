@@ -251,6 +251,7 @@ def create_video(video_id: str, original_filename: str, config: VideoConfig, vid
         subtitle_layout_override=config.subtitle_layout_override,
         remove_original_subtitles=config.remove_original_subtitles,
         original_subtitle_removal_mode=config.original_subtitle_removal_mode,
+        original_subtitle_region_override=config.original_subtitle_region_override,
         output_format=config.output_format,
         output_speed=config.output_speed,
         crop=config.crop,

@@ -56,6 +56,7 @@ GridLayout {
     signal removeOriginalSubtitlesEdited(bool value)
     signal subtitleRemovalModeEdited(string value)
     signal subtitleLayoutRequested()
+    signal sourceCoverRequested()
     signal audioSeparationEdited(bool value)
     signal audioMixRequested()
     signal backgroundMusicFileRequested()
@@ -237,6 +238,12 @@ GridLayout {
                 SettingLabel {
                     Layout.fillWidth: true
                     text: qsTr("Phụ đề gốc")
+                }
+                StudioButton {
+                    objectName: "sourceCoverButton"
+                    text: qsTr("Chỉnh vùng che")
+                    enabled: root.editable && root.hasSource && root.removeOriginalSubtitles
+                    onClicked: root.sourceCoverRequested()
                 }
                 StudioButton {
                     text: qsTr("Chỉnh phụ đề")
