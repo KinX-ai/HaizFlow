@@ -10,14 +10,14 @@
     "basis": "Explicit owner approval and request to clarify redistribution and commercial software restrictions",
     "language_precedence": "vi"
   },
-  "effective_release": "1.0.0 reviewed editor, audio, speaker and framing update; publication tracked by GitHub release state",
+  "effective_release": "1.0.1 reviewed processing lifecycle, recognition resume and cache patch; publication tracked by GitHub release state",
   "public_release_review": {
     "approved_by": "Codex (scoped technical packaging review, not independent legal certification)",
-    "approved_at": "2026-10-14",
-    "source_commit": "ba4f16e (review baseline; final release commit is bound by BUILD-INFO)",
-    "release_version": "1.0.0",
-    "owner_release_authorization": "Direct owner request to push source, build and publish 1.0.0, support updates from 0.1.8 onward, and preserve all old releases.",
-    "publication_condition": "Publish exact corresponding-source asset and rebuilt CPU 14/CUDA 16 engines with VieNeu contract 7. Preserve vision 7 at its immutable 0.1.10 URL. Verify installer, frozen Full/Delta upgrades from 0.1.8, 0.1.9 and 0.1.10, rollback and public download/hash checks. Retain existing license restrictions and release assets. New acoustic profile is MIT, checksum pinned, with license notice. VieNeu/model notices remain independent. Source-only diagnostics are not user annotations or a speaker-accuracy guarantee. Scoped technical packaging review, not independent legal certification; no all-machine benchmark claim.",
+    "approved_at": "2026-10-15",
+    "source_commit": "24139c8 (review baseline; final release commit is bound by BUILD-INFO)",
+    "release_version": "1.0.1",
+    "owner_release_authorization": "Direct owner request to push source, build and publish 1.0.1 with updates from 1.0.0. Preserve previous releases and assets.",
+    "publication_condition": "Retain the exact unchanged ThirdPartySources 1.0.0 asset and rebuilt CPU 15/CUDA 17 engines. Preserve vision 7 at its immutable 0.1.10 URL. Verify installer, frozen Full/Delta upgrades from 1.0.0, rollback, data preservation and public download/hash checks. No new library, model, preview, font, artwork or media recipe is introduced. Keep all existing license restrictions and notices. Scoped technical packaging review, not independent legal certification or an all-machine benchmark claim.",
     "clearances": {
       "owned-code-and-contributor-scope": {
         "path": "legal/reviews/application-scope-2026-10-06.md",
@@ -28,8 +28,8 @@
         "sha256": "fd3764dcb816168e9ec62737823ecf9eca79655e39999b5073779ac927cd7702"
       },
       "ffmpeg-complete-corresponding-source": {
-        "path": "legal/reviews/media-source-1.0.0.md",
-        "sha256": "a88cd7ff4fac11da0e6c31eced231d0a539db4cd430f6b7d5a579c0c70d9357b"
+        "path": "legal/reviews/media-source-1.0.1.md",
+        "sha256": "c751fb2a7f16a4d1ec71338990d8f4620a73563a3b56a9bd269efe6cec9c8a06"
       },
       "qt-lgpl-module-and-relinking-evidence": {
         "path": "legal/reviews/qt-replacement-2026-10-06.md",
