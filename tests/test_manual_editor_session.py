@@ -174,6 +174,7 @@ class ManualEditorSessionTests(unittest.TestCase):
                 "subtitle_layout_override",
                 "remove_original_subtitles",
                 "original_subtitle_removal_mode",
+                "original_subtitle_region_override",
                 "output_format",
                 "output_speed",
                 "crop",

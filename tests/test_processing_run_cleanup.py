@@ -36,6 +36,80 @@ def artifact(video, kind, signature, data=b"result", activate=True):
                                     activate_artifact=activate)
 
 
+@pytest.mark.parametrize("action", ["cancel", "restart", "resume"])
+def test_reopen_recovers_unflushed_publications_without_deleting_unrelated_cache(video_factory, monkeypatch, action):
+    video = video_factory()
+    old = artifact(video, "tts_clip", "before-crash", activate=False)
+    run = processing_runs.begin(video.video_id)
+    created = artifact(video, "tts_clip", "created-before-crash", activate=False)
+    # Simulate exit before finish() and before the 16-artifact journal flush.
+    processing_runs._CURRENT.run = None
+    monkeypatch.setattr(processing_runs, "_RUNS", {})
+    monkeypatch.setattr(processing_runs, "_CHECKED", set())
+    unrelated = artifact(video, "tts_clip", "not-owned-by-run", activate=False)
+    video_store.update_video(video.video_id, status="paused", resume_step="export")
+    restored = processing_runs._get(video.video_id)
+    assert created["artifact_id"] in restored["created"]
+    assert unrelated["artifact_id"] not in restored["created"]
+    if action == "cancel":
+        processing_runs.request_discard(video.video_id, run["id"])
+        assert processing_runs.settle_export(video.video_id, "cancelled", run["id"])
+    else:
+        processing_runs.begin(video.video_id, resuming=action == "resume")
+        video_store.update_video(video.video_id, status="manual_ready")
+        processing_runs.finish(video.video_id)
+    assert Path(created["resolved_outputs"]["data"]).exists() == (action == "resume")
+    assert Path(old["resolved_outputs"]["data"]).exists()
+    assert Path(unrelated["resolved_outputs"]["data"]).exists()
+
+
+@pytest.mark.parametrize("status", ["paused", "failed"])
+@pytest.mark.parametrize("reopen", [False, True])
+def test_cache_maintenance_keeps_completed_partial_voice_until_discard(video_factory, monkeypatch, status, reopen):
+    video = video_factory()
+    old = artifact(video, "export", "before-partial")
+    unused = artifact(video, "tts_clip", "old-unused", activate=False)
+    run = processing_runs.begin(video.video_id)
+    partial = artifact(video, "tts_clip", "finished-sentence", activate=False)
+    video_store.update_video(video.video_id, status=status, resume_step="voice")
+    processing_runs.finish(video.video_id)
+    if reopen:
+        monkeypatch.setattr(processing_runs, "_RUNS", {})
+        monkeypatch.setattr(processing_runs, "_CHECKED", set())
+    manual_artifacts.prune(video.video_id, limit_bytes=0)
+    assert Path(partial["resolved_outputs"]["data"]).exists()
+    assert Path(old["resolved_outputs"]["data"]).exists()
+    assert not Path(unused["resolved_outputs"]["data"]).exists()
+    processing_runs.request_discard(video.video_id, run["id"])
+    assert processing_runs.settle_export(video.video_id, "cancelled", run["id"])
+    assert not Path(partial["resolved_outputs"]["data"]).exists()
+    assert Path(old["resolved_outputs"]["data"]).exists()
+
+
+def test_late_cancel_cleanup_cannot_clear_a_new_manual_tool_request(video_factory):
+    video = video_factory()
+    video_store.update_video(video.video_id, status="manual_ready", manual_target_tool="", step="manual_voice")
+    scope = processing_runs.arm_export(video.video_id)
+    video_store.update_video(video.video_id, status="processing", manual_target_tool="export")
+    processing_runs.begin(video.video_id)
+    current = artifact(video, "audio_mix", "cancel-pinned")
+    manual_artifacts.pin(video.video_id, "audio_mix", "cancel-pinned", "late-reader")
+    try:
+        processing_runs.request_discard(video.video_id, scope)
+        video_store.update_video(video.video_id, status="cancelled")
+        processing_runs.finish(video.video_id)
+        assert processing_runs.discard_pending(video.video_id, scope)
+    finally:
+        manual_artifacts.unpin(video.video_id, "late-reader")
+    video_store.update_video(video.video_id, status="processing", manual_target_tool="voice", step="starting")
+    processing_runs.begin(video.video_id)
+    refreshed = video_store.get_video(video.video_id)
+    assert refreshed.manual_target_tool == "voice" and refreshed.status == "processing"
+    assert not Path(current["resolved_outputs"]["data"]).exists()
+    video_store.update_video(video.video_id, status="manual_ready")
+    processing_runs.finish(video.video_id)
+
+
 @pytest.mark.parametrize('tool,kind', [('translation', 'recognition'), ('separation', 'source_audio'),
     ('voice', 'tts_clip'), ('image', 'ocr_region'), ('audio', 'audio_mix')])
 @pytest.mark.parametrize('reopen', [False, True])

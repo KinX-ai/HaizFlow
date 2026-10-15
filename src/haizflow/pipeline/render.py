@@ -667,7 +667,7 @@ def subtitle_preview_frame(
 ) -> dict[str, str | float]:
     """Return the active phrase and its renderer-compatible karaoke sweep."""
     content = " ".join(str(text or "").split())
-    if not content:
+    if not content or not float(start_seconds) <= float(playhead_seconds) < float(end_seconds):
         return {"text": "", "karaokeProgress": 0.0}
     duration = max(0.01, float(end_seconds) - float(start_seconds))
     duration_centiseconds = max(1, round(duration * 100))
@@ -705,7 +705,7 @@ def subtitle_preview_frame_for_layout(
 ) -> dict[str, str | float]:
     """Return a preview frame using an already-resolved renderer layout."""
     content = " ".join(str(text or "").split())
-    if not content:
+    if not content or not float(start_seconds) <= float(playhead_seconds) < float(end_seconds):
         return {"text": "", "karaokeProgress": 0.0}
     duration = max(0.01, float(end_seconds) - float(start_seconds))
     duration_centiseconds = max(1, round(duration * 100))
@@ -782,9 +782,11 @@ def _write_positioned_ass(
     if region_layout and not cue_styles and not speech_durations:
         subtitles = _merge_contiguous_subtitles(subtitles)
     for subtitle in subtitles:
-        speech_seconds = max(0.1, min((subtitle.end - subtitle.start).total_seconds(),
-                                    (speech_durations or {}).get(subtitle.index,
-                                        (subtitle.end - subtitle.start).total_seconds())))
+        cue_seconds = max(0.0, (subtitle.end - subtitle.start).total_seconds())
+        # End presentation with the spoken clock; do not hold the fully gold
+        # last phrase through the rest of the editable/SRT timestamp window.
+        speech_seconds = min(cue_seconds, max(0.1,
+            (speech_durations or {}).get(subtitle.index, cue_seconds)))
         cue_style, cue_layout = (cue_styles or {}).get(
             subtitle.index,
             (subtitle_style, region_layout),
@@ -814,10 +816,10 @@ def _write_positioned_ass(
                 [part[2] for part in visual_parts],
                 speech_seconds,
             )
-            for part_index, ((start_time, end_time, content, font_size, scale_x), (units, durations)) in enumerate(zip(
+            for (start_time, end_time, content, font_size, scale_x), (units, durations) in zip(
                 visual_parts,
                 timelines,
-            )):
+            ):
                 if cue_style.uppercase:
                     units = [unit.upper() for unit in units]
                 karaoke = _karaoke_ass_from_units(units, durations)
@@ -832,13 +834,13 @@ def _write_positioned_ass(
                     f"\\fsp{cue_style.letter_spacing}"
                 )
                 lines.append(
-                    f"Dialogue: 0,{_ass_timestamp(start_time)},{_ass_timestamp(subtitle.end if part_index == len(visual_parts) - 1 else end_time)},Default,,0,0,0,,"
+                    f"Dialogue: 0,{_ass_timestamp(start_time)},{_ass_timestamp(end_time)},Default,,0,0,0,,"
                     f"{{\\an{alignment_tag}\\pos({x},{y})\\fs{font_size}\\fscx{scale_x}{inline_style}\\bord{cue_outline}"
                     f"\\shad{cue_style.shadow}}}{karaoke}"
                 )
         else:
             start_time = _ass_timestamp(subtitle.start)
-            end_time = _ass_timestamp(subtitle.end)
+            end_time = _ass_timestamp(subtitle.start + timedelta(seconds=speech_seconds))
             karaoke = _karaoke_ass_text(
                 subtitle.content.upper() if cue_style.uppercase else subtitle.content,
                 speech_seconds,

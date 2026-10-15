@@ -130,6 +130,16 @@ class VideoDownloadTests(unittest.TestCase):
 
         self.assertEqual(youtube_dl.call_count, 1)
 
+    def test_tiktok_classified_content_is_not_a_network_retry_or_assumed_adult(self):
+        error = RuntimeError("ERROR: [TikTok] 7682524686089014550: This post may not be comfortable "
+                             "for some audiences. Log in for access. Use --cookies for authentication")
+        self.assertFalse(video_download._is_retryable_download_error(error, "TikTok"))
+        message = video_download._friendly_error(error)
+        self.assertIn("yêu cầu đăng nhập", message)
+        self.assertIn("ẩn danh", message)
+        self.assertNotIn("18+", message)
+        self.assertNotIn("--cookies", message)
+
     def test_youtube_metadata_retries_a_temporary_dns_failure_with_fresh_session(self):
         first_downloader = mock.MagicMock()
         first_downloader.__enter__.return_value = first_downloader

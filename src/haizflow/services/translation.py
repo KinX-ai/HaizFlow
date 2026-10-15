@@ -73,6 +73,8 @@ def translate_segments(
     translation_model: str = "auto",
     checkpoint_path: str | None = None,
     validation_mode: str = "auto",
+    retain_checkpoint: bool = False,
+    checkpoint_key: str = "",
 ):
     from haizflow.services.gemini_translation import MODELS as GEMINI_MODELS
     from haizflow.services.gemini_translation import translate_texts
@@ -126,6 +128,7 @@ def translate_segments(
         "source_language": source_language, "target_language": target_language,
         "format": "sentence-translation-v1",
         "speech_length_policy": POLICY_VERSION,
+        "generation": checkpoint_key,
     }, len(segments))
     def save_valid_batch(indices, values):
         valid = [(index, value) for index, value in zip(indices, values)
@@ -298,7 +301,8 @@ def translate_segments(
             pass
         raise
     log_to_video(video_id, f"Saved translated segments to: {output_json_path}")
-    checkpoint.clear()
+    if not retain_checkpoint:
+        checkpoint.clear()
     return translated_segments
 
 

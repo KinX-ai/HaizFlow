@@ -66,6 +66,15 @@ def _get(video_id):
                 and isinstance(run.get("active_artifacts"), dict) and isinstance(run.get("files"), dict)
                 and isinstance(run.get("checkpoints"), dict) and isinstance(run.get("source_generation"), list)
                 and isinstance(run.get("temp_files"), list) and isinstance(run.get("tool"), str)):
+            # The journal batches clip updates for speed, but the immutable
+            # artifact manifest is committed for every publication. Recover
+            # only explicitly owned results, never infer ownership from all
+            # cache created since begin() (user edits can also publish cache).
+            manifest = manual_artifacts.load_manifest(video_id)
+            owned = [key for key, record in manifest["artifacts"].items()
+                     if isinstance(record, dict) and record.get("processing_run_id") == run["id"]
+                     and key not in run["baseline_ids"]]
+            run["created"] = list(dict.fromkeys([*run["created"], *owned]))
             run["running"] = False
             _RUNS[video_id] = run
             return run
@@ -253,6 +262,14 @@ def begin(video_id, *, resuming=False):
         return run
 
 
+def publication_owner(video_id, key):
+    """Stamp ownership in the same atomic manifest write as the new result."""
+    run = getattr(_CURRENT, "run", None)
+    if run and run["video_id"] == video_id and key not in run["baseline_ids"]:
+        return run["id"]
+    return ""
+
+
 def published(video_id, key):
     run = getattr(_CURRENT, "run", None)
     if run and run["video_id"] == video_id and key not in run["baseline_ids"] and key not in run["created"]:
@@ -281,6 +298,7 @@ def rollback(run, *, defer_cache_cleanup=False):
     """Never remove baseline artifacts, input assets, or outputs of later runs."""
     video_id = run["video_id"]
     with _LOCK, manual_artifacts._manifest_lock(video_id), managed_storage_guard:
+        run["discard"] = True
         video = video_store.get_video(video_id)
         if video is None or _source_identity(video) != tuple(run["source_generation"]):
             _drop(run)
@@ -322,7 +340,7 @@ def rollback(run, *, defer_cache_cleanup=False):
                 else:
                     references.pop(kind, None)
         files = dict(video.files or {})
-        created_directories = [manual_artifacts.artifact_directory(video_id, record["kind"], record["signature"])
+        created_directories = [manual_artifacts.artifact_directory(video_id, record["kind"], record["signature"]).resolve()
             for key, record in manifest["artifacts"].items() if key in created]
         generated_names = {"srt_output", "voice_output", "transcript_json", "final_video", "voice_parts_dir",
             "source_audio", "speech_audio", "background_audio", "source_segments", "ocr_region",
@@ -330,11 +348,11 @@ def rollback(run, *, defer_cache_cleanup=False):
         for name in generated_names:
             current = files.get(name)
             if (video.project_type == "manual" and isinstance(current, str) and current
-                    and not any(Path(current).is_relative_to(directory) for directory in created_directories)):
+                    and not any(Path(current).resolve().is_relative_to(directory) for directory in created_directories)):
                 continue
             previous = run["files"].get(name)
             self_reference = isinstance(previous, str) and previous and any(
-                Path(previous).is_relative_to(directory) for directory in created_directories)
+                Path(previous).resolve().is_relative_to(directory) for directory in created_directories)
             if name in run["files"] and not self_reference:
                 files[name] = previous
             else:
@@ -375,6 +393,10 @@ def rollback(run, *, defer_cache_cleanup=False):
             return False
         fields = _validated_idle_fields(video, run.get("manual_idle_state"))
         if (video.project_type == "manual" and run.get("export_owned") and fields is not None
+                # Cleanup can finish while begin() prepares a different tool.
+                # Restore cache/files, but never replace that new request with
+                # the old export's idle UI snapshot.
+                and str(video.manual_target_tool or "") in {"", run["tool"]}
                 and _ARMED_EXPORTS.get(video_id) in {None, run["id"]}):
             video_store.update_video(video_id, **fields)
         _drop(run)
@@ -423,7 +445,13 @@ def retained_ids(video_id, video=None):
     video = video or (video_store.get_video(video_id) if run else None)
     if not run or not video or _source_identity(video) != tuple(run["source_generation"]):
         return set()
-    return {manual_artifacts.artifact_id(kind, signature) for kind, signature in _baseline_references(run).items()}
+    retained = {manual_artifacts.artifact_id(kind, signature) for kind, signature in _baseline_references(run).items()}
+    if not run.get("discard") and run.get("state") != "discarding":
+        # Completed sentence clips may not belong to an active TTS manifest
+        # yet. Pause/failed-provider retry must not lose them to opportunistic
+        # cache pruning just because the complete video is not ready.
+        retained.update(run["created"])
+    return retained
 
 
 def discard_pending(video_id, run_id):

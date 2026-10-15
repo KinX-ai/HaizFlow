@@ -46,8 +46,10 @@ class ProcessingLifecycleController:
                 title, message = gemini_key_notice(getattr(host, "_settings_language", "vi"))
                 host.appAlertRequested.emit(title, message, "warning")
                 return False
-        if video.status == "paused":
-            prepare_video_resume(video_id)
+        # Fresh retries and resumed jobs both start a new queue ownership
+        # interval. Only here may old stop flags be cleared; the worker must
+        # preserve requests received while it was queued/preparing models.
+        prepare_video_resume(video_id)
         video_store.update_video(
             video_id,
             status="pending",
@@ -213,8 +215,17 @@ class ProcessingLifecycleController:
                     raise RuntimeError(f"Model runtime validation failed: {runtime_probe_error}")
                 if getattr(host, "_model_setup_state", "ready") != "ready":
                     raise RuntimeError("Required models are not ready.")
-                with host._model_runtime_lock:
-                    pass
+                while not host._model_runtime_lock.acquire(timeout=0.2):
+                    if is_cancelled(video_id) or is_paused(video_id) or getattr(host, "_shutdown_started", False):
+                        return
+                host._model_runtime_lock.release()
+            # Model handoff/quiescing can take time. Refresh rather than
+            # replacing a Pause/Cancel with stale "processing" metadata.
+            if is_cancelled(video_id) or is_paused(video_id) or getattr(host, "_shutdown_started", False):
+                return
+            current_video = video_store.get_video(video_id)
+            if not current_video or current_video.status in {"paused", "cancelled"}:
+                return
             video_store.update_video(
                 video_id,
                 status="processing",
@@ -251,9 +262,13 @@ class ProcessingLifecycleController:
                 process_video_sync(video_id)
         except Exception as exc:
             if video_id not in host._deleted_video_ids:
-                message = f"Desktop worker failed before pipeline could start: {exc}"
-                video_store.log_to_video(video_id, message)
-                video_store.update_video(video_id, status="failed", error=str(exc), step="failed")
+                if is_cancelled(video_id) or is_paused(video_id):
+                    state = "paused" if is_paused(video_id) else "cancelled"
+                    video_store.update_video(video_id, status=state, error=None, step=state)
+                else:
+                    message = f"Desktop worker failed before pipeline could start: {exc}"
+                    video_store.log_to_video(video_id, message)
+                    video_store.update_video(video_id, status="failed", error=str(exc), step="failed")
         finally:
             from haizflow.services import processing_runs
 

@@ -106,8 +106,12 @@ def _release_windows_job(process: subprocess.Popen, *, force: bool = False) -> N
         pass
 
 
-def start_video(video_id: str):
+def start_video(video_id: str, *, preserve_stop_requests: bool = False):
     with _REGISTRY_LOCK:
+        # Queue ownership clears old flags before enqueue, not after a model
+        # wait. A newer Pause/Cancel must survive the handoff into the worker.
+        if preserve_stop_requests and (video_id in _cancelled_videos or video_id in _paused_videos):
+            raise RuntimeError("Video cancelled by user.")
         _cancelled_videos.discard(video_id)
         _paused_videos.discard(video_id)
         _active_processes[video_id] = []

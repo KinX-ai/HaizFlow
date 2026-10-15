@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import wraps
 from datetime import UTC, datetime
 from pathlib import Path
@@ -382,6 +382,11 @@ def publish(
         "size_bytes": total_size,
         "error": "",
     }
+    from haizflow.services.processing_runs import publication_owner, published
+
+    run_id = publication_owner(video_id, record["artifact_id"])
+    if run_id:
+        record["processing_run_id"] = run_id
     retired = None
     try:
         # Same order as cache maintenance: readers/GC cannot observe a new
@@ -411,8 +416,16 @@ def publish(
                         _replace_cache_directory(retired, final)
                         retired = None
                     raise
-            resolved_outputs = _validated_outputs(video_id, record)
+            validation_errors: list[str] = []
+            resolved_outputs = _validated_outputs(video_id, record, validation_errors=validation_errors)
             if resolved_outputs is None:
+                detail = "; ".join(validation_errors) or "No verified outputs"
+                message = f"Cache verification failed: kind={kind}, directory={final}, {detail}"
+                _LOG.error(message)
+                try:
+                    video_store.log_to_video(video_id, message, level="ERROR", component="CACHE")
+                except OSError:
+                    _LOG.warning("Could not write cache verification diagnostics", exc_info=True)
                 raise RuntimeError("Không thể xác minh cache vừa tạo. Hãy thử lại bước xử lý.")
             manifest = load_manifest(video_id)
             manifest["artifacts"][record["artifact_id"]] = record
@@ -422,8 +435,6 @@ def publish(
                 references = dict(getattr(video, "active_artifacts", {}) or {})
                 references[kind] = artifact_signature
                 video_store.update_video(video_id, active_artifacts=references)
-            from haizflow.services.processing_runs import published
-
             published(video_id, record["artifact_id"])
             return {**record, "resolved_outputs": resolved_outputs}
     finally:
@@ -434,25 +445,48 @@ def publish(
             _LOG.info("Manual cache retirement deferred: kind=%s", kind)
 
 
-def _validated_outputs(video_id: str, record: dict[str, Any]) -> dict[str, str] | None:
-    directory = artifact_directory(video_id, str(record.get("kind") or ""), str(record.get("signature") or ""))
+def _validated_outputs(
+    video_id: str, record: dict[str, Any], *, validation_errors: list[str] | None = None,
+) -> dict[str, str] | None:
+    # owned_path permits a mapped user-selected parent, but returns its lexical
+    # spelling. Compare children against the same physical root, not an alias
+    # against a resolved path. artifact_directory has already rejected redirects
+    # inside the managed owner; resolving here does not weaken that policy.
+    directory = artifact_directory(
+        video_id, str(record.get("kind") or ""), str(record.get("signature") or ""),
+    ).resolve()
+
+    def reject(reason: str, path: Path, error: Exception | None = None) -> None:
+        if validation_errors is not None:
+            os_error = error if isinstance(error, OSError) else getattr(error, "__cause__", None)
+            codes = (f", errno={os_error.errno}, winerror={getattr(os_error, 'winerror', None)}"
+                     if isinstance(os_error, OSError) else "")
+            validation_errors.append(f"{reason}{codes}; path_length={len(str(path))}, path={path}")
+
     marker_path = directory / "complete.json"
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        reject(f"Cannot read completion marker: {exc!r}", marker_path, exc)
+        return None
+    if not isinstance(marker, dict):
+        reject("Invalid completion marker", marker_path)
         return None
     marker_outputs = marker.get("outputs")
     if (not isinstance(marker_outputs, dict) or marker.get("kind") != record.get("kind")
             or marker.get("signature") != record.get("signature")):
+        reject("Completion marker does not match artifact", marker_path)
         return None
     resolved: dict[str, str] = {}
     for name, relative in (record.get("outputs") or {}).items():
         metadata = marker_outputs.get(name)
         try:
             candidate = owned_path(directory / str(relative), directory)
-        except ValueError:
+        except (OSError, ValueError) as exc:
+            reject(f"Cannot access owned output: {exc!r}", directory / str(relative), exc)
             return None
-        if not isinstance(metadata, dict) or not candidate.is_relative_to(directory.resolve()):
+        if not isinstance(metadata, dict) or not candidate.is_relative_to(directory):
+            reject("Missing output metadata or invalid containment", candidate)
             return None
         try:
             if not _has_expected_digest(
@@ -460,8 +494,17 @@ def _validated_outputs(video_id: str, record: dict[str, Any]) -> dict[str, str] 
                 int(metadata.get("size") or -1),
                 str(metadata.get("sha256") or ""),
             ):
+                # Include a real filesystem error when available. Previously a
+                # stat failure (long path, permissions, missing file) was hidden
+                # behind the same generic message as a checksum mismatch.
+                info = candidate.stat()
+                reject(
+                    f"Output size/checksum mismatch (actual_size={info.st_size}, expected_size={metadata.get('size')})",
+                    candidate,
+                )
                 return None
-        except OSError:
+        except (OSError, TypeError, ValueError) as exc:
+            reject(f"Cannot verify output: {exc!r}", candidate, exc)
             return None
         resolved[str(name)] = str(candidate)
     return resolved or None
@@ -522,7 +565,8 @@ def _peek_structure(video_id: str, kind: str, artifact_signature: str) -> dict[s
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         if (
-            marker.get("kind") != kind
+            not isinstance(marker, dict)
+            or marker.get("kind") != kind
             or marker.get("signature") != artifact_signature
             or not isinstance(marker.get("outputs"), dict)
         ):
@@ -669,8 +713,11 @@ def register_existing(
     inputs: Iterable[str] = (),
     config_fingerprint: str = "legacy",
     activate_artifact: bool = True,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> dict[str, Any] | None:
     """Copy a verified legacy output into the new immutable cache."""
+    if check_cancelled is not None:
+        check_cancelled()
     if not paths or any(file_state(path) is None for path in paths.values()):
         return None
     existing = resolve(video_id, kind, artifact_signature)
@@ -685,14 +732,28 @@ def register_existing(
             suffix = Path(source).suffix or ".bin"
             relative = f"{name}{suffix}"
             destination = staging / relative
-            try:
-                if kind == "export":
-                    shutil.copy2(source, destination)  # Independent from editable legacy output.
+            if kind == "export":
+                if check_cancelled is not None:
+                    # Long Auto renders must remain stoppable during their
+                    # final cache copy, not just while FFmpeg is encoding.
+                    with Path(source).open("rb") as incoming, destination.open("wb") as outgoing:
+                        while True:
+                            check_cancelled()
+                            block = incoming.read(1024 * 1024)
+                            if not block:
+                                break
+                            outgoing.write(block)
+                    shutil.copystat(source, destination)
                 else:
+                    shutil.copy2(source, destination)  # Independent from editable legacy output.
+            else:
+                try:
                     os.link(source, destination)
-            except OSError:
-                shutil.copy2(source, destination)
+                except OSError:
+                    shutil.copy2(source, destination)
             relatives[name] = relative
+        if check_cancelled is not None:
+            check_cancelled()
         return publish(
             video_id,
             kind,

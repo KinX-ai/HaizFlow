@@ -1254,10 +1254,26 @@ def transcribe(
     *,
     model_name: str = "small",
     device_preference: str | None = None,
+    checkpoint_path: str | None = None,
+    checkpoint_key: str = "",
 ):
     """Transcribe through WhisperX and align sentence timestamps per language."""
     global _WARM_ASR_MODEL, _WARM_DEVICE, _WARM_MODEL_NAME
     model_name = str(model_name or "small").strip().lower()
+    from haizflow.services.recognition_progress import RecognitionProgress
+    from haizflow.utils.atomic_file import atomic_json
+
+    checkpoint = RecognitionProgress(checkpoint_path, audio_path, model=model_name,
+                                     language=source_language, key=checkpoint_key) if checkpoint_path else None
+    check_cancellation(video_id)
+    if checkpoint and checkpoint.stage:
+        log_to_video(video_id, f"Resuming WhisperX after saved phase '{checkpoint.stage}' "
+                     f"({len(checkpoint.segments)} sentences); completed phases will not be repeated.")
+        if checkpoint.reached("complete"):
+            atomic_json(output_json_path, checkpoint.segments, indent=2)
+            if progress_callback:
+                progress_callback("saved", f"Prepared {len(checkpoint.segments)} timestamp-locked sentences")
+            return checkpoint.segments, checkpoint.language
     log_to_video(video_id, f"Initializing WhisperX with model '{model_name}'.")
     from haizflow.core.hardware import cpu_runtime_profile
 
@@ -1314,27 +1330,27 @@ def transcribe(
         if source_language != "auto":
             log_to_video(video_id, f"Ignoring legacy source language '{source_language}'; using automatic detection.")
 
-        log_to_video(video_id, "Running WhisperX batched transcription with automatic language detection.")
-        if progress_callback:
-            progress_callback("transcribing", "Transcribing speech")
-        result = _transcribe_with_vad_recovery(asr_model, audio, profile, device, video_id)
-        detected_language = result.get("language")
-        initial_segments = [
-            {
-                **segment,
-                "language": detected_language or "en",
-                "language_confidence": 1.0,
-            }
-            for segment in result.get("segments", [])
-            if segment.get("text", "").strip()
-        ]
+        if checkpoint and checkpoint.reached("transcribed"):
+            detected_language, initial_segments = checkpoint.language, checkpoint.segments
+        else:
+            log_to_video(video_id, "Running WhisperX batched transcription with automatic language detection.")
+            if progress_callback:
+                progress_callback("transcribing", "Transcribing speech")
+            result = _transcribe_with_vad_recovery(asr_model, audio, profile, device, video_id)
+            detected_language = result.get("language")
+            initial_segments = [
+                {**segment, "language": detected_language or "en", "language_confidence": 1.0}
+                for segment in result.get("segments", []) if segment.get("text", "").strip()
+            ]
+            if checkpoint and initial_segments:
+                checkpoint.save("transcribed", initial_segments, detected_language)
         if not initial_segments:
             raise RuntimeError("WhisperX did not return any speech segments.")
         log_to_video(video_id, f"Transcription completed. Primary detected language: '{detected_language}'.")
-        if progress_callback:
+        if progress_callback and not (checkpoint and checkpoint.reached("aligned")):
             progress_callback("transcribed", f"Detected {detected_language or 'unknown'} speech")
 
-        if detected_language in {"zh", "vi"}:
+        if detected_language in {"zh", "vi"} and not (checkpoint and checkpoint.reached("recognized")):
             initial_segments = _split_long_unaligned_speech(
                 asr_model, audio, initial_segments, profile.whisper_batch_size, video_id,
                 detected_language,
@@ -1342,32 +1358,34 @@ def transcribe(
             initial_segments = _recover_speech_without_vad(
                 asr_model, audio, initial_segments, detected_language, video_id,
             )
+        if checkpoint and not checkpoint.reached("recognized"):
+            checkpoint.save("recognized", initial_segments, detected_language)
 
         alignment_device = "cpu" if device == "cuda" and 0 < profile.total_vram_bytes < 5 * 1024**3 else device
-        sentence_segments = _align_segments_by_language(
-            audio,
-            initial_segments,
-            alignment_device,
-            video_id,
-            progress_callback=progress_callback,
-        )
+        if checkpoint and checkpoint.reached("aligned"):
+            sentence_segments = checkpoint.segments
+        else:
+            check_cancellation(video_id)
+            sentence_segments = _align_segments_by_language(
+                audio, initial_segments, alignment_device, video_id, progress_callback=progress_callback,
+            )
+            if checkpoint:
+                checkpoint.save("aligned", sentence_segments, detected_language)
         if progress_callback:
             progress_callback("segmenting", f"Prepared {len(sentence_segments)} complete sentences")
 
-        source_segments = _detect_segment_languages(
-            asr_model,
-            audio,
-            sentence_segments,
-            detected_language or "en",
-            video_id,
-        )
-        source_segments = _retranscribe_mixed_language_segments(
-            asr_model,
-            audio,
-            source_segments,
-            detected_language or "en",
-            video_id,
-        )
+        if checkpoint and checkpoint.reached("languages"):
+            source_segments = checkpoint.segments
+        else:
+            check_cancellation(video_id)
+            source_segments = _detect_segment_languages(
+                asr_model, audio, sentence_segments, detected_language or "en", video_id,
+            )
+            source_segments = _retranscribe_mixed_language_segments(
+                asr_model, audio, source_segments, detected_language or "en", video_id,
+            )
+            if checkpoint:
+                checkpoint.save("languages", source_segments, detected_language)
         has_language_switch = any(
             (segment.get("language") or detected_language or "en") != (detected_language or "en")
             for segment in source_segments
@@ -1421,6 +1439,9 @@ def transcribe(
                 "after mixed-language alignment.",
             )
         _validate_timestamp_invariants(output_segments, audio_duration)
+        if checkpoint:
+            checkpoint.save("complete", output_segments, detected_language)
+        check_cancellation(video_id)
         if progress_callback:
             progress_callback("detecting_languages", f"Validated {len(output_segments)} timed sentences")
         output_directory = os.path.dirname(os.path.abspath(output_json_path))

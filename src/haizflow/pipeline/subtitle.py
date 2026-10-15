@@ -122,6 +122,17 @@ def generate_srt(
     if not subtitles:
         raise RuntimeError("Subtitle generation produced no timed cues.")
 
+    content = srt.compose(subtitles)
+    try:
+        with open(output_srt_path, "r", encoding="utf-8") as existing:
+            if existing.read() == content:
+                # Resume recompiles speech-aligned captions before checking
+                # the render cache. Replacing identical bytes changes mtime
+                # and wrongly invalidates an otherwise complete long render.
+                log_to_video(video_id, f"Reusing unchanged subtitle cues: {output_srt_path}")
+                return
+    except (OSError, UnicodeError):
+        pass
     output_directory = os.path.dirname(os.path.abspath(output_srt_path))
     os.makedirs(output_directory, exist_ok=True)
     handle, temporary_path = tempfile.mkstemp(
@@ -131,7 +142,7 @@ def generate_srt(
     )
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as file:
-            file.write(srt.compose(subtitles))
+            file.write(content)
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary_path, output_srt_path)

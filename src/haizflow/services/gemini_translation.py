@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from urllib import error, request
 
-from haizflow.pipeline.process_registry import check_cancellation
+from haizflow.pipeline.process_registry import check_cancellation, is_paused
 from haizflow.config import RUNTIME_DATA_DIR
 from haizflow.services import secure_credentials
 from haizflow.services.video_store import log_to_video
@@ -305,7 +305,8 @@ def _request_chunk(
             )
             with request.urlopen(outgoing, timeout=90) as response:
                 answer = json.load(response)
-            check_cancellation(video_id)
+            # A valid response already paid for must reach the durable batch
+            # callback before honoring Pause. Never publish it as final here.
             return _parse_translations(answer, chunk)
         except error.HTTPError as exc:
             if video_id:
@@ -391,10 +392,15 @@ def translate_texts(
             source_language=source_language, target_language=target_language, video_id=video_id,
             speech_durations=speech_durations,
         )
+        # Pause preserves a just-received batch; Cancel must not write new
+        # progress into a workspace that is being discarded/deleted.
+        if not is_paused(video_id):
+            check_cancellation(video_id)
         for (index, _), value in zip(chunk, values):
             output[index] = value
         if result_callback:
             result_callback([index for index, _ in chunk], values)
+        check_cancellation(video_id)
         log_to_video(
             video_id, f"Gemini translated {chunk[-1][0] + 1} of {len(texts)} sentences.",
             component="TRANSLATE", level="INFO",

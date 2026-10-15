@@ -27,8 +27,9 @@ def _validate(path: Path, tree: bool) -> None:
             raise ValueError("Not a download/export temporary directory.")
         safe_tree(path)
     elif not (path.name.startswith(".haizflow-export-")
+              or path.name.startswith(".haizflow-download-") and path.name.endswith(".partial")
               or path.parent.name.startswith(".haizflow-segment-") and path.name == "segment.progress"):
-        raise ValueError("Not an export temporary file.")
+        raise ValueError("Not a download/export temporary file.")
 
 
 def _identity(path: Path, tree: bool) -> list:

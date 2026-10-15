@@ -84,7 +84,9 @@ class ChannelImportCoordinator(QObject):
         ]
         for session_id in finished:
             self._runner_threads.pop(session_id, None)
-            self._cancel_events.pop(session_id, None)
+            # The Qt completion may still be queued after its worker exits.
+            # Retain its stop token until another attempt replaces it, or a
+            # project is removed; otherwise a cancelled file can be imported.
 
     @Property(QObject, constant=True)
     def candidateModel(self):
@@ -672,11 +674,25 @@ class ChannelImportCoordinator(QObject):
                 if remaining <= 0:
                     break
                 thread.join(timeout=remaining)
-        return not any(thread.is_alive() for thread in self._runner_threads.values())
+        stopped = not any(thread.is_alive() for thread in self._runner_threads.values())
+        if stopped:
+            # No worker can still be writing these downloads. Importing files
+            # belong to the receiving import worker until complete_video().
+            for (session_id, remote_id), workspace in tuple(self._workspaces.items()):
+                session = self._sessions.get(session_id)
+                candidate = self._candidate_for(session, remote_id) if session else None
+                if candidate is not None and candidate.status == "importing":
+                    continue
+                self._handle_download_rejected(session_id, remote_id, "Channel import cancelled.", True)
+        return stopped
 
     def _handle_scan_resolved(self, session_id, payload):
         session = self._sessions.get(session_id)
         if not session:
+            return
+        cancellation = self._cancel_events.get(session_id)
+        if cancellation is not None and cancellation.is_set():
+            self._handle_scan_rejected(session_id, "Channel inspection cancelled.", True)
             return
         session.platform = str(payload.get("platform") or "")
         session.channel_name = str(payload.get("channel_name") or "")
@@ -712,6 +728,9 @@ class ChannelImportCoordinator(QObject):
     def _handle_download_progress(self, session_id, remote_video_id, progress, detail):
         session = self._sessions.get(session_id)
         if not session:
+            return
+        cancellation = self._cancel_events.get(session_id)
+        if cancellation is not None and cancellation.is_set():
             return
         if not remote_video_id:
             if session_id == self._active_session_id:

@@ -307,6 +307,23 @@ class ManualArtifactTests(unittest.TestCase):
         self.assertNotIn("translation:bad", manual_artifacts.load_manifest("manual-video")["artifacts"])
         manual_artifacts.assert_root_idle(self.root)
 
+    def test_export_registration_cancel_during_copy_preserves_source_and_no_cache(self):
+        source = self.root / "working-render.mp4"
+        source.write_bytes(b"render" * 400000)
+        checks = []
+        def stop():
+            checks.append(True)
+            if len(checks) == 4:
+                raise RuntimeError("Video cancelled by user.")
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            manual_artifacts.register_existing("manual-video", "export", "interrupted-copy", {"video": str(source)},
+                                               check_cancelled=stop)
+        self.assertEqual(source.stat().st_size, 2400000)
+        self.assertNotIn("export", self.video.active_artifacts)
+        self.assertIsNone(manual_artifacts.resolve("manual-video", "export", "interrupted-copy"))
+        manual_artifacts.assert_root_idle(self.root)
+        self.assertFalse(list(self.root.rglob(".partial-*")))
+
     def test_parallel_same_signature_publication_is_serialized(self):
         from concurrent.futures import ThreadPoolExecutor
 

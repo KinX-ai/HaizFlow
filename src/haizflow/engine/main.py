@@ -331,6 +331,8 @@ def run_file_request(request_path: Path) -> int:
                 str(payload["video_id"]),
                 progress_callback=progress,
                 model_name=str(payload.get("model_name") or "small"),
+                checkpoint_path=payload.get("checkpoint_path"),
+                checkpoint_key=str(payload.get("checkpoint_key") or ""),
             )
             result = {"segments": segments, "detected_language": language}
         elif operation == "speaker_identification":

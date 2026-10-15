@@ -199,9 +199,15 @@ def _recognize_for_translation(video, reporter, audio_path, output_path):
              "detecting_languages": 46, "saved": 48}.get(event, 24), "transcribing", detail,
         ),
         model_name=_execution_models(video)["speech_recognition_model"],
+        checkpoint_path=str(Path(output_path).with_name("recognition-progress.json")),
+        checkpoint_key=signature,
     )
     video.checkpoints["recognition_language"] = str(result[1] or "en")
     _mark_checkpoint(video, "recognition", signature)
+    try:
+        Path(output_path).with_name("recognition-progress.json").unlink(missing_ok=True)
+    except OSError:
+        log_to_video(video.video_id, "Published recognition; checkpoint cleanup deferred.")
     return result
 
 
@@ -566,7 +572,7 @@ def process_video_sync(
     # branch must never mask the original exception with UnboundLocalError.
     reporter = _reporter
     try:
-        start_video(video_id)
+        start_video(video_id, preserve_stop_requests=True)
         # A recovery re-enters this function with the existing reporter so
         # elapsed processing time remains the total time for the video.
         reporter = reporter or ProgressReporter(video_id)
@@ -1129,8 +1135,10 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
 
     completed_video = get_video(video_id) or video
     revision = render_revision(completed_video)
+    check_cancellation(video_id)
     managed = manual_artifacts.register_existing(
         video_id, "export", revision, {"video": final_video}, config_fingerprint=revision,
+        check_cancelled=lambda: check_cancellation(video_id),
     )
     if not managed:
         raise RuntimeError("Rendered video could not be published as a managed artifact.")
@@ -1142,6 +1150,7 @@ def _finish_after_translation(video, reporter, video_dir, original_audio_target,
         working.unlink(missing_ok=True)
     manual_artifacts.maintain(video_id)
 
+    check_cancellation(video_id)
     update_video(
         video_id,
         status="done",

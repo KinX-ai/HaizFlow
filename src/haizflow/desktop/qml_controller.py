@@ -4697,8 +4697,10 @@ class HaizFlowController(QObject):
             self._apply_setup_to_video(video, review_approved=True)
         if tool_id == "translation":
             from haizflow.services.translation_progress import clear_manual_progress
+            from haizflow.services.recognition_progress import clear_manual_progress as clear_recognition_progress
 
             clear_manual_progress(video.video_id)
+            clear_recognition_progress(video.video_id)
         if tool_id != "export" or restarting_paused_tool:
             if restarting_paused_tool or force_rerun:
                 prepare_manual_rerun(video.video_id, tool_id, force=True)

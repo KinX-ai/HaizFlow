@@ -103,6 +103,9 @@ _NETWORK_RETRY_ERROR_MARKERS = (
     "try again",
 )
 _NON_RETRYABLE_ERROR_MARKERS = (
+    "log in for access",
+    "requiring login for access",
+    "not be comfortable for some audiences",
     "video is private",
     "private video",
     "channel is private",
@@ -401,6 +404,13 @@ def _normalize_downloaded_audio(
 
 def _friendly_error(exc: Exception) -> str:
     raw_message = _ANSI_ESCAPE.sub("", str(exc)).strip()
+    lower = raw_message.lower()
+    if "tiktok" in lower and any(marker in lower for marker in (
+            "not be comfortable for some audiences", "requiring login for access")):
+        return (
+            "TikTok giới hạn quyền xem video này và yêu cầu đăng nhập. "
+            "Không thể tải bằng phiên ẩn danh. Hãy dùng tệp video đã tải hợp lệ hoặc chọn video khác."
+        )
     if "Douyin did not provide playable video data." in raw_message:
         from haizflow.services.douyin_video import ACCESS_MESSAGE
         return ACCESS_MESSAGE

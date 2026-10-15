@@ -14,6 +14,7 @@ from haizflow.config import HYMT2_MODEL_REVISION
 from haizflow.core.hardware import translation_model_signature_parts
 from haizflow.core.model_integrity import DEMUCS_MODEL_SIGNATURE
 from haizflow.core.processing_errors import describe_failure
+from haizflow.core.storage_ownership import owned_path
 from haizflow.pipeline.timing_contract import TIMING_SOURCE
 from haizflow.pipeline.tts import voice_selection_identity
 from haizflow.services import editor_documents, manual_artifacts, result_segments, video_store
@@ -104,6 +105,24 @@ def transcribe(*args, **kwargs):
     model_name = str(kwargs.get("model_name") or "small")
     context = recognition_context(model_name, processing_device_preference())
     model_name = context["model"]
+    checkpoint_path = kwargs.get("checkpoint_path")
+    if checkpoint_path:
+        from haizflow.pipeline.process_registry import check_cancellation
+        from haizflow.services.recognition_progress import RecognitionProgress
+        from haizflow.utils.atomic_file import atomic_json
+
+        checkpoint = RecognitionProgress(checkpoint_path, audio_path, model=model_name,
+            language=source_language, key=kwargs.get("checkpoint_key", ""))
+        if checkpoint.reached("complete"):
+            # A pause between worker completion and immutable publication must
+            # not even start/import another heavyweight Whisper engine.
+            check_cancellation(str(video_id))
+            atomic_json(output_json_path, checkpoint.segments, indent=2)
+            video_store.log_to_video(str(video_id), "Reusing completed recognition checkpoint; no ASR worker needed.",
+                                     component="WHISPERX", level="INFO")
+            if callback:
+                callback("saved", f"Prepared {len(checkpoint.segments)} timestamp-locked sentences")
+            return checkpoint.segments, checkpoint.language
     if context["device"] == "cpu":
         from haizflow.core.memory import require_cpu_memory
         from haizflow.services.external_engine import shared_external_engine_pool
@@ -124,6 +143,8 @@ def transcribe(*args, **kwargs):
             "source_language": source_language,
             "video_id": video_id,
             "model_name": model_name,
+            "checkpoint_path": kwargs.get("checkpoint_path"),
+            "checkpoint_key": kwargs.get("checkpoint_key", ""),
         },
         str(video_id),
         context=context,
@@ -1584,15 +1605,38 @@ def _run_separation(video, reporter) -> None:
             vocals, no_vocals = separate_audio(
                 source["resolved_outputs"]["audio"], str(staging / "tracks"), video.video_id
             )
+            # Demucs nests stems under model/audio-name directories. Those paths
+            # fit in staging but can exceed Windows MAX_PATH when .partial-*
+            # becomes a 64-character signature. Keep the immutable artifact flat;
+            # a same-volume rename costs no extra audio encode or copy.
+            stems = {
+                "vocals": owned_path(vocals, staging),
+                "no_vocals": owned_path(no_vocals, staging),
+            }
+            if len(set(stems.values())) != 2 or any(
+                not path.is_file() or path.stat().st_size <= 44 for path in stems.values()
+            ):
+                raise RuntimeError("Kết quả tách giọng bị thiếu hoặc không hợp lệ.")
+            for name, path in stems.items():
+                destination = owned_path(staging / f"{name}.wav", staging)
+                if path != destination:
+                    os.replace(path, destination)
+            # Do not promote the now-empty long engine directory names either:
+            # Windows must also be able to traverse/remove the final cache tree.
+            for path in stems.values():
+                parent = path.parent
+                while parent != staging:
+                    try:
+                        parent.rmdir()  # Empty producer-owned directories only.
+                    except OSError:
+                        break
+                    parent = parent.parent
             cached = manual_artifacts.publish(
                 video.video_id,
                 "separation",
                 expected,
                 staging,
-                {
-                    "vocals": str(Path(vocals).relative_to(staging)),
-                    "no_vocals": str(Path(no_vocals).relative_to(staging)),
-                },
+                {"vocals": "vocals.wav", "no_vocals": "no_vocals.wav"},
                 inputs=[source["artifact_id"]],
                 config_fingerprint=DEMUCS_MODEL_SIGNATURE,
             )
@@ -1648,6 +1692,8 @@ def _run_recognition(video, reporter) -> None:
 
             clear_runtime()
             reporter.update(5, "manual_recognition", "Đang nhận dạng lời thoại")
+            from haizflow.services.recognition_progress import manual_progress_path as recognition_progress_path
+
             transcribe(
                 audio_path,
                 str(staging / "source-segments.json"),
@@ -1655,6 +1701,8 @@ def _run_recognition(video, reporter) -> None:
                 video.video_id,
                 progress_callback=lambda _event, detail: reporter.update(30, "manual_recognition", detail),
                 model_name=getattr(video, "speech_recognition_model", "small"),
+                checkpoint_path=str(recognition_progress_path(video.video_id)),
+                checkpoint_key=expected,
             )
             cached = manual_artifacts.publish(
                 video.video_id,
@@ -1672,6 +1720,12 @@ def _run_recognition(video, reporter) -> None:
     else:
         manual_artifacts.activate(video.video_id, "recognition", expected)
     _update_files(video.video_id, source_segments=cached["resolved_outputs"]["segments"])
+    from haizflow.services.recognition_progress import clear_manual_progress as clear_recognition_progress
+
+    try:
+        clear_recognition_progress(video.video_id)
+    except OSError:
+        video_store.log_to_video(video.video_id, "Published recognition; checkpoint cleanup deferred.")
 
 
 def _run_translation(video, reporter) -> None:
@@ -1719,7 +1773,9 @@ def _run_translation(video, reporter) -> None:
                 provider="gemini" if str(getattr(video, "translation_model", "")).startswith("gemini-") else "hymt2",
                 translation_model=getattr(video, "translation_model", "auto"),
                 checkpoint_path=str(manual_progress_path(video.video_id)),
+                checkpoint_key=expected,
                 validation_mode="manual",
+                retain_checkpoint=True,
                 progress_callback=lambda current, total, detail: reporter.update(
                     5 + round(90 * current / max(1, total)), "manual_translation", detail, current, total
                 ),
@@ -1735,6 +1791,15 @@ def _run_translation(video, reporter) -> None:
                     getattr(video, "target_language", "vi"), HYMT2_MODEL_REVISION
                 ),
             )
+            # Do not drop completed batches while their final file still lives
+            # in disposable staging. Pause at the publication boundary must
+            # resume without another provider request.
+            from haizflow.services.translation_progress import clear_manual_progress
+
+            try:
+                clear_manual_progress(video.video_id)
+            except OSError:
+                video_store.log_to_video(video.video_id, "Published translation; checkpoint cleanup deferred.")
         finally:
             manual_artifacts.discard_staging_directory(staging)
     else:
@@ -2672,7 +2737,7 @@ def run_manual_tool_sync(video_id: str, tool_id: str) -> None:
     requested_kind = ""
     requested_signature = ""
     try:
-        start_video(video_id)
+        start_video(video_id, preserve_stop_requests=True)
         reporter = ProgressReporter(video_id)
         video = video_store.get_video(video_id)
         if not video or video.project_type != "manual":
@@ -2702,6 +2767,11 @@ def run_manual_tool_sync(video_id: str, tool_id: str) -> None:
         )
         video_store.log_to_video(video_id, f"Manual tool started: {tool_id}.", component="MANUAL")
         _RUNNERS[tool_id](video, reporter)
+        # A final publication may complete at the same instant as Pause. Keep
+        # its good artifact, but do not overwrite the acknowledged stop state.
+        from haizflow.pipeline.process_registry import check_cancellation
+
+        check_cancellation(video_id)
         refreshed = video_store.get_video(video_id) or video
         final = tool_id == "export"
         video_store.update_video(

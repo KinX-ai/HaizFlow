@@ -1,18 +1,17 @@
 import re
 import subprocess
-from pathlib import Path
 from haizflow.desktop.subtitle_overlay_renderer import export_events
 from haizflow.pipeline.render import _subtitle_patch_prefix
 from haizflow.utils.ffmpeg import _binary
 
 
-def test_karaoke_tracks_speech_duration_but_keeps_caption_window(tmp_path):
+def test_karaoke_disappears_at_speech_end_without_changing_editable_window(tmp_path):
     segment = dict(segment_id='long', start=10, end=18, _speech_end=12,
                    text='Xin chào bạn tôi đang nói một câu khá dài')
     layout = dict(outputWidth=1280, outputHeight=720, layoutWidth=900, layoutHeight=120,
                   fontSize=40, outline=2, positionXPercent=50, positionYPercent=80)
     _, events = export_events([segment], layout, True, tmp_path)
-    assert events[0]['start'] == 10 and events[-1]['end'] == 18
+    assert events[0]['start'] == 10 and events[-1]['end'] == 12
     assert sum(int(n) for event in events for n in re.findall(r'\\kf(\d+)', event['body'])) == 200
     assert segment['end'] == 18
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import errno
 import json
 import logging
-import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -75,11 +76,15 @@ class MediaDownloadController(QObject):
         self._checkpoint_timer.timeout.connect(self.flush_checkpoint)
         self._audio_source = ""
         self._state = "idle"
+        self._shutdown_started = False
         self._status = ""
         self._progress_value = 0
         self._cancel = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self._output_file_lock = threading.Lock()
+        self._save_workers_lock = threading.Lock()
+        self._save_workers: set[threading.Thread] = set()
+        self._save_results: dict[tuple[str, str], tuple[bool, str]] = {}
         self._pending_tasks = deque()
         self._active_task: dict | None = None
         self._channel_starting = False
@@ -626,6 +631,8 @@ class MediaDownloadController(QObject):
         )
 
     def _enqueue(self, task: dict) -> None:
+        if self._shutdown_started:
+            return
         task.setdefault("project_key", self._project_key)
         self._pending_tasks.append(task)
         self._status = f"Queued {task['label']}"
@@ -641,7 +648,7 @@ class MediaDownloadController(QObject):
         self._start_next()
 
     def _start_next(self) -> None:
-        if self._active_task or not self._pending_tasks:
+        if self._shutdown_started or self._active_task or not self._pending_tasks:
             return
         self._active_task = self._pending_tasks.popleft()
         task = self._active_task
@@ -810,12 +817,48 @@ class MediaDownloadController(QObject):
             index += 1
         return candidate
 
-    def _move_to_unique_path(self, source: Path, requested: Path) -> Path:
-        """Choose and claim a destination while concurrent channel saves are serialized."""
-
+    def _move_to_unique_path(self, source: Path, requested: Path, *, cancel_event=None) -> Path:
+        """Commit one complete download; cross-volume copies remain cancellable."""
+        cancellation = self._cancel if cancel_event is None else cancel_event
+        def check():
+            if self._shutdown_started or cancellation.is_set():
+                raise DownloadCancelled("Download cancelled.")
         with self._output_file_lock:
+            check()  # A channel save may have waited behind another large file.
             destination = self._unique_path(requested)
-            shutil.move(str(source), str(destination))
+            try:
+                os.rename(source, destination)
+                return destination
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+            # Never copy directly onto the visible final name. Cancel/failure
+            # removes only this owned temporary file, preserving older output.
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".haizflow-download-", suffix=".partial", dir=destination.parent)
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as outgoing, source.open("rb") as incoming:
+                    while True:
+                        check()
+                        data = incoming.read(1024 * 1024)
+                        check()
+                        if not data:
+                            break
+                        outgoing.write(data)
+                    outgoing.flush()
+                    os.fsync(outgoing.fileno())
+                check()
+                os.rename(temporary, destination)
+            finally:
+                from haizflow.services.temporary_cleanup import discard_file
+
+                discard_file(temporary)
+            # Final rename commits success. The owning workspace cleanup can
+            # retry source removal if Windows briefly holds the old file open.
+            try:
+                source.unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).info("Completed download source cleanup deferred: %s", source)
             return destination
 
     def _reject(self, message):
@@ -824,6 +867,8 @@ class MediaDownloadController(QObject):
         self.changed.emit()
 
     def _set_progress(self, progress, detail):
+        if self._shutdown_started:
+            return
         self._progress_value = progress
         self._status = detail
         self.changed.emit()
@@ -833,10 +878,12 @@ class MediaDownloadController(QObject):
         self._finish_active(f"Saved to {destination}")
 
     def _set_failed(self, message):
-        self._finish_active(message)
+        self._finish_active(message, "idle" if self._cancel.is_set() else "error")
 
     def _finish_active(self, status: str, state: str | None = None) -> None:
         self._active_task = None
+        if self._shutdown_started:
+            return
         self._state = state or ("done" if status.startswith("Saved to ") else "error")
         self._status = str(status)
         self.changed.emit()
@@ -861,30 +908,64 @@ class MediaDownloadController(QObject):
         remote_id = str(candidate.get("remote_video_id") or "")
         source = Path(str(path or ""))
         output = Path(self._active_channel_output_directory)
+        session_id = str(session_id)
+        if self._shutdown_started:
+            self._channel_importer.complete_video(session_id, remote_id, False, "Download cancelled.")
+            return
+        cancellation = self._channel_importer._cancel_events.get(session_id, threading.Event())
 
         def move_file() -> None:
+            success, message = False, ""
             try:
                 if not source.is_file():
                     raise RuntimeError("The channel video download was not found.")
                 output.mkdir(parents=True, exist_ok=True)
-                self._move_to_unique_path(source, output / source.name)
-                self._channel_file_saved.emit(str(session_id), remote_id, True, "")
+                self._move_to_unique_path(source, output / source.name, cancel_event=cancellation)
+                success = True
             except Exception as exc:
-                self._channel_file_saved.emit(str(session_id), remote_id, False, str(exc))
+                message = str(exc)
+            finally:
+                with self._save_workers_lock:
+                    self._save_results[(session_id, remote_id)] = (success, message)
+                self._channel_file_saved.emit(session_id, remote_id, success, message)
+                with self._save_workers_lock:
+                    self._save_workers.discard(threading.current_thread())
 
-        threading.Thread(target=move_file, name="save-channel-download", daemon=True).start()
+        worker = threading.Thread(target=move_file, name="save-channel-download", daemon=True)
+        with self._save_workers_lock:
+            self._save_workers.add(worker)
+        worker.start()
 
     def _finish_channel_file_save(self, session_id: str, remote_id: str, success: bool, message: str) -> None:
+        with self._save_workers_lock:
+            result = self._save_results.pop((session_id, remote_id), None)
+        if result is None:
+            return  # Already consumed during shutdown before its Qt callback.
+        success, message = result
         self._channel_importer.complete_video(session_id, remote_id, success, message)
 
     def shutdown(self, timeout_seconds: float = 5.0) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        remaining = lambda: max(0.0, deadline - time.monotonic())
+        self._shutdown_started = True
+        self._pending_tasks.clear()
         self.flush_checkpoint()
         self._restoring_workspace = True
         self._cancel.set()
-        channel_stopped = self._channel_importer.shutdown(timeout_seconds)
-        preview_stopped = self._video_preview.shutdown(timeout_seconds)
-        audio_preview_stopped = self._audio_preview.shutdown(timeout_seconds)
+        channel_stopped = self._channel_importer.shutdown(remaining())
+        preview_stopped = self._video_preview.shutdown(remaining())
+        audio_preview_stopped = self._audio_preview.shutdown(remaining())
         worker = self._worker_thread
         if worker and worker.is_alive():
-            worker.join(timeout=max(0.0, timeout_seconds))
-        return channel_stopped and preview_stopped and audio_preview_stopped and not (worker and worker.is_alive())
+            worker.join(timeout=remaining())
+        with self._save_workers_lock:
+            saves = tuple(self._save_workers)
+        for save in saves:
+            if save.is_alive():
+                save.join(timeout=remaining())
+        with self._save_workers_lock:
+            receipts = dict(self._save_results)
+        for (session_id, remote_id), result in receipts.items():
+            self._finish_channel_file_save(session_id, remote_id, *result)
+        return (channel_stopped and preview_stopped and audio_preview_stopped
+                and not (worker and worker.is_alive()) and not any(save.is_alive() for save in saves))

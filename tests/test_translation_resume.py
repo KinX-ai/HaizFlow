@@ -150,3 +150,139 @@ def test_auto_resume_does_not_repeat_recognition_before_resuming_translation(tmp
         second = process_video._recognize_for_translation(video, Mock(), "audio.wav", str(output))
     assert first == second
     assert asr.call_count == 1
+
+
+def test_completed_translation_survives_discarded_staging_until_caller_publishes(tmp_path):
+    source, output, progress = (tmp_path / name for name in ("source.json", "stage.json", "progress.json"))
+    source.write_text(json.dumps([{"start": 0, "end": 1, "text": "Hello friend", "language": "en"}]))
+    with (patch.object(translation, "log_to_video"),
+          patch.object(translation, "_translate_with_hymt2_worker", return_value=["Chào bạn"]) as worker):
+        first = translation.translate_segments(str(source), str(output), "fixture",
+                    checkpoint_path=str(progress), retain_checkpoint=True)
+        assert progress.exists()
+        output.unlink()  # Pause after final JSON, before immutable publication
+        second = translation.translate_segments(str(source), str(output), "fixture",
+                    checkpoint_path=str(progress), retain_checkpoint=True)
+    assert first == second
+    assert worker.call_count == 1
+
+
+def test_gemini_pause_during_received_response_saves_batch_before_stopping(tmp_path):
+    source, output, progress = (tmp_path / name for name in ("source.json", "stage.json", "progress.json"))
+    source.write_text(json.dumps([{"start": 0, "end": 1, "text": "Hello friend", "language": "en"}]))
+    paused = False
+    def check(_video):
+        if paused:
+            raise RuntimeError("Video cancelled by user.")
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self, *_args):
+            nonlocal paused
+            paused = True
+            return json.dumps({"candidates": [{"finishReason": "STOP", "content": {"parts": [
+                {"text": json.dumps({"translations": [{"id": 0, "text": "Chào bạn"}]})}
+            ]}}]}).encode()
+    with (patch.object(translation, "log_to_video"), patch.object(gemini_translation, "log_to_video"),
+          patch.object(translation, "check_cancellation", side_effect=check),
+          patch.object(gemini_translation, "check_cancellation", side_effect=check),
+          patch.object(gemini_translation, "is_paused", side_effect=lambda _: paused),
+          patch.object(gemini_translation, "active_key", return_value="fixture"),
+          patch.object(gemini_translation.request, "urlopen", return_value=Response()) as request):
+        with pytest.raises(RuntimeError, match="cancelled"):
+            translation.translate_segments(str(source), str(output), "fixture", provider="gemini",
+                translation_model="gemini-3.1-flash-lite", checkpoint_path=str(progress))
+        assert not output.exists()
+        assert json.loads(progress.read_text())["translations"] == ["Chào bạn"]
+        paused = False
+        translation.translate_segments(str(source), str(output), "fixture", provider="gemini",
+            translation_model="gemini-3.1-flash-lite", checkpoint_path=str(progress))
+        assert request.call_count == 1
+
+
+def test_gemini_cancel_does_not_save_late_response_or_start_another_batch():
+    cancelled = False
+    def check(_video):
+        if cancelled:
+            raise RuntimeError("Video cancelled by user.")
+    def send(*_args, **_kwargs):
+        nonlocal cancelled
+        cancelled = True
+        return ["Chào bạn"]
+    saved = Mock()
+    with (patch.object(gemini_translation, "check_cancellation", side_effect=check),
+          patch.object(gemini_translation, "is_paused", return_value=False),
+          patch.object(gemini_translation, "active_key", return_value="fixture"),
+          patch.object(gemini_translation, "log_to_video"),
+          patch.object(gemini_translation, "_request_chunk", side_effect=send) as request):
+        with pytest.raises(RuntimeError, match="cancelled"):
+            gemini_translation.translate_texts(["Hello"], model="gemini-3.1-flash-lite",
+                source_language="English", target_language="Vietnamese", video_id="fixture", result_callback=saved)
+    saved.assert_not_called()
+    assert request.call_count == 1
+
+
+def test_hymt2_progress_is_saved_before_pause_callback(tmp_path):
+    progress = TranslationProgress(tmp_path / "progress.json", {}, 2)
+    process = Mock()
+    process.stdin = io.StringIO()
+    process.poll.return_value = None
+    output = queue.Queue()
+    output.put(json.dumps({"event": "progress", "current": 1, "total": 2,
+                           "indices": [0], "translations": ["Chào bạn"]}))
+    with (patch.object(translation, "_ensure_hymt2_worker", return_value=(process, output)),
+          patch.object(translation, "register_process"), patch.object(translation, "unregister_process"),
+          patch.object(translation, "_terminate_hymt2_worker"), patch.object(translation, "log_to_video")):
+        with pytest.raises(RuntimeError, match="paused"):
+            translation._translate_with_hymt2_worker(["Hello", "Bye"], video_id="fixture",
+                source_languages=["English", "English"], target_language_name="Vietnamese",
+                result_callback=progress.save_batch,
+                progress_callback=Mock(side_effect=RuntimeError("paused")))
+    assert TranslationProgress(progress.path, {}, 2).values == ["Chào bạn", None]
+
+
+def test_manual_translation_pause_at_publication_reuses_completed_batches(tmp_path):
+    from haizflow.pipeline import manual_tools
+    from haizflow.services import translation_progress
+
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps([{"start": 0, "end": 1, "text": "Hello friend", "language": "en"}]))
+    checkpoint = tmp_path / "translation-progress.json"
+    stages = [tmp_path / "stage-1", tmp_path / "stage-2"]
+    for path in stages:
+        path.mkdir()
+    recognition = {"artifact_id": "recognition:fixture", "resolved_outputs": {"segments": str(source)}}
+    video = SimpleNamespace(video_id="fixture", target_language="vi", translation_model="auto", files={})
+    with (patch.object(manual_tools, "recognition_signature", return_value="recognition"),
+          patch.object(manual_tools, "translation_signature", return_value="generation-1"),
+          patch.object(manual_tools.manual_artifacts, "resolve",
+                       side_effect=lambda _id, kind, _sig: recognition if kind == "recognition" else None),
+          patch.object(manual_tools.manual_artifacts, "create_staging_directory", side_effect=stages),
+          patch.object(manual_tools.manual_artifacts, "publish", side_effect=[RuntimeError("paused"), recognition]),
+          patch.object(manual_tools, "_release_recognition_runtime"),
+          patch("haizflow.pipeline.omnivoice_tts.clear_runtime"),
+          patch("haizflow.core.hardware.processing_device_preference", return_value="gpu"),
+          patch.object(manual_tools, "_replace_subtitles_from_translation"),
+          patch.object(translation_progress, "manual_progress_path", return_value=checkpoint),
+          patch.object(translation, "log_to_video"),
+          patch.object(translation, "_translate_with_hymt2_worker", return_value=["Chào bạn"]) as worker):
+        with pytest.raises(RuntimeError, match="paused"):
+            manual_tools._run_translation(video, Mock())
+        assert checkpoint.exists()
+        assert not stages[0].exists()
+        manual_tools._run_translation(video, Mock())
+        assert worker.call_count == 1
+        assert not checkpoint.exists()
+
+
+def test_explicit_translation_generation_never_reuses_identical_old_text(tmp_path):
+    source, output, progress = (tmp_path / name for name in ("source.json", "stage.json", "progress.json"))
+    source.write_text(json.dumps([{"start": 0, "end": 1, "text": "Hello friend", "language": "en"}]))
+    with (patch.object(translation, "log_to_video"),
+          patch.object(translation, "_translate_with_hymt2_worker", return_value=["Chào bạn"]) as worker):
+        for key in ("generation-1", "generation-2"):
+            translation.translate_segments(str(source), str(output), "fixture", checkpoint_path=str(progress),
+                                           retain_checkpoint=True, checkpoint_key=key)
+        assert worker.call_count == 2
