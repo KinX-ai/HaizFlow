@@ -1,6 +1,7 @@
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -106,6 +107,12 @@ class QmlMenuTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QGuiApplication.instance() or QGuiApplication([])
+        # These tests exercise controls, not project recovery. A QML singleton
+        # must not launch an all-project migration against synthetic workspaces
+        # accumulated by earlier backend tests while the GUI pumps events.
+        maintenance = patch("haizflow.desktop.qml_controller.HaizFlowController._start_startup_maintenance")
+        maintenance.start()
+        cls.addClassCleanup(maintenance.stop)
 
     def test_status_strip_tracks_independent_segment_export_and_returns_to_ready(self):
         source = (QML_DIR / "Main.qml").read_text(encoding="utf-8")
