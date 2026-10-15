@@ -3,28 +3,28 @@
   "protocol_version": 1,
   "packs": {
     "engine-cpu-py313": {
-      "version": "14",
-      "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v1.0.0/engine-cpu-py313-14.zip",
-      "sha256": "26274cf451e2ca95469c3ea649a1ad22c9f151c811fcef19c78c07fbc52916de",
-      "download_size": 357555775,
-      "installed_size": 879743012
+      "version": "15",
+      "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v1.0.1/engine-cpu-py313-15.zip",
+      "sha256": "32d059345affdfa8342ae21d7698ae89e73ecb5fc0755e29a72aafae7cd1a804",
+      "download_size": 357873929,
+      "installed_size": 880059161
     },
     "engine-cuda128-py313": {
-      "version": "16",
+      "version": "17",
       "url": "",
-      "sha256": "18642214de226920584217cc48161bafe85e11fd45805190e849956855792ecb",
-      "download_size": 3196276168,
-      "installed_size": 5097953352,
+      "sha256": "2b9a6d7f7dbcffa17db9a8fb4323f9ea10d8a8edb309138ee260b50fa10c521e",
+      "download_size": 3196593399,
+      "installed_size": 5098269501,
       "parts": [
         {
-          "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v1.0.0/engine-cuda128-py313-16.zip.001",
+          "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v1.0.1/engine-cuda128-py313-17.zip.001",
           "size": 1610612736,
-          "sha256": "d95137851b87d5a10f7c10ef9885062fd1cb4ce5cf31db58dfc0b9d11a9ffd8d"
+          "sha256": "4fd8897ad4d233f763aca39416a013a0e8de429f88f3a7a85d1a94d8699db63e"
         },
         {
-          "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v1.0.0/engine-cuda128-py313-16.zip.002",
-          "size": 1585663432,
-          "sha256": "14cd6661abedf6e86bee0d281a117361f490bbc6691db5228f8d7f7be92647b3"
+          "url": "https://github.com/MachHongHai/HaizFlow/releases/download/v1.0.1/engine-cuda128-py313-17.zip.002",
+          "size": 1585980663,
+          "sha256": "0f5f66e424a7e395d94a8a279ef2b28ed6705d8e412863b3ede3e411d2e93b3e"
         }
       ]
     },
