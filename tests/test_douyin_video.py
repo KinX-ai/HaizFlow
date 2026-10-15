@@ -72,5 +72,14 @@ def test_public_hydration_only_accepts_matching_video_and_never_executes_js():
 def test_other_sources_keep_their_existing_extractor(url, download):
     downloader = Mock()
     _extract_video_info(downloader, url, download=download)
-    downloader.add_info_extractor.assert_not_called()
+    if "bilibili.com" in url:
+        # Bilibili now retains advertised backup CDN URLs through its own
+        # extractor. This must still never install the Douyin adapter.
+        from haizflow.services.bilibili_video import HaizFlowBiliBiliIE
+
+        downloader.add_info_extractor.assert_called_once()
+        assert isinstance(downloader.add_info_extractor.call_args.args[0], HaizFlowBiliBiliIE)
+        assert not isinstance(downloader.add_info_extractor.call_args.args[0], HaizFlowDouyinIE)
+    else:
+        downloader.add_info_extractor.assert_not_called()
     downloader.extract_info.assert_called_once_with(url, download=download)
